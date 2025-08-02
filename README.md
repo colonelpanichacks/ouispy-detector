@@ -1,4 +1,4 @@
-# OUI-SPY - BLE Device Detector
+# OUI-SPY - Detector
 
 Professional BLE scanning system that detects specific devices by MAC address or OUI with audio feedback.
 
