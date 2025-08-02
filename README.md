@@ -1,5 +1,7 @@
 # OUI-SPY - Detector
 
+![OUI-SPY](ouispy.png)
+
 Professional BLE scanning system that detects specific devices by MAC address or OUI with audio feedback.
 
 ## Hardware
