@@ -13,6 +13,11 @@ Professional BLE scanning system that detects specific devices by MAC address or
 
 **Alternative:** Standard ESP32-S3 with external buzzer on GPIO3
 
+**Enhanced Version:** Same firmware, add NeoPixel LED for visual feedback
+- Buzzer: GPIO3 (D2)
+- NeoPixel: GPIO4 (D3)
+- **Note:** One firmware supports both configurations automatically
+
 ## Quick Start
 
 1. **Power on device** - Creates WiFi AP `snoopuntothem` (password: `astheysnoopuntous`)
@@ -28,10 +33,10 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - Persistent configuration storage
 - Automatic timeout handling
 
-### Audio Feedback
-- 2 ascending beeps: Ready to scan
-- 3 beeps: New device detected
-- 2 beeps: Known device re-detected (5+ seconds)
+### Audio & Visual Feedback
+- **Audio:** 2 ascending beeps (ready), 3 beeps (detection), 2 beeps (re-detection)
+- **Visual:** Pink breathing LED during scanning, blue-pink-purple flash on detection
+- **Synchronized:** LED flashes match beep timing perfectly
 - Smart cooldown prevents spam
 
 ### Privacy
@@ -51,6 +56,7 @@ python3 -m platformio run --target upload
 - NimBLE-Arduino ^1.4.0
 - ESP Async WebServer ^3.0.6
 - Preferences ^2.0.0
+- Adafruit NeoPixel ^1.12.0 (for LED functionality)
 
 ## Configuration
 
@@ -61,6 +67,28 @@ Access via `http://192.168.4.1` after connecting to `snoopuntothem` AP:
 **MAC Addresses:** `AA:BB:CC:12:34:56` (specific devices)
 
 Multiple entries supported (one per line).
+
+## NeoPixel Wiring (Optional Enhancement)
+
+### Hardware Requirements
+- Adafruit NeoPixel (WS2812B) or compatible LED
+- ESP32-S3 board (Seeed Xiao ESP32-S3 recommended)
+- **Same firmware works with or without NeoPixel**
+
+### Wiring Diagram
+```
+ESP32-S3 Xiao    →    NeoPixel
+─────────────────────────────────
+GPIO4 (D3)       →    Data Input (DIN)
+3.3V             →    VCC (Power)
+GND              →    GND (Ground)
+```
+
+### LED Behavior
+- **Normal Scanning:** Pink breathing animation (smooth brightness fade)
+- **Detection:** Blue → Pink → Purple → Blue flash sequence
+- **Synchronization:** LED flashes perfectly match buzzer beep timing
+- **Brightness:** Normal (50/255), Detection (200/255)
 
 ### Filter Types
 - **OUI:** First 3 bytes (manufacturer prefix)
@@ -103,6 +131,7 @@ Filter matched: OUI
 **No WiFi AP:** Wait 30 seconds after power-on
 **No web portal:** Ensure connected to `snoopuntothem`, disable mobile data
 **No audio:** Check buzzer connection (GPIO3)
+**No LED:** Check NeoPixel wiring (GPIO4, 3.3V, GND)
 **No detection:** Verify target device is advertising BLE
 
 ## Technical Specifications
@@ -112,6 +141,8 @@ Filter matched: OUI
 - **Range:** 10-30 meters (typical)
 - **Storage:** NVS flash memory
 - **Processing:** Dual-core optimization
+- **Audio:** GPIO3 buzzer with PWM control
+- **Visual:** GPIO4 NeoPixel with synchronized animations
 
 ## License
 

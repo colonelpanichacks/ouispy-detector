@@ -12,6 +12,7 @@
 #include <nvs_flash.h>
 #include <vector>
 #include <algorithm>
+#include <Adafruit_NeoPixel.h>
 
 // ================================
 // Pin and Buzzer Definitions - Xiao ESP32 S3
@@ -21,6 +22,22 @@
 #define BUZZER_DUTY 127  // 50% duty cycle for good volume without excessive power draw
 #define BEEP_DURATION 200  // Duration of each beep in ms
 #define BEEP_PAUSE 150  // Pause between beeps in ms
+
+// ================================
+// NeoPixel Definitions - Xiao ESP32 S3
+// ================================
+#define NEOPIXEL_PIN 4   // GPIO4 (D3) for NeoPixel - confirmed safe pin on Xiao ESP32 S3
+#define NEOPIXEL_COUNT 1 // Number of NeoPixels (1 for single pixel)
+#define NEOPIXEL_BRIGHTNESS 50 // Brightness (0-255)
+#define NEOPIXEL_DETECTION_BRIGHTNESS 200 // Brightness during detection (0-255)
+
+// NeoPixel object
+Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+// NeoPixel state variables
+bool detectionMode = false;
+unsigned long detectionStartTime = 0;
+int detectionFlashCount = 0;
 
 // ================================
 // WiFi AP Configuration
@@ -78,6 +95,7 @@ std::vector<TargetFilter> targetFilters;
 
 // Forward declarations
 void startScanningMode();
+void startDetectionFlash();
 class MyAdvertisedDeviceCallbacks;
 
 // ================================
@@ -120,10 +138,151 @@ void singleBeep() {
 }
 
 void threeBeeps() {
+    // Start detection flash animation
+    startDetectionFlash();
+    
     for(int i = 0; i < 3; i++) {
         singleBeep();
         if (i < 2) delay(BEEP_PAUSE);
     }
+}
+
+// ================================
+// NeoPixel Functions
+// ================================
+void initializeNeoPixel() {
+    strip.begin();
+    strip.setBrightness(NEOPIXEL_BRIGHTNESS);
+    strip.clear();
+    strip.show();
+}
+
+// Convert HSV to RGB
+uint32_t hsvToRgb(uint16_t h, uint8_t s, uint8_t v) {
+    uint8_t r, g, b;
+    
+    if (s == 0) {
+        r = g = b = v;
+    } else {
+        uint8_t region = h / 43;
+        uint8_t remainder = (h - (region * 43)) * 6;
+        
+        uint8_t p = (v * (255 - s)) >> 8;
+        uint8_t q = (v * (255 - ((s * remainder) >> 8))) >> 8;
+        uint8_t t = (v * (255 - ((s * (255 - remainder)) >> 8))) >> 8;
+        
+        switch (region) {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
+        }
+    }
+    
+    return strip.Color(r, g, b);
+}
+
+// Normal pink breathing animation
+void normalBreathingAnimation() {
+    static unsigned long lastUpdate = 0;
+    static float brightness = 0.0;
+    static bool increasing = true;
+    
+    unsigned long currentTime = millis();
+    
+    // Update every 20ms for smooth animation
+    if (currentTime - lastUpdate >= 20) {
+        lastUpdate = currentTime;
+        
+        // Update brightness (breathing effect)
+        if (increasing) {
+            brightness += 0.02;
+            if (brightness >= 1.0) {
+                brightness = 1.0;
+                increasing = false;
+            }
+        } else {
+            brightness -= 0.02;
+            if (brightness <= 0.1) {
+                brightness = 0.1;
+                increasing = true;
+            }
+        }
+        
+        // Pink color (hue 300) with breathing brightness
+        uint32_t color = hsvToRgb(300, 255, (uint8_t)(NEOPIXEL_BRIGHTNESS * brightness));
+        strip.setPixelColor(0, color);
+        strip.show();
+    }
+}
+
+// Detection flash animation synchronized with beeps
+void detectionFlashAnimation() {
+    unsigned long currentTime = millis();
+    unsigned long elapsed = currentTime - detectionStartTime;
+    
+    // Calculate which flash we're on based on elapsed time
+    int currentFlash = (elapsed / (BEEP_DURATION + BEEP_PAUSE)) % 3;
+    unsigned long flashProgress = elapsed % (BEEP_DURATION + BEEP_PAUSE);
+    
+    // Determine color based on flash number
+    uint16_t hue;
+    if (currentFlash == 0) {
+        hue = 240; // Blue
+    } else if (currentFlash == 1) {
+        hue = 300; // Pink
+    } else {
+        hue = 270; // Purple
+    }
+    
+    // Flash brightness - bright during beep, dim during pause
+    uint8_t brightness;
+    if (flashProgress < BEEP_DURATION) {
+        // During beep - bright flash
+        brightness = NEOPIXEL_DETECTION_BRIGHTNESS;
+    } else {
+        // During pause - dim
+        brightness = NEOPIXEL_BRIGHTNESS / 4;
+    }
+    
+    // Set color
+    uint32_t color = hsvToRgb(hue, 255, brightness);
+    strip.setPixelColor(0, color);
+    strip.show();
+    
+    // End detection mode after 3 flashes (same as threeBeeps)
+    if (elapsed >= (BEEP_DURATION + BEEP_PAUSE) * 3) {
+        detectionMode = false;
+    }
+}
+
+// Main animation function
+void updateNeoPixelAnimation() {
+    if (detectionMode) {
+        detectionFlashAnimation();
+    } else {
+        normalBreathingAnimation();
+    }
+}
+
+// Set NeoPixel to a specific color
+void setNeoPixelColor(uint8_t r, uint8_t g, uint8_t b) {
+    strip.setPixelColor(0, strip.Color(r, g, b));
+    strip.show();
+}
+
+// Turn off NeoPixel
+void turnOffNeoPixel() {
+    strip.clear();
+    strip.show();
+}
+
+// Start detection flash animation
+void startDetectionFlash() {
+    detectionMode = true;
+    detectionStartTime = millis();
 }
 
 void twoBeeps() {
@@ -1134,7 +1293,8 @@ void setup() {
     
     Serial.println("\n\n=== OUI Spy Enhanced BLE Detector ===");
     Serial.println("Hardware: Xiao ESP32 S3");
-    Serial.println("Buzzer: GPIO3");
+    Serial.println("Buzzer: GPIO3 (D2)");
+    Serial.println("NeoPixel: GPIO4 (D3)");
     Serial.println("Initializing...");
     
     // Randomize MAC address on each boot
@@ -1180,6 +1340,16 @@ void setup() {
     Serial.println("Testing buzzer...");
     singleBeep();
     delay(500);
+    
+    Serial.println("Initializing NeoPixel...");
+    initializeNeoPixel();
+    
+    // Test NeoPixel
+    Serial.println("Testing NeoPixel...");
+    setNeoPixelColor(255, 0, 255); // Bright pink
+    delay(1000);
+    setNeoPixelColor(128, 0, 255); // Purple
+    delay(1000);
     
     // Check for factory reset flag first
     preferences.begin("ouispy", true); // read-only
@@ -1344,6 +1514,9 @@ void loop() {
             lastStatusTime = currentMillis;
         }
     }
+    
+    // Update NeoPixel animation
+    updateNeoPixelAnimation();
     
     delay(100);
 } 
