@@ -22,6 +22,7 @@
 #define BUZZER_DUTY 127  // 50% duty cycle for good volume without excessive power draw
 #define BEEP_DURATION 200  // Duration of each beep in ms
 #define BEEP_PAUSE 150  // Pause between beeps in ms
+#define LED_PIN 21   // GPIO21 for onboard LED (inverted logic)
 
 // ================================
 // NeoPixel Definitions - Xiao ESP32 S3
@@ -73,6 +74,10 @@ int detectedRSSI = 0;
 String matchedFilter = "";
 String matchType = "";  // "NEW", "RE-5s", "RE-30s"
 
+// Persistent settings
+bool buzzerEnabled = true;
+bool ledEnabled = true;
+
 // Device tracking
 struct DeviceInfo {
     String macAddress;
@@ -111,6 +116,21 @@ bool isSerialConnected() {
 }
 
 // ================================
+// LED Control Functions (inverted logic for Xiao ESP32-S3)
+// ================================
+void ledOn() {
+    if (ledEnabled) {
+        digitalWrite(LED_PIN, LOW);  // LOW = LED ON for Xiao ESP32-S3
+    }
+}
+
+void ledOff() {
+    if (ledEnabled) {
+        digitalWrite(LED_PIN, HIGH); // HIGH = LED OFF for Xiao ESP32-S3
+    }
+}
+
+// ================================
 // Buzzer Functions
 // ================================
 void initializeBuzzer() {
@@ -118,6 +138,10 @@ void initializeBuzzer() {
     digitalWrite(BUZZER_PIN, LOW);
     ledcSetup(0, BUZZER_FREQ, 8);
     ledcAttachPin(BUZZER_PIN, 0);
+    
+    // Setup LED (inverted logic - HIGH = OFF for Xiao ESP32-S3)
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, HIGH);
 }
 
 void digitalBeep(int duration) {
@@ -131,10 +155,16 @@ void digitalBeep(int duration) {
 }
 
 void singleBeep() {
-    ledcWrite(0, BUZZER_DUTY);
+    if (buzzerEnabled) {
+        ledcWrite(0, BUZZER_DUTY);
+    }
+    ledOn();
     delay(BEEP_DURATION);
-    ledcWrite(0, 0);
-    digitalBeep(BEEP_DURATION);
+    if (buzzerEnabled) {
+        ledcWrite(0, 0);
+        digitalBeep(BEEP_DURATION);
+    }
+    ledOff();
 }
 
 void threeBeeps() {
@@ -298,15 +328,23 @@ void ascendingBeeps() {
     int fastPause = 100; // Faster than normal beeps
     
     for (int i = 0; i < 2; i++) {
-        ledcSetup(0, frequencies[i], 8);
-        ledcWrite(0, BUZZER_DUTY);
+        if (buzzerEnabled) {
+            ledcSetup(0, frequencies[i], 8);
+            ledcWrite(0, BUZZER_DUTY);
+        }
+        ledOn();
         delay(BEEP_DURATION);
-        ledcWrite(0, 0);
+        if (buzzerEnabled) {
+            ledcWrite(0, 0);
+        }
+        ledOff();
         if (i < 1) delay(fastPause);
     }
     
     // Reset to original frequency for future beeps
-    ledcSetup(0, BUZZER_FREQ, 8);
+    if (buzzerEnabled) {
+        ledcSetup(0, BUZZER_FREQ, 8);
+    }
 }
 
 // ================================
@@ -315,6 +353,8 @@ void ascendingBeeps() {
 void saveConfiguration() {
     preferences.begin("ouispy", false);
     preferences.putInt("filterCount", targetFilters.size());
+    preferences.putBool("buzzerEnabled", buzzerEnabled);
+    preferences.putBool("ledEnabled", ledEnabled);
     
     for (int i = 0; i < targetFilters.size(); i++) {
         String keyId = "id_" + String(i);
@@ -336,6 +376,8 @@ void saveConfiguration() {
 void loadConfiguration() {
     preferences.begin("ouispy", true);
     int filterCount = preferences.getInt("filterCount", 0);
+    buzzerEnabled = preferences.getBool("buzzerEnabled", true);
+    ledEnabled = preferences.getBool("ledEnabled", true);
     
     targetFilters.clear();
     
@@ -367,6 +409,8 @@ void loadConfiguration() {
     if (isSerialConnected()) {
         Serial.println("Configuration loaded from NVS");
         Serial.println("Loaded " + String(targetFilters.size()) + " filters");
+        Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
+        Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
     }
 }
 
@@ -724,6 +768,32 @@ const char* getConfigHTML() {
             margin-top: 8px; 
             line-height: 1.4;
         }
+        .toggle-container {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .toggle-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .toggle-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            accent-color: #4ecdc4;
+            cursor: pointer;
+        }
+        .toggle-label {
+            font-weight: 500;
+            color: #ffffff;
+            cursor: pointer;
+            user-select: none;
+        }
         button { 
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
             color: #ffffff; 
@@ -789,6 +859,22 @@ DD:EE:FF:ab:cd:ef
                 <div class="help-text">
                     Full MAC addresses match specific devices only.<br>
                     Format: XX:XX:XX:XX:XX:XX (17 characters with colons)
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3>Audio & Visual Settings</h3>
+                <div class="toggle-container">
+                    <div class="toggle-item">
+                        <input type="checkbox" id="buzzerEnabled" name="buzzerEnabled" %BUZZER_CHECKED%>
+                        <label class="toggle-label" for="buzzerEnabled">Enable Buzzer</label>
+                        <div class="help-text" style="margin-top: 0;">Audio feedback for target detection</div>
+                    </div>
+                    <div class="toggle-item">
+                        <input type="checkbox" id="ledEnabled" name="ledEnabled" %LED_CHECKED%>
+                        <label class="toggle-label" for="ledEnabled">Enable LED Blinking</label>
+                        <div class="help-text" style="margin-top: 0;">Orange LED blinks with same pattern as buzzer</div>
+                    </div>
                 </div>
             </div>
             
@@ -895,6 +981,11 @@ String generateConfigHTML() {
     
     html.replace("%OUI_VALUES%", ouiValues);
     html.replace("%MAC_VALUES%", macValues);
+    
+    // Replace toggle states
+    html.replace("%BUZZER_CHECKED%", buzzerEnabled ? "checked" : "");
+    html.replace("%LED_CHECKED%", ledEnabled ? "checked" : "");
+    
     return html;
 }
 
@@ -1023,6 +1114,15 @@ void startConfigMode() {
                     }
                 }
             }
+        }
+        
+        // Process buzzer and LED toggles
+        buzzerEnabled = request->hasParam("buzzerEnabled", true);
+        ledEnabled = request->hasParam("ledEnabled", true);
+        
+        if (isSerialConnected()) {
+            Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
+            Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
         }
         
         if (targetFilters.size() > 0) {
