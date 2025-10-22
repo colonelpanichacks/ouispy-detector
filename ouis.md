@@ -1,5 +1,8 @@
-# RING
+# Ring, Axon & DJI OUI Database
 
+## Categorized by Manufacturer
+
+### RING
 - 18:7F:88
 - 24:2B:D6
 - 34:3E:A4
@@ -12,12 +15,10 @@
 - C4:DB:AD
 - CC:3B:FB
 
-# AXON
-
+### AXON
 - 00:25:DF
 
-# DJI
-
+### DJI
 - 0C:9A:E6
 - 8C:58:23
 - 04:A8:5A
@@ -26,3 +27,17 @@
 - 60:60:1F
 - 48:1C:B9
 - 34:D2:62
+
+---
+
+## Copyable CSV Format
+
+```csv
+18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB,00:25:DF,0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62
+```
+
+**Quick Copy:** Click the copy button in the top-right of the CSV block above.
+
+---
+
+**Contributing:** When adding new OUIs, add them to both the categorized list AND the CSV block.
