@@ -1,3 +1,4 @@
+```markdown
 # OUI Database
 ### Ring, Axon & DJI MAC Address Prefixes
 
@@ -16,18 +17,8 @@
 <details open>
 <summary><b>RING</b> <code>11 OUIs</code></summary>
 
-```diff
-+ 18:7F:88
-+ 24:2B:D6
-+ 34:3E:A4
-+ 54:E0:19
-+ 5C:47:5E
-+ 64:9A:63
-+ 90:48:6C
-+ 9C:76:13
-+ AC:9F:C3
-+ C4:DB:AD
-+ CC:3B:FB
+```
+18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB
 ```
 
 > **Category:** Doorbell/Security Camera  
@@ -39,8 +30,8 @@
 <details>
 <summary><b>AXON</b> <code>1 OUI</code></summary>
 
-```diff
-+ 00:25:DF
+```
+00:25:DF
 ```
 
 > **Category:** Body Camera / Law Enforcement  
@@ -52,15 +43,8 @@
 <details>
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
-```diff
-+ 0C:9A:E6
-+ 8C:58:23
-+ 04:A8:5A
-+ 58:B8:58
-+ E4:7A:2C
-+ 60:60:1F
-+ 48:1C:B9
-+ 34:D2:62
+```
+0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62
 ```
 
 > **Category:** Consumer & Commercial Drones  
@@ -71,7 +55,7 @@
 
 ---
 
-## Copyable CSV Format
+## Copyable CSV Format - All OUIs
 
 ```csv
 18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB,00:25:DF,0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62
@@ -79,7 +63,7 @@
 
 <div align="center">
 
-**Quick Copy:** Click the copy button in the top-right corner of the CSV block above
+**Quick Copy:** Click the copy button in the top-right corner of any code block above
 
 </div>
 
@@ -107,3 +91,4 @@ Found a new OUI? Help build the database!
 Made by the OUI-SPY community
 
 </div>
+```
