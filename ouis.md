@@ -1,4 +1,4 @@
-```markdown
+
 # OUI Database
 ### Ring, Axon & DJI MAC Address Prefixes
 
