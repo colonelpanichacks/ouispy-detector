@@ -1,4 +1,3 @@
-
 # OUI Database
 ### Ring, Axon & DJI MAC Address Prefixes
 
@@ -17,6 +16,20 @@
 <details open>
 <summary><b>RING</b> <code>11 OUIs</code></summary>
 
+**Visual List:**
+- `18:7F:88`
+- `24:2B:D6`
+- `34:3E:A4`
+- `54:E0:19`
+- `5C:47:5E`
+- `64:9A:63`
+- `90:48:6C`
+- `9C:76:13`
+- `AC:9F:C3`
+- `C4:DB:AD`
+- `CC:3B:FB`
+
+**Copy CSV:**
 ```
 18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB
 ```
@@ -30,6 +43,10 @@
 <details>
 <summary><b>AXON</b> <code>1 OUI</code></summary>
 
+**Visual List:**
+- `00:25:DF`
+
+**Copy CSV:**
 ```
 00:25:DF
 ```
@@ -43,6 +60,17 @@
 <details>
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
+**Visual List:**
+- `0C:9A:E6`
+- `8C:58:23`
+- `04:A8:5A`
+- `58:B8:58`
+- `E4:7A:2C`
+- `60:60:1F`
+- `48:1C:B9`
+- `34:D2:62`
+
+**Copy CSV:**
 ```
 0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62
 ```
