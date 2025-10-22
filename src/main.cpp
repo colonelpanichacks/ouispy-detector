@@ -66,6 +66,7 @@ unsigned long configStartTime = 0;
 unsigned long lastConfigActivity = 0;
 unsigned long modeSwitchScheduled = 0; // When to switch modes (0 = not scheduled)
 unsigned long deviceResetScheduled = 0; // When to reset device (0 = not scheduled)
+unsigned long normalRestartScheduled = 0; // When to do normal restart (0 = not scheduled)
 
 // Serial output synchronization - avoid concurrent writes
 volatile bool newMatchFound = false;
@@ -87,6 +88,7 @@ struct DeviceInfo {
     bool inCooldown;
     unsigned long cooldownUntil;
     const char* matchedFilter;
+    String filterDescription;  // Store filter description for persistence
 };
 
 struct TargetFilter {
@@ -95,8 +97,14 @@ struct TargetFilter {
     String description;
 };
 
+struct DeviceAlias {
+    String macAddress;
+    String alias;
+};
+
 std::vector<DeviceInfo> devices;
 std::vector<TargetFilter> targetFilters;
+std::vector<DeviceAlias> deviceAliases;
 
 // Forward declarations
 void startScanningMode();
@@ -469,6 +477,181 @@ bool matchesTargetFilter(const String& deviceMAC, String& matchedDescription) {
 }
 
 // ================================
+// Device Alias Functions
+// ================================
+void saveDeviceAliases() {
+    preferences.begin("ouispy", false);
+    preferences.putInt("aliasCount", deviceAliases.size());
+    
+    for (int i = 0; i < deviceAliases.size(); i++) {
+        String keyMac = "alias_mac_" + String(i);
+        String keyName = "alias_name_" + String(i);
+        
+        preferences.putString(keyMac.c_str(), deviceAliases[i].macAddress);
+        preferences.putString(keyName.c_str(), deviceAliases[i].alias);
+    }
+    
+    preferences.end();
+    
+    if (isSerialConnected()) {
+        Serial.println("Device aliases saved to NVS (" + String(deviceAliases.size()) + " aliases)");
+    }
+}
+
+void loadDeviceAliases() {
+    preferences.begin("ouispy", true);
+    int aliasCount = preferences.getInt("aliasCount", 0);
+    
+    deviceAliases.clear();
+    
+    for (int i = 0; i < aliasCount; i++) {
+        String keyMac = "alias_mac_" + String(i);
+        String keyName = "alias_name_" + String(i);
+        
+        DeviceAlias alias;
+        alias.macAddress = preferences.getString(keyMac.c_str(), "");
+        alias.alias = preferences.getString(keyName.c_str(), "");
+        
+        if (alias.macAddress.length() > 0 && alias.alias.length() > 0) {
+            deviceAliases.push_back(alias);
+        }
+    }
+    
+    preferences.end();
+    
+    if (isSerialConnected()) {
+        Serial.println("Device aliases loaded from NVS (" + String(deviceAliases.size()) + " aliases)");
+    }
+}
+
+String getDeviceAlias(const String& macAddress) {
+    String normalizedMAC = macAddress;
+    normalizeMACAddress(normalizedMAC);
+    
+    for (const DeviceAlias& alias : deviceAliases) {
+        String normalizedAliasMAC = alias.macAddress;
+        normalizeMACAddress(normalizedAliasMAC);
+        
+        if (normalizedAliasMAC.equals(normalizedMAC)) {
+            return alias.alias;
+        }
+    }
+    
+    return ""; // No alias found
+}
+
+void setDeviceAlias(const String& macAddress, const String& alias) {
+    String normalizedMAC = macAddress;
+    normalizeMACAddress(normalizedMAC);
+    
+    // Check if alias already exists, update it
+    for (auto& deviceAlias : deviceAliases) {
+        String normalizedAliasMAC = deviceAlias.macAddress;
+        normalizeMACAddress(normalizedAliasMAC);
+        
+        if (normalizedAliasMAC.equals(normalizedMAC)) {
+            if (alias.length() > 0) {
+                deviceAlias.alias = alias;
+            } else {
+                // Remove alias if empty - find and remove the entry
+                for (size_t i = 0; i < deviceAliases.size(); i++) {
+                    String mac = deviceAliases[i].macAddress;
+                    normalizeMACAddress(mac);
+                    if (mac.equals(normalizedMAC)) {
+                        deviceAliases.erase(deviceAliases.begin() + i);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+    }
+    
+    // Add new alias if not empty
+    if (alias.length() > 0) {
+        DeviceAlias newAlias;
+        newAlias.macAddress = normalizedMAC;
+        newAlias.alias = alias;
+        deviceAliases.push_back(newAlias);
+    }
+}
+
+// ================================
+// Persistent Device Storage Functions
+// ================================
+void saveDetectedDevices() {
+    preferences.begin("ouispy", false);
+    
+    // Limit to 100 most recent devices to avoid NVS overflow
+    int deviceCount = min((int)devices.size(), 100);
+    preferences.putInt("deviceCount", deviceCount);
+    
+    for (int i = 0; i < deviceCount; i++) {
+        String keyMac = "dev_mac_" + String(i);
+        String keyRssi = "dev_rssi_" + String(i);
+        String keyTime = "dev_time_" + String(i);
+        String keyFilt = "dev_filt_" + String(i);
+        
+        preferences.putString(keyMac.c_str(), devices[i].macAddress);
+        preferences.putInt(keyRssi.c_str(), devices[i].rssi);
+        preferences.putULong(keyTime.c_str(), devices[i].lastSeen);
+        preferences.putString(keyFilt.c_str(), devices[i].filterDescription);
+    }
+    
+    preferences.end();
+    
+    if (isSerialConnected()) {
+        Serial.println("Detected devices saved to NVS (" + String(deviceCount) + " devices)");
+    }
+}
+
+void loadDetectedDevices() {
+    preferences.begin("ouispy", true);
+    int deviceCount = preferences.getInt("deviceCount", 0);
+    
+    devices.clear();
+    
+    for (int i = 0; i < deviceCount; i++) {
+        String keyMac = "dev_mac_" + String(i);
+        String keyRssi = "dev_rssi_" + String(i);
+        String keyTime = "dev_time_" + String(i);
+        String keyFilt = "dev_filt_" + String(i);
+        
+        DeviceInfo device;
+        device.macAddress = preferences.getString(keyMac.c_str(), "");
+        device.rssi = preferences.getInt(keyRssi.c_str(), 0);
+        device.lastSeen = preferences.getULong(keyTime.c_str(), 0);
+        device.filterDescription = preferences.getString(keyFilt.c_str(), "");
+        device.firstSeen = device.lastSeen;
+        device.inCooldown = false;
+        device.cooldownUntil = 0;
+        device.matchedFilter = nullptr;
+        
+        if (device.macAddress.length() > 0) {
+            devices.push_back(device);
+        }
+    }
+    
+    preferences.end();
+    
+    if (isSerialConnected()) {
+        Serial.println("Detected devices loaded from NVS (" + String(deviceCount) + " devices)");
+    }
+}
+
+void clearDetectedDevices() {
+    devices.clear();
+    
+    preferences.begin("ouispy", false);
+    preferences.putInt("deviceCount", 0);
+    preferences.end();
+    
+    if (isSerialConnected()) {
+        Serial.println("All detected devices cleared from memory and NVS");
+    }
+}
+
+// ================================
 // Web Server HTML
 // ================================
 const char* getASCIIArt() {
@@ -651,7 +834,7 @@ const char* getConfigHTML() {
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OUI Spy Configuration</title>
+    <title>OUI-SPY Detector</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { box-sizing: border-box; }
@@ -831,7 +1014,7 @@ const char* getConfigHTML() {
 <body>
     <div class="ascii-background">%ASCII_ART%</div>
     <div class="container">
-        <h1>OUI-SPY</h1>
+        <h1>OUI-SPY Detector</h1>
         
         <div class="status">
             Enter MAC addresses and/or OUI prefixes below. You must provide at least one entry in either field.
@@ -878,13 +1061,277 @@ DD:EE:FF:ab:cd:ef
                 </div>
             </div>
             
+            <!-- Detected Devices Section -->
+            <div class="section" id="detectedDevicesSection">
+                <h3>Device Alias Management</h3>
+                <div class="help-text" style="margin-bottom: 15px;">
+                    Assign identification labels to detected MAC addresses for serial output tracking.<br>
+                    <strong>Device history and aliases persist in non-volatile storage.</strong>
+                </div>
+                <div id="clearDeviceBtn" style="margin-bottom: 10px; text-align: right; display: none;">
+                    <button type="button" onclick="clearDeviceHistory()" style="background: #8b0000; padding: 8px 16px; font-size: 13px; margin: 0;">Clear Device History</button>
+                </div>
+                <div id="deviceList" class="device-list">
+                    <div style="text-align: center; padding: 30px; color: #888888;">
+                        <p style="font-size: 14px;">No device records in storage.</p>
+                        <p style="font-size: 12px; margin-top: 10px;">Detected devices during scanning operations will persist to this list.</p>
+                    </div>
+                </div>
+            </div>
+
             <div class="button-container">
                 <button type="submit">Save Configuration & Start Scanning</button>
                 <button type="button" onclick="clearConfig()" style="background: #8b0000; margin-left: 20px;">Clear All Filters</button>
                 <button type="button" onclick="deviceReset()" style="background: #4a0000; margin-left: 20px; font-size: 12px;">Device Reset</button>
             </div>
             
+            <!-- Burn In Configuration Section -->
+            <div class="section" style="border: 2px solid #8b0000; background: linear-gradient(135deg, rgba(139, 0, 0, 0.03) 0%, rgba(139, 0, 0, 0.08) 100%); margin-top: 40px;">
+                <h3 style="color: #ff6b6b; margin-top: 0; font-size: 18px; letter-spacing: 1px; text-transform: uppercase; border-bottom: 2px solid rgba(255, 107, 107, 0.3); padding-bottom: 12px; margin-bottom: 20px; text-align: center;">
+                    Burn In Settings
+                </h3>
+                
+                <div style="background: linear-gradient(135deg, #1a0a0a 0%, #2d0a0a 100%); color: #ff9999; padding: 18px; border-radius: 8px; margin: 15px 0; border: 2px solid #8b0000; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.3);">
+                    <p style="font-weight: 600; font-size: 13px; margin: 0 0 10px 0; color: #ff6b6b; text-transform: uppercase; letter-spacing: 0.5px;">
+                        Warning - Requires Flash Erase to Unlock
+                    </p>
+                    <p style="line-height: 1.5; margin: 0 0 12px 0; color: #ffcccc; font-size: 13px;">
+                        Permanently locks all current settings: <strong>OUI/MAC filters, device aliases, buzzer/LED preferences</strong>
+                    </p>
+                    <p style="line-height: 1.4; margin: 0 0 8px 0; color: #e0e0e0; font-weight: 500; font-size: 12px;">
+                        Effects after activation:
+                    </p>
+                    <ul style="text-align: left; line-height: 1.6; margin: 0 0 12px 0; padding-left: 20px; color: #e0e0e0; font-size: 12px;">
+                        <li>Disables WiFi AP and 20-second config window</li>
+                        <li>Boots directly to scanning mode (~2 seconds)</li>
+                        <li>Removes web interface access</li>
+                    </ul>
+                    <p style="line-height: 1.4; margin: 0; color: #ffcccc; font-size: 12px;">
+                        <strong>Unlock:</strong> USB connection, flash erase, then firmware reflash required
+                    </p>
+                </div>
+                
+                <div style="background: linear-gradient(135deg, #0a1a0a 0%, #0a2d0a 100%); color: #99ff99; padding: 18px; border-radius: 8px; margin: 15px 0; border: 1px solid #166534; box-shadow: 0 2px 10px rgba(22, 101, 52, 0.2);">
+                    <p style="font-weight: 600; margin: 0 0 8px 0; color: #4ade80; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">
+                        Use Cases:
+                    </p>
+                    <ul style="text-align: left; line-height: 1.6; margin: 0; padding-left: 20px; color: #ccffcc; font-size: 12px;">
+                        <li>Production deployments</li>
+                        <li>Fixed installations</li>
+                        <li>Security-sensitive environments</li>
+                        <li>Battery-powered optimization</li>
+                    </ul>
+                </div>
+                
+                <div style="text-align: center; margin-top: 25px; padding-top: 20px; border-top: 1px solid rgba(255, 107, 107, 0.2);">
+                    <button type="button" onclick="burnInConfig()" style="background: linear-gradient(135deg, #8b0000 0%, #6b0000 100%); color: #ffffff; font-size: 15px; padding: 15px 35px; font-weight: 600; border: 2px solid #ff0000; border-radius: 8px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.4); transition: all 0.3s;">
+                        Lock Configuration Permanently
+                    </button>
+                    <p style="font-size: 11px; color: #888888; margin-top: 12px; font-style: italic;">
+                        Cannot be undone without flash erase + reflash
+                    </p>
+                </div>
+            </div>
+            
+            <style>
+                .device-list {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 10px;
+                    max-height: 400px;
+                    overflow-y: auto;
+                }
+                .device-item {
+                    display: flex;
+                    align-items: center;
+                    gap: 15px;
+                    padding: 12px;
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 8px;
+                    background: rgba(255, 255, 255, 0.02);
+                }
+                .device-mac {
+                    font-family: 'Courier New', monospace;
+                    font-weight: 500;
+                    color: #4ecdc4;
+                    min-width: 140px;
+                }
+                .device-rssi {
+                    color: #a0a0a0;
+                    font-size: 12px;
+                    min-width: 60px;
+                }
+                .device-time {
+                    color: #888888;
+                    font-size: 11px;
+                    font-style: italic;
+                    min-width: 100px;
+                }
+                .device-time.recent {
+                    color: #4ade80;
+                }
+                .alias-input {
+                    flex: 1;
+                    padding: 8px 12px;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    border-radius: 6px;
+                    background: rgba(255, 255, 255, 0.05);
+                    color: #ffffff;
+                    font-size: 14px;
+                }
+                .alias-input:focus {
+                    outline: none;
+                    border-color: #4ecdc4;
+                    box-shadow: 0 0 0 2px rgba(78, 205, 196, 0.2);
+                }
+                .save-alias-btn {
+                    padding: 8px 16px;
+                    font-size: 13px;
+                    margin: 0;
+                }
+                .device-filter {
+                    color: #a0a0a0;
+                    font-size: 11px;
+                    font-style: italic;
+                    max-width: 150px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+            </style>
+            
             <script>
+            // Load detected devices on page load
+            window.addEventListener('DOMContentLoaded', function() {
+                loadDetectedDevices();
+            });
+            
+            function formatTimeSince(milliseconds) {
+                const seconds = Math.floor(milliseconds / 1000);
+                const minutes = Math.floor(seconds / 60);
+                const hours = Math.floor(minutes / 60);
+                const days = Math.floor(hours / 24);
+                
+                if (seconds < 60) return 'Just now';
+                if (minutes < 60) return minutes + ' min ago';
+                if (hours < 24) return hours + ' hour' + (hours > 1 ? 's' : '') + ' ago';
+                return days + ' day' + (days > 1 ? 's' : '') + ' ago';
+            }
+            
+            function loadDetectedDevices() {
+                fetch('/api/devices')
+                    .then(response => response.json())
+                    .then(data => {
+                        const deviceList = document.getElementById('deviceList');
+                        const clearBtn = document.getElementById('clearDeviceBtn');
+                        
+                        if (data.devices && data.devices.length > 0) {
+                            clearBtn.style.display = 'block';
+                            deviceList.innerHTML = '';
+                            
+                            data.devices.forEach(device => {
+                                const deviceItem = document.createElement('div');
+                                deviceItem.className = 'device-item';
+                                
+                                const macSpan = document.createElement('span');
+                                macSpan.className = 'device-mac';
+                                macSpan.textContent = device.mac;
+                                
+                                const rssiSpan = document.createElement('span');
+                                rssiSpan.className = 'device-rssi';
+                                rssiSpan.textContent = device.rssi + ' dBm';
+                                
+                                const timeSpan = document.createElement('span');
+                                timeSpan.className = 'device-time';
+                                const timeSince = device.timeSince || 0;
+                                timeSpan.textContent = formatTimeSince(timeSince);
+                                if (timeSince < 60000) { // Less than 1 minute
+                                    timeSpan.classList.add('recent');
+                                }
+                                
+                                const filterSpan = document.createElement('span');
+                                filterSpan.className = 'device-filter';
+                                filterSpan.textContent = device.filter || '';
+                                filterSpan.title = device.filter || '';
+                                
+                                const aliasInput = document.createElement('input');
+                                aliasInput.type = 'text';
+                                aliasInput.className = 'alias-input';
+                                aliasInput.placeholder = 'Device identification label';
+                                aliasInput.value = device.alias || '';
+                                aliasInput.maxLength = 32;
+                                
+                                const saveBtn = document.createElement('button');
+                                saveBtn.type = 'button';
+                                saveBtn.className = 'save-alias-btn';
+                                saveBtn.textContent = 'Save';
+                                saveBtn.onclick = function() {
+                                    saveAlias(device.mac, aliasInput.value, saveBtn);
+                                };
+                                
+                                deviceItem.appendChild(macSpan);
+                                deviceItem.appendChild(rssiSpan);
+                                deviceItem.appendChild(timeSpan);
+                                if (device.filter) {
+                                    deviceItem.appendChild(filterSpan);
+                                }
+                                deviceItem.appendChild(aliasInput);
+                                deviceItem.appendChild(saveBtn);
+                                
+                                deviceList.appendChild(deviceItem);
+                            });
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading devices:', error);
+                    });
+            }
+            
+            function saveAlias(mac, alias, button) {
+                const originalText = button.textContent;
+                button.textContent = 'Saving...';
+                button.disabled = true;
+                
+                fetch('/api/alias', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'mac=' + encodeURIComponent(mac) + '&alias=' + encodeURIComponent(alias)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    button.textContent = 'Saved!';
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.disabled = false;
+                    }, 1500);
+                })
+                .catch(error => {
+                    console.error('Error saving alias:', error);
+                    button.textContent = 'Error';
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.disabled = false;
+                    }, 1500);
+                });
+            }
+            
+            function clearDeviceHistory() {
+                if (confirm('CLEAR DEVICE HISTORY\n\nThis will remove all detected device records from non-volatile storage.\n\nAliases and filter configurations will be preserved.\n\nProceed with clearing device history?')) {
+                    fetch('/api/clear-devices', { method: 'POST' })
+                        .then(response => response.json())
+                        .then(data => {
+                            alert('Device history cleared from storage.');
+                            location.reload();
+                        })
+                        .catch(error => {
+                            console.error('Error:', error);
+                            alert('Error clearing device history.');
+                        });
+                }
+            }
+            
             function clearConfig() {
                 if (confirm('Are you sure you want to clear all filters? This action cannot be undone.')) {
                     document.getElementById('ouis').value = '';
@@ -919,6 +1366,34 @@ DD:EE:FF:ab:cd:ef
                             });
                     }
                 }
+            }
+            
+            function burnInConfig() {
+                if (!confirm('CONFIGURATION LOCK WARNING\n\nThis will PERMANENTLY lock your configuration.\n\nAfter activation:\n- 20-second config window disabled\n- WiFi AP mode disabled on boot\n- Direct transition to scanning mode\n- Unlock requires: flash erase + firmware reflash via USB\n\nAre you absolutely certain?')) {
+                    return;
+                }
+                
+                if (!confirm('FINAL WARNING\n\nThis action is IRREVERSIBLE without erasing flash storage.\n\nYour current OUI/MAC filters and aliases will be permanently locked.\n\nTo unlock: You must erase flash, then reflash firmware.\n\nClick OK if you understand and wish to proceed.')) {
+                    return;
+                }
+                
+                if (!confirm('LAST CONFIRMATION\n\nClick OK to PERMANENTLY LOCK configuration.\nClick Cancel to abort this operation.')) {
+                    return;
+                }
+                
+                // User confirmed 3 times, proceed with burn-in
+                fetch('/api/lock-config', { method: 'POST' })
+                    .then(response => response.text())
+                    .then(data => {
+                        // Response is HTML that shows the success page
+                        document.open();
+                        document.write(data);
+                        document.close();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('Error locking configuration. Check console.');
+                    });
             }
             </script>
         </form>
@@ -1244,6 +1719,217 @@ void startConfigMode() {
         deviceResetScheduled = millis() + 3000;
     });
     
+    // API endpoint to get detected devices
+    server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        
+        String json = "{\"devices\":[";
+        
+        unsigned long currentTime = millis();
+        
+        for (size_t i = 0; i < devices.size(); i++) {
+            if (i > 0) json += ",";
+            
+            String alias = getDeviceAlias(devices[i].macAddress);
+            String filterDesc = devices[i].filterDescription;
+            if (filterDesc.length() == 0 && devices[i].matchedFilter) {
+                filterDesc = String(devices[i].matchedFilter);
+            }
+            
+            // Calculate time since last seen
+            unsigned long timeSince = (currentTime >= devices[i].lastSeen) ? 
+                                     (currentTime - devices[i].lastSeen) : 0;
+            
+            json += "{";
+            json += "\"mac\":\"" + devices[i].macAddress + "\",";
+            json += "\"rssi\":" + String(devices[i].rssi) + ",";
+            json += "\"filter\":\"" + filterDesc + "\",";
+            json += "\"alias\":\"" + alias + "\",";
+            json += "\"lastSeen\":" + String(devices[i].lastSeen) + ",";
+            json += "\"timeSince\":" + String(timeSince);
+            json += "}";
+        }
+        
+        json += "],";
+        json += "\"currentTime\":" + String(currentTime);
+        json += "}";
+        
+        request->send(200, "application/json", json);
+    });
+    
+    // API endpoint to save device alias
+    server.on("/api/alias", HTTP_POST, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        
+        if (request->hasParam("mac", true) && request->hasParam("alias", true)) {
+            String mac = request->getParam("mac", true)->value();
+            String alias = request->getParam("alias", true)->value();
+            
+            setDeviceAlias(mac, alias);
+            saveDeviceAliases();
+            
+            if (isSerialConnected()) {
+                if (alias.length() > 0) {
+                    Serial.println("Alias saved: " + mac + " -> \"" + alias + "\"");
+                } else {
+                    Serial.println("Alias removed: " + mac);
+                }
+            }
+            
+            request->send(200, "application/json", "{\"success\":true}");
+        } else {
+            request->send(400, "application/json", "{\"success\":false,\"error\":\"Missing parameters\"}");
+        }
+    });
+    
+    // API endpoint to clear device history
+    server.on("/api/clear-devices", HTTP_POST, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        
+        clearDetectedDevices();
+        
+        if (isSerialConnected()) {
+            Serial.println("Device history cleared via web interface");
+        }
+        
+        request->send(200, "application/json", "{\"success\":true}");
+    });
+    
+    // API endpoint to lock/burn-in configuration
+    server.on("/api/lock-config", HTTP_POST, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        
+        if (isSerialConnected()) {
+            Serial.println("======================================");
+            Serial.println("CONFIGURATION LOCK REQUESTED");
+            Serial.println("Locking configuration permanently...");
+            Serial.println("======================================");
+        }
+        
+        // Set the lock flag
+        preferences.begin("ouispy", false);
+        preferences.putBool("configLocked", true);
+        preferences.end();
+        
+        if (isSerialConnected()) {
+            Serial.println("Configuration locked successfully!");
+            Serial.println("Device will skip config mode on next boot");
+            Serial.println("Reflash firmware to unlock");
+        }
+        
+        String responseHTML = R"html(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Configuration Locked</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%); 
+            color: #e0e0e0;
+            text-align: center;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container { 
+            max-width: 750px; 
+            margin: 0 auto; 
+            background: linear-gradient(135deg, #2d2d2d 0%, #1a1a1a 100%);
+            padding: 50px; 
+            border-radius: 16px; 
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5); 
+            border: 2px solid rgba(139, 0, 0, 0.3);
+        }
+        h1 { 
+            color: #ff6b6b; 
+            margin-bottom: 30px;
+            font-size: 32px;
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+        .warning { 
+            background: linear-gradient(135deg, #1a0a0a 0%, #2d0a0a 100%);
+            color: #ffcccc; 
+            border: 2px solid #8b0000; 
+            padding: 25px; 
+            border-radius: 10px; 
+            margin: 25px 0; 
+            font-weight: 500;
+            box-shadow: 0 4px 15px rgba(139, 0, 0, 0.3);
+        }
+        .info {
+            background: linear-gradient(135deg, #0a1a0a 0%, #0a2d0a 100%);
+            color: #ccffcc; 
+            border: 1px solid #166534; 
+            padding: 25px; 
+            border-radius: 10px; 
+            margin: 25px 0;
+            box-shadow: 0 2px 10px rgba(22, 101, 52, 0.2);
+        }
+        p { 
+            line-height: 1.8; 
+            margin: 15px 0; 
+            font-size: 15px;
+        }
+        .status-item {
+            text-align: left;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        .countdown {
+            font-size: 16px;
+            color: #888888;
+            margin-top: 30px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Configuration Locked</h1>
+        <div class="warning">
+            <p style="font-size: 18px; margin-top: 0;"><strong>CONFIGURATION HAS BEEN PERMANENTLY LOCKED</strong></p>
+            <p style="margin-bottom: 0;">20-second configuration window has been disabled for all future boots</p>
+        </div>
+        <div class="info">
+            <p style="font-weight: 600; margin-top: 0; color: #4ade80; font-size: 16px; text-transform: uppercase; letter-spacing: 0.5px;">Active Configuration:</p>
+            <div class="status-item">Device transitions directly to scanning mode on boot</div>
+            <div class="status-item">Current OUI/MAC filters permanently saved to memory</div>
+            <div class="status-item">WiFi access point disabled</div>
+            <div class="status-item">Web configuration interface disabled</div>
+            <div class="status-item">Reduced boot time (approximately 2 seconds)</div>
+            <div class="status-item">Optimized power consumption</div>
+        </div>
+        <div class="warning">
+            <p style="font-weight: 600; margin-top: 0; font-size: 16px; text-transform: uppercase;">Unlock Procedure:</p>
+            <p style="margin-bottom: 0;">USB connection required. Must erase flash storage, then reflash firmware to restore configuration access</p>
+        </div>
+        <p class="countdown">Device will restart and begin scanning in 3 seconds...</p>
+        <script>
+            setTimeout(function() {
+                window.location.href = 'about:blank';
+            }, 3000);
+        </script>
+    </div>
+</body>
+</html>
+)html";
+        
+        request->send(200, "text/html", responseHTML);
+        
+        // Schedule normal restart after 3 seconds (NOT factory reset)
+        normalRestartScheduled = millis() + 3000;
+    });
+    
     server.begin();
     
     if (isSerialConnected()) {
@@ -1311,7 +1997,15 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             }
 
             if (!known) {
-                DeviceInfo newDev = { mac, rssi, currentMillis, currentMillis, false, 0, matchedDescription.c_str() };
+                DeviceInfo newDev;
+                newDev.macAddress = mac;
+                newDev.rssi = rssi;
+                newDev.firstSeen = currentMillis;
+                newDev.lastSeen = currentMillis;
+                newDev.inCooldown = false;
+                newDev.cooldownUntil = 0;
+                newDev.matchedFilter = matchedDescription.c_str();
+                newDev.filterDescription = matchedDescription;
                 devices.push_back(newDev);
 
                 // Store data for main loop to process
@@ -1464,19 +2158,39 @@ void setup() {
         preferences.clear(); // Wipe everything
         preferences.end();
         
-        // Clear in-memory filters
+        // Clear in-memory data
         targetFilters.clear();
+        deviceAliases.clear();
+        devices.clear();
         
         Serial.println("Factory reset complete - starting with clean state");
     } else {
         // Load configuration from NVS
         Serial.println("Loading configuration...");
         loadConfiguration();
+        loadDeviceAliases();
+        loadDetectedDevices();
     }
     
-    // Start in configuration mode
-    Serial.println("Starting configuration mode...");
-    startConfigMode();
+    // Check if configuration is locked/burned in
+    preferences.begin("ouispy", true);
+    bool configLocked = preferences.getBool("configLocked", false);
+    preferences.end();
+    
+    if (configLocked) {
+        Serial.println("======================================");
+        Serial.println("CONFIGURATION LOCKED (BURNED IN)");
+        Serial.println("Skipping config mode - going straight to scanning");
+        Serial.println("To enable config mode: reflash firmware");
+        Serial.println("======================================");
+        
+        // Start scanning immediately
+        startScanningMode();
+    } else {
+        // Start in configuration mode
+        Serial.println("Starting configuration mode...");
+        startConfigMode();
+    }
 }
 
 // ================================
@@ -1489,6 +2203,16 @@ void loop() {
     unsigned long currentMillis = millis();
     
     if (currentMode == CONFIG_MODE) {
+        // Check for scheduled normal restart (from burn-in config)
+        if (normalRestartScheduled > 0 && currentMillis >= normalRestartScheduled) {
+            if (isSerialConnected()) {
+                Serial.println("Scheduled normal restart - rebooting with locked configuration...");
+            }
+            
+            delay(500); // Give time for any pending operations
+            ESP.restart(); // Simple restart - settings preserved
+        }
+        
         // Check for scheduled device reset (from web device reset)
         if (deviceResetScheduled > 0 && currentMillis >= deviceResetScheduled) {
             if (isSerialConnected()) {
@@ -1555,6 +2279,15 @@ void loop() {
                 Serial.println(">> Match found! <<");
                 Serial.print("Device: ");
                 Serial.print(detectedMAC);
+                
+                // Show alias if one exists
+                String alias = getDeviceAlias(detectedMAC);
+                if (alias.length() > 0) {
+                    Serial.print(" [");
+                    Serial.print(alias);
+                    Serial.print("]");
+                }
+                
                 Serial.print(" | RSSI: ");
                 Serial.println(detectedRSSI);
                 Serial.print("Filter: ");
@@ -1604,6 +2337,9 @@ void loop() {
             if (isSerialConnected() && devices.size() != devicesBefore) {
                 Serial.println("Cleanup: Removed " + String(devicesBefore - devices.size()) + " expired devices");
             }
+            
+            // Auto-save detected devices to NVS
+            saveDetectedDevices();
             
             lastCleanupTime = currentMillis;
         }
