@@ -16,7 +16,6 @@
 <details open>
 <summary><b>RING</b> <code>11 OUIs</code></summary>
 
-**Visual List:**
 - `18:7F:88`
 - `24:2B:D6`
 - `34:3E:A4`
@@ -43,7 +42,6 @@
 <details>
 <summary><b>AXON</b> <code>1 OUI</code></summary>
 
-**Visual List:**
 - `00:25:DF`
 
 **Copy CSV:**
@@ -60,7 +58,6 @@
 <details>
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
-**Visual List:**
 - `0C:9A:E6`
 - `8C:58:23`
 - `04:A8:5A`
