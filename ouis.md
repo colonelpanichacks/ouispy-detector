@@ -1,15 +1,4 @@
 # OUI Database
-### Ring, Axon & DJI MAC Address Prefixes
-
-<div align="center">
-
-![Ring](https://img.shields.io/badge/RING-11_OUIs-00A4EF?style=for-the-badge&logo=ring&logoColor=white)
-![Axon](https://img.shields.io/badge/AXON-1_OUI-FFD700?style=for-the-badge)
-![DJI](https://img.shields.io/badge/DJI-8_OUIs-FF3C00?style=for-the-badge&logo=dji&logoColor=white)
-
-</div>
-
----
 
 ## Categorized by Manufacturer
 
