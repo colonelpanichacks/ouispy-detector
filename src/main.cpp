@@ -599,10 +599,6 @@ void saveDetectedDevices() {
     }
     
     preferences.end();
-    
-    if (isSerialConnected()) {
-        Serial.println("Detected devices saved to NVS (" + String(deviceCount) + " devices)");
-    }
 }
 
 void loadDetectedDevices() {
@@ -1020,7 +1016,7 @@ const char* getConfigHTML() {
             Enter MAC addresses and/or OUI prefixes below. You must provide at least one entry in either field.
         </div>
 
-        <form method="POST" action="/save">
+        <form id="configForm" method="POST" action="/save">
             <div class="section">
                 <h3>OUI Prefixes</h3>
                 <textarea name="ouis" placeholder="Enter OUI prefixes, one per line:
@@ -1143,29 +1139,39 @@ DD:EE:FF:ab:cd:ef
                 }
                 .device-item {
                     display: flex;
-                    align-items: center;
-                    gap: 15px;
+                    flex-direction: column;
+                    gap: 10px;
                     padding: 12px;
                     border: 1px solid rgba(255, 255, 255, 0.1);
                     border-radius: 8px;
                     background: rgba(255, 255, 255, 0.02);
                 }
+                .device-info-row {
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                    flex-wrap: wrap;
+                }
+                .device-alias-row {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    width: 100%;
+                }
                 .device-mac {
                     font-family: 'Courier New', monospace;
                     font-weight: 500;
                     color: #4ecdc4;
-                    min-width: 140px;
+                    font-size: 13px;
                 }
                 .device-rssi {
                     color: #a0a0a0;
                     font-size: 12px;
-                    min-width: 60px;
                 }
                 .device-time {
                     color: #888888;
                     font-size: 11px;
                     font-style: italic;
-                    min-width: 100px;
                 }
                 .device-time.recent {
                     color: #4ade80;
@@ -1178,6 +1184,7 @@ DD:EE:FF:ab:cd:ef
                     background: rgba(255, 255, 255, 0.05);
                     color: #ffffff;
                     font-size: 14px;
+                    min-width: 0;
                 }
                 .alias-input:focus {
                     outline: none;
@@ -1188,15 +1195,12 @@ DD:EE:FF:ab:cd:ef
                     padding: 8px 16px;
                     font-size: 13px;
                     margin: 0;
+                    white-space: nowrap;
                 }
                 .device-filter {
                     color: #a0a0a0;
                     font-size: 11px;
                     font-style: italic;
-                    max-width: 150px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
                 }
             </style>
             
@@ -1204,6 +1208,27 @@ DD:EE:FF:ab:cd:ef
             // Load detected devices on page load
             window.addEventListener('DOMContentLoaded', function() {
                 loadDetectedDevices();
+                
+                // Ensure form submits on first click (mobile fix)
+                const configForm = document.getElementById('configForm');
+                if (configForm) {
+                    const submitBtn = configForm.querySelector('button[type="submit"]');
+                    if (submitBtn) {
+                        submitBtn.addEventListener('touchstart', function(e) {
+                            // Blur any focused inputs to ensure submit works on first tap
+                            if (document.activeElement) {
+                                document.activeElement.blur();
+                            }
+                        }, { passive: true });
+                        
+                        submitBtn.addEventListener('click', function(e) {
+                            // Ensure any focused element is blurred before submit
+                            if (document.activeElement && document.activeElement !== submitBtn) {
+                                document.activeElement.blur();
+                            }
+                        });
+                    }
+                }
             });
             
             function formatTimeSince(milliseconds) {
@@ -1233,6 +1258,10 @@ DD:EE:FF:ab:cd:ef
                                 const deviceItem = document.createElement('div');
                                 deviceItem.className = 'device-item';
                                 
+                                // First row: device info
+                                const infoRow = document.createElement('div');
+                                infoRow.className = 'device-info-row';
+                                
                                 const macSpan = document.createElement('span');
                                 macSpan.className = 'device-mac';
                                 macSpan.textContent = device.mac;
@@ -1249,10 +1278,21 @@ DD:EE:FF:ab:cd:ef
                                     timeSpan.classList.add('recent');
                                 }
                                 
-                                const filterSpan = document.createElement('span');
-                                filterSpan.className = 'device-filter';
-                                filterSpan.textContent = device.filter || '';
-                                filterSpan.title = device.filter || '';
+                                infoRow.appendChild(macSpan);
+                                infoRow.appendChild(rssiSpan);
+                                infoRow.appendChild(timeSpan);
+                                
+                                if (device.filter) {
+                                    const filterSpan = document.createElement('span');
+                                    filterSpan.className = 'device-filter';
+                                    filterSpan.textContent = device.filter;
+                                    filterSpan.title = device.filter;
+                                    infoRow.appendChild(filterSpan);
+                                }
+                                
+                                // Second row: alias input and button
+                                const aliasRow = document.createElement('div');
+                                aliasRow.className = 'device-alias-row';
                                 
                                 const aliasInput = document.createElement('input');
                                 aliasInput.type = 'text';
@@ -1269,14 +1309,11 @@ DD:EE:FF:ab:cd:ef
                                     saveAlias(device.mac, aliasInput.value, saveBtn);
                                 };
                                 
-                                deviceItem.appendChild(macSpan);
-                                deviceItem.appendChild(rssiSpan);
-                                deviceItem.appendChild(timeSpan);
-                                if (device.filter) {
-                                    deviceItem.appendChild(filterSpan);
-                                }
-                                deviceItem.appendChild(aliasInput);
-                                deviceItem.appendChild(saveBtn);
+                                aliasRow.appendChild(aliasInput);
+                                aliasRow.appendChild(saveBtn);
+                                
+                                deviceItem.appendChild(infoRow);
+                                deviceItem.appendChild(aliasRow);
                                 
                                 deviceList.appendChild(deviceItem);
                             });
@@ -2273,40 +2310,19 @@ void loop() {
     
     // Scanning mode loop
     if (currentMode == SCANNING_MODE) {
-        // Handle match detection messages (safe serial output)
+        // Handle match detection messages (JSON output for API)
         if (newMatchFound) {
             if (isSerialConnected()) {
-                Serial.println(">> Match found! <<");
-                Serial.print("Device: ");
-                Serial.print(detectedMAC);
-                
-                // Show alias if one exists
                 String alias = getDeviceAlias(detectedMAC);
-                if (alias.length() > 0) {
-                    Serial.print(" [");
-                    Serial.print(alias);
-                    Serial.print("]");
-                }
                 
-                Serial.print(" | RSSI: ");
-                Serial.println(detectedRSSI);
-                Serial.print("Filter: ");
-                Serial.println(matchedFilter);
-                
-                if (matchType == "NEW") {
-                    Serial.print("NEW DEVICE DETECTED: ");
-                    Serial.println(matchedFilter);
-                    Serial.print("MAC: ");
-                    Serial.println(detectedMAC);
-                } else if (matchType == "RE-30s") {
-                    Serial.print("RE-DETECTED after 30+ sec: ");
-                    Serial.println(matchedFilter);
-                } else if (matchType == "RE-5s") {
-                    Serial.print("RE-DETECTED after 5+ sec: ");
-                    Serial.println(matchedFilter);
-                }
-                
-                Serial.println("==============================");
+                // Output clean JSON
+                Serial.print("{\"mac\":\"");
+                Serial.print(detectedMAC);
+                Serial.print("\",\"alias\":\"");
+                Serial.print(alias);
+                Serial.print("\",\"rssi\":");
+                Serial.print(detectedRSSI);
+                Serial.println("}");
             }
             newMatchFound = false;
         }
@@ -2344,9 +2360,8 @@ void loop() {
             lastCleanupTime = currentMillis;
         }
 
-        // Status report every 30 seconds when USB connected
-        if (isSerialConnected() && currentMillis - lastStatusTime >= 30000) {
-            Serial.println("Status: Tracking " + String(devices.size()) + " active devices");
+        // Status report disabled - using JSON output only
+        if (currentMillis - lastStatusTime >= 30000) {
             lastStatusTime = currentMillis;
         }
     }
