@@ -92,9 +92,7 @@ Found a new OUI? Help build the database!
 3. **Update badge counts** in header
 4. **Submit PR** with verification source
 
-### Verification Tools
-- [IEEE OUI Lookup](https://standards.ieee.org/products-services/regauth/oui/index.html)
-- [MAC Address Lookup](https://macaddress.io/)
+
 
 ---
 
