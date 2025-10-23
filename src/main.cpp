@@ -871,13 +871,6 @@ const char* getConfigHTML() {
             position: relative;
             z-index: 1;
         }
-            max-width: 700px; 
-            margin: 0 auto; 
-            background: #2d2d2d; 
-            padding: 40px; 
-            border-radius: 12px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3); 
-        }
         h1 {
             text-align: center;
             margin-bottom: 20px;
@@ -1406,19 +1399,11 @@ DD:EE:FF:ab:cd:ef
             }
             
             function burnInConfig() {
-                if (!confirm('CONFIGURATION LOCK WARNING\n\nThis will PERMANENTLY lock your configuration.\n\nAfter activation:\n- 20-second config window disabled\n- WiFi AP mode disabled on boot\n- Direct transition to scanning mode\n- Unlock requires: flash erase + firmware reflash via USB\n\nAre you absolutely certain?')) {
+                if (!confirm('PERMANENT CONFIGURATION LOCK\n\nThis will PERMANENTLY lock all settings (OUI/MAC filters, aliases, buzzer/LED preferences).\n\nAfter activation:\n- WiFi AP and config window disabled on boot\n- Device boots directly to scanning mode\n- Unlock requires: flash erase + firmware reflash via USB\n\nClick OK to proceed with permanent lock.')) {
                     return;
                 }
                 
-                if (!confirm('FINAL WARNING\n\nThis action is IRREVERSIBLE without erasing flash storage.\n\nYour current OUI/MAC filters and aliases will be permanently locked.\n\nTo unlock: You must erase flash, then reflash firmware.\n\nClick OK if you understand and wish to proceed.')) {
-                    return;
-                }
-                
-                if (!confirm('LAST CONFIRMATION\n\nClick OK to PERMANENTLY LOCK configuration.\nClick Cancel to abort this operation.')) {
-                    return;
-                }
-                
-                // User confirmed 3 times, proceed with burn-in
+                // User confirmed, proceed with burn-in
                 fetch('/api/lock-config', { method: 'POST' })
                     .then(response => response.text())
                     .then(data => {
