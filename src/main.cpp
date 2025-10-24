@@ -1560,7 +1560,23 @@ void startConfigMode() {
     // Setup web server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         lastConfigActivity = millis();
-        request->send(200, "text/html", generateConfigHTML());
+        String html = generateConfigHTML();
+        
+        // Use chunked transfer for large HTML content
+        AsyncWebServerResponse *response = request->beginChunkedResponse("text/html", [html](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            size_t len = html.length();
+            if (index >= len) {
+                return 0; // End of content
+            }
+            
+            size_t chunkSize = min(maxLen, len - index);
+            memcpy(buffer, html.c_str() + index, chunkSize);
+            return chunkSize;
+        });
+        
+        response->addHeader("Cache-Control", "no-cache");
+        response->addHeader("Content-Length", String(html.length()));
+        request->send(response);
     });
     
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
