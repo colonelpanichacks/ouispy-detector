@@ -1498,8 +1498,8 @@ String generateConfigHTML() {
     html.replace("AA:BB:CC\nDD:EE:FF\n11:22:33", randomOUIExamples);
     html.replace("AA:BB:CC:12:34:56\nDD:EE:FF:ab:cd:ef\n11:22:33:44:55:66", randomMACExamples);
     
-    // Add ASCII art background
-    html.replace("%ASCII_ART%", String(getASCIIArt()));
+    // Remove ASCII art - causes memory exhaustion on ESP32
+    html.replace("%ASCII_ART%", "");
     
     html.replace("%OUI_VALUES%", ouiValues);
     html.replace("%MAC_VALUES%", macValues);
@@ -1560,23 +1560,7 @@ void startConfigMode() {
     // Setup web server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         lastConfigActivity = millis();
-        String html = generateConfigHTML();
-        
-        // Use chunked transfer for large HTML content
-        AsyncWebServerResponse *response = request->beginChunkedResponse("text/html", [html](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-            size_t len = html.length();
-            if (index >= len) {
-                return 0; // End of content
-            }
-            
-            size_t chunkSize = min(maxLen, len - index);
-            memcpy(buffer, html.c_str() + index, chunkSize);
-            return chunkSize;
-        });
-        
-        response->addHeader("Cache-Control", "no-cache");
-        response->addHeader("Content-Length", String(html.length()));
-        request->send(response);
+        request->send(200, "text/html", generateConfigHTML());
     });
     
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
