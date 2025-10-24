@@ -44,6 +44,18 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - Stealth mode operation
 - No traceable hardware fingerprints
 
+### Device Management
+- **Device Aliasing:** Assign custom names to detected devices
+- **Persistent History:** All detected devices saved to NVS (up to 100 devices)
+- **Automatic Sync:** Device list updates across reboots
+- **Clear History:** Remove all stored device records
+
+### Burn In Settings
+- **Permanent Lock:** Lock configuration and bypass setup on boot
+- **Instant Scanning:** Device boots directly into scanning mode
+- **Protected Settings:** All filters, aliases, and preferences preserved
+- **Secure Reset:** Requires flash erase + reflash to unlock
+
 ## Installation
 
 ### PlatformIO
@@ -95,13 +107,56 @@ GND              →    GND (Ground)
 - **MAC:** Complete 6-byte address
 - **Format:** Supports colons, hyphens, or spaces
 
+### Device Alias Management
+Assign custom names to detected devices via the web portal:
+
+1. **Access Portal:** Connect to device AP and navigate to `http://192.168.4.1`
+2. **View Devices:** Detected devices appear in "Device Alias Management" section
+3. **Set Alias:** Enter custom name next to any device and click "Set Alias"
+4. **Remove Alias:** Clear the name field and click "Set Alias" to remove
+5. **Clear History:** Use "Clear Device History" button to remove all stored devices
+
+**Storage:** Up to 100 devices stored in NVS, persists across reboots and power cycles.
+
+### Burn In Configuration
+Permanently lock settings for deployment scenarios:
+
+#### What Gets Locked
+- All OUI/MAC filters and descriptions
+- Device aliases and detection history
+- Buzzer and LED preferences
+- Configuration window disabled
+- WiFi AP disabled
+
+#### How to Lock
+1. Configure all desired filters and aliases
+2. Navigate to "Burn In Settings" section
+3. Read warnings carefully
+4. Click "Lock Configuration Permanently"
+5. Confirm three separate prompts
+6. Device restarts in 3 seconds into scanning mode
+
+#### How to Unlock
+**Required:** Flash erase followed by firmware reflash
+```bash
+# Erase flash memory
+pio run -e seeed_xiao_esp32s3 --target erase
+
+# Reflash firmware
+pio run -e seeed_xiao_esp32s3 --target upload
+```
+
+**Warning:** Simple reflash without erase will NOT unlock the device.
+
 ## Operation
 
 ### Startup Sequence
 1. MAC randomization (stealth mode)
-2. Configuration mode (20-second timeout)
-3. BLE scanning activation
-4. Target detection and audio alerts
+2. Load saved configuration, aliases, and device history
+3. Configuration mode (20-second timeout) *OR* direct to scanning if burned in
+4. BLE scanning activation
+5. Target detection and audio alerts
+6. Auto-save device history every 60 seconds
 
 ### Detection Logic
 - Continuous BLE scanning
@@ -116,33 +171,45 @@ GND              →    GND (Ground)
 Original MAC: d8:3b:da:45:aa:a0
 Randomized MAC: a2:f3:91:7e:8c:45
 
+Loading configuration...
+Device aliases loaded from NVS (3 aliases)
+Detected devices loaded from NVS (15 devices)
+
 === STARTING SCANNING MODE ===
 Configured Filters:
-- AA:BB:CC (OUI)
-- AA:BB:CC:12:34:56 (MAC)
+- AA:BB:CC (OUI) - "DJI Drones"
+- AA:BB:CC:12:34:56 (MAC) - "Test Device"
 
 >> Match found! <<
-Device: AA:BB:CC:ab:cd:ef | RSSI: -45
-Filter matched: OUI
+Device: AA:BB:CC:ab:cd:ef (My Drone) | RSSI: -45
+Filter matched: DJI Drones (OUI)
+
+Device aliases saved to NVS (3 aliases)
+Detected devices saved to NVS (16 devices)
 ```
 
 ## Troubleshooting
 
-**No WiFi AP:** Wait 30 seconds after power-on
+**No WiFi AP:** Wait 30 seconds after power-on, or device may be burned in (requires flash erase)
 **No web portal:** Ensure connected to `snoopuntothem`, disable mobile data
 **No audio:** Check buzzer connection (GPIO3)
 **No LED:** Check NeoPixel wiring (GPIO4, 3.3V, GND)
 **No detection:** Verify target device is advertising BLE
+**Aliases not saving:** Check NVS storage space, maximum 100 devices/aliases
+**Device history empty:** Devices only appear after detection during a scanning session
+**Can't unlock burned config:** Must erase flash first, then reflash firmware
 
 ## Technical Specifications
 
 - **Platform:** ESP32-S3
 - **Scan interval:** 3 seconds
 - **Range:** 10-30 meters (typical)
-- **Storage:** NVS flash memory
+- **Storage:** NVS flash memory (filters, aliases, device history)
+- **Device history:** Up to 100 devices with persistent storage
 - **Processing:** Dual-core optimization
 - **Audio:** GPIO3 buzzer with PWM control
 - **Visual:** GPIO4 NeoPixel with synchronized animations
+- **Auto-save:** Device data saved every 60 seconds during scanning
 
 ## License
 
