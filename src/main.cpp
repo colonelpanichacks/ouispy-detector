@@ -43,8 +43,8 @@ int detectionFlashCount = 0;
 // ================================
 // WiFi AP Configuration
 // ================================
-#define AP_SSID "snoopuntothem"
-#define AP_PASSWORD "astheysnoopuntous"
+String AP_SSID = "snoopuntothem";
+String AP_PASSWORD = "astheysnoopuntous";
 #define CONFIG_TIMEOUT 20000   // 20 seconds timeout for config mode
 
 // ================================
@@ -413,13 +413,20 @@ void loadConfiguration() {
     }
     
     preferences.end();
-    
-    if (isSerialConnected()) {
-        Serial.println("Configuration loaded from NVS");
-        Serial.println("Loaded " + String(targetFilters.size()) + " filters");
-        Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
-        Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
-    }
+}
+
+void loadWiFiCredentials() {
+    preferences.begin("ouispy", true);
+    AP_SSID = preferences.getString("ap_ssid", "snoopuntothem");
+    AP_PASSWORD = preferences.getString("ap_password", "astheysnoopuntous");
+    preferences.end();
+}
+
+void saveWiFiCredentials() {
+    preferences.begin("ouispy", false);
+    preferences.putString("ap_ssid", AP_SSID);
+    preferences.putString("ap_password", AP_PASSWORD);
+    preferences.end();
 }
 
 // ================================
@@ -1050,6 +1057,24 @@ DD:EE:FF:ab:cd:ef
                 </div>
             </div>
             
+            <div class="section">
+                <h3>WiFi Access Point Settings</h3>
+                <div class="help-text" style="margin-bottom: 15px;">
+                    Customize the WiFi network name and password for the configuration portal.<br>
+                    <strong>Changes take effect on next device boot.</strong>
+                </div>
+                <div style="margin-bottom: 15px;">
+                    <label for="ap_ssid" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Network Name (SSID)</label>
+                    <input type="text" id="ap_ssid" name="ap_ssid" value="%AP_SSID%" maxlength="32" style="width: 100%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <div class="help-text" style="margin-top: 5px;">1-32 characters</div>
+                </div>
+                <div>
+                    <label for="ap_password" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Password</label>
+                    <input type="text" id="ap_password" name="ap_password" value="%AP_PASSWORD%" minlength="8" maxlength="63" style="width: 100%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <div class="help-text" style="margin-top: 5px;">8-63 characters (leave empty for open network)</div>
+                </div>
+            </div>
+            
             <!-- Detected Devices Section -->
             <div class="section" id="detectedDevicesSection">
                 <h3>Device Alias Management</h3>
@@ -1483,6 +1508,10 @@ String generateConfigHTML() {
     html.replace("%BUZZER_CHECKED%", buzzerEnabled ? "checked" : "");
     html.replace("%LED_CHECKED%", ledEnabled ? "checked" : "");
     
+    // Replace WiFi credentials
+    html.replace("%AP_SSID%", AP_SSID);
+    html.replace("%AP_PASSWORD%", AP_PASSWORD);
+    
     return html;
 }
 
@@ -1494,8 +1523,8 @@ void startConfigMode() {
     // configStartTime will be set AFTER AP is fully ready
     
     Serial.println("\n=== STARTING CONFIG MODE ===");
-    Serial.println("SSID: " + String(AP_SSID));
-    Serial.println("Password: " + String(AP_PASSWORD));
+    Serial.println("SSID: " + AP_SSID);
+    Serial.println("Password: " + AP_PASSWORD);
     Serial.println("Initializing WiFi AP...");
     
     // Ensure WiFi is off first
@@ -1508,7 +1537,7 @@ void startConfigMode() {
     delay(500);
     
     Serial.println("Creating access point...");
-    bool apStarted = WiFi.softAP(AP_SSID, AP_PASSWORD);
+    bool apStarted = WiFi.softAP(AP_SSID.c_str(), AP_PASSWORD.c_str());
     
     if (apStarted) {
         Serial.println("✓ Access Point created successfully!");
@@ -1617,9 +1646,32 @@ void startConfigMode() {
         buzzerEnabled = request->hasParam("buzzerEnabled", true);
         ledEnabled = request->hasParam("ledEnabled", true);
         
+        // Process WiFi credentials
+        if (request->hasParam("ap_ssid", true)) {
+            String newSSID = request->getParam("ap_ssid", true)->value();
+            newSSID.trim();
+            if (newSSID.length() > 0 && newSSID.length() <= 32) {
+                AP_SSID = newSSID;
+            }
+        }
+        
+        if (request->hasParam("ap_password", true)) {
+            String newPassword = request->getParam("ap_password", true)->value();
+            newPassword.trim();
+            // Allow empty password for open network, or 8-63 chars
+            if (newPassword.length() == 0 || (newPassword.length() >= 8 && newPassword.length() <= 63)) {
+                AP_PASSWORD = newPassword;
+            }
+        }
+        
+        // Save WiFi credentials
+        saveWiFiCredentials();
+        
         if (isSerialConnected()) {
             Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
             Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
+            Serial.println("WiFi SSID: " + AP_SSID);
+            Serial.println("WiFi Password: " + String(AP_PASSWORD.length() > 0 ? "********" : "(Open Network)"));
         }
         
         if (targetFilters.size() > 0) {
@@ -2107,11 +2159,21 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println("\n\n=== OUI Spy Enhanced BLE Detector ===");
-    Serial.println("Hardware: Xiao ESP32 S3");
-    Serial.println("Buzzer: GPIO3 (D2)");
-    Serial.println("NeoPixel: GPIO4 (D3)");
-    Serial.println("Initializing...");
+    // Print ASCII art banner
+    Serial.println("\n\n");
+    Serial.println("        _________        .__                       .__    __________               .__              ");
+    Serial.println("        \\_   ___ \\  ____ |  |   ____   ____   ____ |  |   \\______   \\_____    ____ |__| ____        ");
+    Serial.println("        /    \\  \\/ /  _ \\|  |  /  _ \\ /    \\_/ __ \\|  |    |     ___/\\__  \\  /    \\|  |/ ___\\       ");
+    Serial.println("        \\     \\___(  <_> )  |_(  <_> )   |  \\  ___/|  |__  |    |     / __ \\|   |  \\  \\  \\___       ");
+    Serial.println("         \\______  /\\____/|____/\\____/|___|  /\\___  >____/  |____|    (____  /___|  /__/\\___  >      ");
+    Serial.println("                \\/                        \\/     \\/                       \\/     \\/        \\/       ");
+    Serial.println("             .__                                     .___      __                 __                ");
+    Serial.println("  ____  __ __|__|           ____________ ___.__.   __| _/_____/  |_  ____   _____/  |_  ___________ ");
+    Serial.println(" /  _ \\|  |  \\  |  ______  /  ___/\\____ <   |  |  / __ |/ __ \\   __\\/ __ \\_/ ___\\   __\\/  _ \\_  __ \\");
+    Serial.println("(  <_> )  |  /  | /_____/  \\___ \\ |  |_> >___  | / /_/ \\  ___/|  | \\  ___/\\  \\___|  | (  <_> )  | \\/");
+    Serial.println(" \\____/|____/|__|         /____  >|   __// ____| \\____ |\\___  >__|  \\___  >\\___  >__|  \\____/|__|   ");
+    Serial.println("                               \\/ |__|   \\/           \\/    \\/          \\/     \\/                   ");
+    Serial.println("\n");
     
     // Randomize MAC address on each boot
     uint8_t newMAC[6];
@@ -2149,19 +2211,15 @@ void setup() {
     // Silence ESP-IDF logs
     esp_log_level_set("*", ESP_LOG_NONE);
     
-    Serial.println("Initializing buzzer...");
     initializeBuzzer();
     
     // Test buzzer
-    Serial.println("Testing buzzer...");
     singleBeep();
     delay(500);
     
-    Serial.println("Initializing NeoPixel...");
     initializeNeoPixel();
     
     // Test NeoPixel
-    Serial.println("Testing NeoPixel...");
     setNeoPixelColor(255, 0, 255); // Bright pink
     delay(1000);
     setNeoPixelColor(128, 0, 255); // Purple
@@ -2188,8 +2246,8 @@ void setup() {
         Serial.println("Factory reset complete - starting with clean state");
     } else {
         // Load configuration from NVS
-        Serial.println("Loading configuration...");
         loadConfiguration();
+        loadWiFiCredentials();
         loadDeviceAliases();
         loadDetectedDevices();
     }
@@ -2266,7 +2324,7 @@ void loop() {
             if (currentMillis - configStartTime > CONFIG_TIMEOUT && lastConfigActivity == configStartTime) {
                 if (isSerialConnected()) {
                     Serial.println("No one connected and no saved filters - staying in config mode");
-                    Serial.println("Connect to 'snoopuntothem' AP to configure your first filters!");
+                    Serial.println("Connect to '" + AP_SSID + "' AP to configure your first filters!");
                 }
             }
         } else if (targetFilters.size() > 0) {
