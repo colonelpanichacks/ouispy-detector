@@ -1344,8 +1344,10 @@ DD:EE:FF:ab:cd:ef
             
             function saveAlias(mac, alias, button) {
                 const originalText = button.textContent;
+                const originalBg = button.style.background;
                 button.textContent = 'Saving...';
                 button.disabled = true;
+                button.style.opacity = '0.6';
                 
                 fetch('/api/alias', {
                     method: 'POST',
@@ -1357,18 +1359,24 @@ DD:EE:FF:ab:cd:ef
                 .then(response => response.json())
                 .then(data => {
                     button.textContent = 'Saved!';
+                    button.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+                    button.style.opacity = '1';
                     setTimeout(() => {
                         button.textContent = originalText;
+                        button.style.background = originalBg;
                         button.disabled = false;
-                    }, 1500);
+                    }, 2000);
                 })
                 .catch(error => {
                     console.error('Error saving alias:', error);
                     button.textContent = 'Error';
+                    button.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+                    button.style.opacity = '1';
                     setTimeout(() => {
                         button.textContent = originalText;
+                        button.style.background = originalBg;
                         button.disabled = false;
-                    }, 1500);
+                    }, 2000);
                 });
             }
             
@@ -2378,28 +2386,9 @@ void loop() {
             lastScanTime = currentMillis;
         }
 
-        // Clean up expired devices every 10 seconds
+        // Auto-save detected devices to NVS every 10 seconds
         if (currentMillis - lastCleanupTime >= 10000) {
-            int devicesBefore = devices.size();
-            
-            for (auto it = devices.begin(); it != devices.end();) {
-                if (currentMillis - it->lastSeen >= 60000) {
-                    if (isSerialConnected()) {
-                        Serial.println("Removed expired device: " + it->macAddress);
-                    }
-                    it = devices.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-            
-            if (isSerialConnected() && devices.size() != devicesBefore) {
-                Serial.println("Cleanup: Removed " + String(devicesBefore - devices.size()) + " expired devices");
-            }
-            
-            // Auto-save detected devices to NVS
             saveDetectedDevices();
-            
             lastCleanupTime = currentMillis;
         }
 
