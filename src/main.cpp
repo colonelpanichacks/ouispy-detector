@@ -389,7 +389,7 @@ void loadConfiguration() {
     
     targetFilters.clear();
     
-    // Load saved filters or use defaults
+    // Load saved filters (no defaults - start empty)
     if (filterCount > 0) {
         for (int i = 0; i < filterCount; i++) {
             String keyId = "id_" + String(i);
@@ -405,12 +405,8 @@ void loadConfiguration() {
                 targetFilters.push_back(filter);
             }
         }
-    } else {
-        // Default configuration
-        targetFilters.push_back({"AA:BB:CC", false, "Example Manufacturer"});
-        targetFilters.push_back({"DD:EE:FF", false, "Another Manufacturer"});
-        targetFilters.push_back({"AA:BB:CC:12:34:56", true, "Specific Device"});
     }
+    // No default values - form starts empty (placeholder examples remain in HTML)
     
     preferences.end();
 }
@@ -1019,7 +1015,7 @@ const char* getConfigHTML() {
         <form id="configForm" method="POST" action="/save">
             <div class="section">
                 <h3>OUI Prefixes</h3>
-                <textarea name="ouis" placeholder="Enter OUI prefixes, one per line:
+                <textarea id="ouis" name="ouis" placeholder="Enter OUI prefixes, one per line:
 AA:BB:CC
 DD:EE:FF
 11:22:33">%OUI_VALUES%</textarea>
@@ -1031,7 +1027,7 @@ DD:EE:FF
             
             <div class="section">
                 <h3>MAC Addresses</h3>
-                <textarea name="macs" placeholder="Enter full MAC addresses, one per line:
+                <textarea id="macs" name="macs" placeholder="Enter full MAC addresses, one per line:
 AA:BB:CC:12:34:56
 DD:EE:FF:ab:cd:ef
 11:22:33:44:55:66">%MAC_VALUES%</textarea>
@@ -1436,8 +1432,36 @@ DD:EE:FF:ab:cd:ef
                     return;
                 }
                 
-                // User confirmed, proceed with burn-in
-                fetch('/api/lock-config', { method: 'POST' })
+                // Collect current form values
+                const formData = new URLSearchParams();
+                const ouisElement = document.getElementById('ouis');
+                const macsElement = document.getElementById('macs');
+                const ouis = ouisElement ? ouisElement.value.trim() : '';
+                const macs = macsElement ? macsElement.value.trim() : '';
+                const buzzerEnabled = document.getElementById('buzzerEnabled') ? document.getElementById('buzzerEnabled').checked : true;
+                const ledEnabled = document.getElementById('ledEnabled') ? document.getElementById('ledEnabled').checked : true;
+                const apSSID = document.getElementById('ap_ssid') ? document.getElementById('ap_ssid').value : '';
+                const apPassword = document.getElementById('ap_password') ? document.getElementById('ap_password').value : '';
+                
+                // Debug logging
+                console.log('Burn-in: OUI values:', ouis);
+                console.log('Burn-in: MAC values:', macs);
+                
+                formData.append('ouis', ouis);
+                formData.append('macs', macs);
+                if (buzzerEnabled) formData.append('buzzerEnabled', 'on');
+                if (ledEnabled) formData.append('ledEnabled', 'on');
+                formData.append('ap_ssid', apSSID);
+                formData.append('ap_password', apPassword);
+                
+                // User confirmed, proceed with burn-in - send current form values
+                fetch('/api/lock-config', { 
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: formData.toString()
+                })
                     .then(response => response.text())
                     .then(data => {
                         // Response is HTML that shows the success page
@@ -1884,8 +1908,131 @@ void startConfigMode() {
         if (isSerialConnected()) {
             Serial.println("======================================");
             Serial.println("CONFIGURATION LOCK REQUESTED");
-            Serial.println("Locking configuration permanently...");
+            Serial.println("Saving current form values before locking...");
             Serial.println("======================================");
+        }
+        
+        // Process and save current form values (same logic as /save endpoint)
+        targetFilters.clear();
+        
+        // Process OUI entries
+        if (request->hasParam("ouis", true)) {
+            String ouiData = request->getParam("ouis", true)->value();
+            ouiData.trim();
+            
+            if (isSerialConnected()) {
+                Serial.println("Received OUI data length: " + String(ouiData.length()));
+                Serial.println("OUI data: [" + ouiData + "]");
+            }
+            
+            if (ouiData.length() > 0) {
+                // Split by newlines and process each OUI
+                int start = 0;
+                int end = ouiData.indexOf('\n');
+                
+                while (start < ouiData.length()) {
+                    String oui;
+                    if (end == -1) {
+                        oui = ouiData.substring(start);
+                        start = ouiData.length();
+                    } else {
+                        oui = ouiData.substring(start, end);
+                        start = end + 1;
+                        end = ouiData.indexOf('\n', start);
+                    }
+                    
+                    oui.trim();
+                    oui.replace("\r", ""); // Remove carriage returns
+                    
+                    if (oui.length() > 0 && isValidMAC(oui)) {
+                        TargetFilter filter;
+                        filter.identifier = oui;
+                        filter.description = "OUI: " + oui;
+                        filter.isFullMAC = false;
+                        targetFilters.push_back(filter);
+                    }
+                }
+            }
+        }
+        
+        // Process MAC address entries
+        if (request->hasParam("macs", true)) {
+            String macData = request->getParam("macs", true)->value();
+            macData.trim();
+            
+            if (isSerialConnected()) {
+                Serial.println("Received MAC data length: " + String(macData.length()));
+                Serial.println("MAC data: [" + macData + "]");
+            }
+            
+            if (macData.length() > 0) {
+                // Split by newlines and process each MAC
+                int start = 0;
+                int end = macData.indexOf('\n');
+                
+                while (start < macData.length()) {
+                    String mac;
+                    if (end == -1) {
+                        mac = macData.substring(start);
+                        start = macData.length();
+                    } else {
+                        mac = macData.substring(start, end);
+                        start = end + 1;
+                        end = macData.indexOf('\n', start);
+                    }
+                    
+                    mac.trim();
+                    mac.replace("\r", ""); // Remove carriage returns
+                    
+                    if (mac.length() > 0 && isValidMAC(mac)) {
+                        TargetFilter filter;
+                        filter.identifier = mac;
+                        filter.description = "MAC: " + mac;
+                        filter.isFullMAC = true;
+                        targetFilters.push_back(filter);
+                    }
+                }
+            }
+        }
+        
+        // Process buzzer and LED toggles
+        buzzerEnabled = request->hasParam("buzzerEnabled", true);
+        ledEnabled = request->hasParam("ledEnabled", true);
+        
+        // Process WiFi credentials
+        if (request->hasParam("ap_ssid", true)) {
+            String newSSID = request->getParam("ap_ssid", true)->value();
+            newSSID.trim();
+            if (newSSID.length() > 0 && newSSID.length() <= 32) {
+                AP_SSID = newSSID;
+            }
+        }
+        
+        if (request->hasParam("ap_password", true)) {
+            String newPassword = request->getParam("ap_password", true)->value();
+            newPassword.trim();
+            // Allow empty password for open network, or 8-63 chars
+            if (newPassword.length() == 0 || (newPassword.length() >= 8 && newPassword.length() <= 63)) {
+                AP_PASSWORD = newPassword;
+            }
+        }
+        
+        // Save WiFi credentials
+        saveWiFiCredentials();
+        
+        // Save configuration (even if empty - that's what user wants)
+        saveConfiguration();
+        
+        if (isSerialConnected()) {
+            Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
+            Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
+            Serial.println("WiFi SSID: " + AP_SSID);
+            Serial.println("WiFi Password: " + String(AP_PASSWORD.length() > 0 ? "********" : "(Open Network)"));
+            Serial.println("Saved " + String(targetFilters.size()) + " filters before locking:");
+            for (const TargetFilter& filter : targetFilters) {
+                String type = filter.isFullMAC ? "Full MAC" : "OUI";
+                Serial.println("  - " + filter.identifier + " (" + type + ")");
+            }
         }
         
         // Set the lock flag
