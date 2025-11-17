@@ -21,7 +21,7 @@
 #define BUZZER_FREQ 2000  // Frequency in Hz
 #define BUZZER_DUTY 127  // 50% duty cycle for good volume without excessive power draw
 #define BEEP_DURATION 200  // Duration of each beep in ms
-#define BEEP_PAUSE 150  // Pause between beeps in ms
+#define BEEP_PAUSE 50  // Pause between beeps in ms (faster sequence)
 #define LED_PIN 21   // GPIO21 for onboard LED (inverted logic)
 
 // ================================
@@ -73,7 +73,7 @@ volatile bool newMatchFound = false;
 String detectedMAC = "";
 int detectedRSSI = 0;
 String matchedFilter = "";
-String matchType = "";  // "NEW", "RE-5s", "RE-30s"
+String matchType = "";  // "NEW", "RE-3s", "RE-30s"
 
 // Persistent settings
 bool buzzerEnabled = true;
@@ -2207,17 +2207,17 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
                         threeBeeps();
                         dev.inCooldown = true;
                         dev.cooldownUntil = currentMillis + 10000;
-                    } else if (timeSinceLastSeen >= 5000) {
+                    } else if (timeSinceLastSeen >= 3000) {
                         // Store data for main loop to process
                         detectedMAC = mac;
                         detectedRSSI = rssi;
                         matchedFilter = matchedDescription;
-                        matchType = "RE-5s";
+                        matchType = "RE-3s";
                         newMatchFound = true;
                         
                         twoBeeps();
                         dev.inCooldown = true;
-                        dev.cooldownUntil = currentMillis + 5000;
+                        dev.cooldownUntil = currentMillis + 3000;
                     }
 
                     dev.lastSeen = currentMillis;
@@ -2248,7 +2248,7 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
                 
                 auto& dev = devices.back();
                 dev.inCooldown = true;
-                dev.cooldownUntil = currentMillis + 5000;
+                dev.cooldownUntil = currentMillis + 3000;
             }
         }
     }
