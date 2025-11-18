@@ -4,7 +4,7 @@
 
 ## Categorized by Manufacturer
 
-<details open>
+<details>
 
 <summary><b>RING</b> <code>11 OUIs</code></summary>
 
@@ -30,12 +30,20 @@
 
 - `CC:3B:FB`
 
-**Copy CSV:**
+**Copy OUIs:**
 
 ```
-
-18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB
-
+18:7F:88
+24:2B:D6
+34:3E:A4
+54:E0:19
+5C:47:5E
+64:9A:63
+90:48:6C
+9C:76:13
+AC:9F:C3
+C4:DB:AD
+CC:3B:FB
 ```
 
 > **Category:** Doorbell/Security Camera  
@@ -52,12 +60,10 @@
 
 - `00:25:DF`
 
-**Copy CSV:**
+**Copy OUIs:**
 
 ```
-
 00:25:DF
-
 ```
 
 > **Category:** Body Camera / Law Enforcement  
@@ -74,12 +80,10 @@
 
 - `B4:1E:52`
 
-**Copy CSV:**
+**Copy OUIs:**
 
 ```
-
 B4:1E:52
-
 ```
 
 > **Category:** Automated License Plate Reader (ALPR) / Security Camera  
@@ -110,12 +114,17 @@ B4:1E:52
 
 - `34:D2:62`
 
-**Copy CSV:**
+**Copy OUIs:**
 
 ```
-
-0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62
-
+0C:9A:E6
+8C:58:23
+04:A8:5A
+58:B8:58
+E4:7A:2C
+60:60:1F
+48:1C:B9
+34:D2:62
 ```
 
 > **Category:** Consumer & Commercial Drones  
@@ -140,12 +149,14 @@ B4:1E:52
 
 - `A0:14:3D`
 
-**Copy CSV:**
+**Copy OUIs:**
 
 ```
-
-00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D
-
+00:12:1C
+00:26:7E
+90:03:B7
+90:3A:E6
+A0:14:3D
 ```
 
 > **Category:** Consumer & Commercial Drones  
@@ -156,14 +167,58 @@ B4:1E:52
 
 </details>
 
+<details>
+
+<summary><b>SKYDIO</b> <code>1 OUI</code></summary>
+
+- `38:1D:14`
+
+**Copy OUIs:**
+
+```
+38:1D:14
+```
+
+> **Category:** Commercial & Enterprise Drones  
+
+> **Detection Range:** WiFi range  
+
+> **Common Devices:** Skydio 2, Skydio X2, Skydio 3
+
+</details>
+
 ---
 
-## Copyable CSV Format - All OUIs
+## Copy All OUIs for OUI-SPY
 
-```csv
-
-18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB,00:25:DF,B4:1E:52,0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62,00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D
-
+```
+18:7F:88
+24:2B:D6
+34:3E:A4
+54:E0:19
+5C:47:5E
+64:9A:63
+90:48:6C
+9C:76:13
+AC:9F:C3
+C4:DB:AD
+CC:3B:FB
+00:25:DF
+B4:1E:52
+0C:9A:E6
+8C:58:23
+04:A8:5A
+58:B8:58
+E4:7A:2C
+60:60:1F
+48:1C:B9
+34:D2:62
+00:12:1C
+00:26:7E
+90:03:B7
+90:3A:E6
+A0:14:3D
+38:1D:14
 ```
 
 <div align="center">
@@ -180,7 +235,7 @@ Found a new OUI? Help build the database!
 
 1. **Add to categorized list** with appropriate section
 
-2. **Append to CSV block** (comma-separated)
+2. **Append to OUI block** (one per line)
 
 3. **Update badge counts** in header
 
@@ -190,7 +245,7 @@ Found a new OUI? Help build the database!
 
 <div align="center">
 
-**Total OUIs:** `26` | **Last Updated:** Auto-generated from categorized lists
+**Total OUIs:** `27` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 
