@@ -4,7 +4,7 @@
 
 ## Categorized by Manufacturer
 
-<details open>
+
 
 <summary><b>RING</b> <code>11 OUIs</code></summary>
 
