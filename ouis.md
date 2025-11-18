@@ -70,6 +70,28 @@
 
 <details>
 
+<summary><b>FLOCK SAFETY</b> <code>1 OUI</code></summary>
+
+- `B4:1E:52`
+
+**Copy CSV:**
+
+```
+
+B4:1E:52
+
+```
+
+> **Category:** Automated License Plate Reader (ALPR) / Security Camera  
+
+> **Detection Range:** WiFi/Cellular  
+
+> **Common Devices:** Flock Safety Camera, Falcon Camera, Raven Camera
+
+</details>
+
+<details>
+
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
 - `0C:9A:E6`
@@ -140,7 +162,7 @@
 
 ```csv
 
-18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB,00:25:DF,0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62,00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D
+18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB,00:25:DF,B4:1E:52,0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62,00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D
 
 ```
 
@@ -168,7 +190,7 @@ Found a new OUI? Help build the database!
 
 <div align="center">
 
-**Total OUIs:** `25` | **Last Updated:** Auto-generated from categorized lists
+**Total OUIs:** `26` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 
