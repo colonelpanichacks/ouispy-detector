@@ -211,6 +211,20 @@ Detected devices saved to NVS (16 devices)
 - **Visual:** GPIO4 NeoPixel with synchronized animations
 - **Auto-save:** Device data saved every 60 seconds during scanning
 
+## OUI-SPY Firmware Ecosystem
+
+OUI-SPY Detector is part of the OUI-SPY firmware family:
+
+| Firmware | Description | Board |
+|----------|-------------|-------|
+| **[OUI-SPY Unified](https://github.com/colonelpanichacks/oui-spy-unified-blue)** | Multi-mode BLE + WiFi detector | ESP32-S3 / ESP32-C5 |
+| **[OUI-SPY Detector](https://github.com/colonelpanichacks/ouispy-detector)** | Targeted BLE scanner with OUI filtering (this project) | ESP32-S3 |
+| **[OUI-SPY Foxhunter](https://github.com/colonelpanichacks/ouispy-foxhunter)** | RSSI-based proximity tracker | ESP32-S3 |
+| **[Flock You](https://github.com/colonelpanichacks/flock-you)** | Flock Safety / Raven surveillance detection | ESP32-S3 |
+| **[Sky-Spy](https://github.com/colonelpanichacks/Sky-Spy)** | Drone Remote ID detection | ESP32-S3 / ESP32-C5 |
+| **[Remote-ID-Spoofer](https://github.com/colonelpanichacks/Remote-ID-Spoofer)** | WiFi Remote ID spoofer & simulator with swarm mode | ESP32-S3 |
+| **[OUI-SPY UniPwn](https://github.com/colonelpanichacks/Oui-Spy-UniPwn)** | Unitree robot exploitation system | ESP32-S3 |
+
 ## License
 
-Open source project. Modifications welcome. 
+Open source project. Modifications welcome.
