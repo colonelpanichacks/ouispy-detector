@@ -187,7 +187,9 @@ A0:14:3D
 
 </details>
 
-<summary><b>META/RAYBAN SMARTGLASSES</b> <code>4 OUI</code></summary>
+<details>
+
+<summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
 
 *sourced from [glass-detect repository](https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21)*
 
@@ -214,6 +216,8 @@ F4:03:43
 > **Detection Range:** WiFi/BLE range  
 
 > **Common Devices:** Meta/Ray-Ban Smartglasses
+
+</details>
 
 ---
 
@@ -278,7 +282,7 @@ Found a new OUI? Help build the database!
 
 <div align="center">
 
-**Total OUIs:** `31` | **Last Updated:** Auto-generated from categorized lists
+**Total OUIs:** `32` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 
