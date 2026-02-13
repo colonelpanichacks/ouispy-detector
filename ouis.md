@@ -187,6 +187,38 @@ A0:14:3D
 
 </details>
 
+<details>
+
+<summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
+
+*sourced from [glass-detect repository](https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21)*
+
+Last one from Luxottica Group S.P.A. detected by @konradit.
+
+- `7C:2A:9E`
+- `CC:66:0A`
+- `F4:03:43`
+- `5C:E9:1E`
+- `98:59:49`
+
+**Copy OUIs:**
+
+```
+7C:2A:9E
+CC:66:0A
+F4:03:43
+5C:E9:1E
+98:59:49
+```
+
+> **Category:** Smartglasses  
+
+> **Detection Range:** WiFi/BLE range  
+
+> **Common Devices:** Meta/Ray-Ban Smartglasses
+
+</details>
+
 ---
 
 ## Copy All OUIs for OUI-SPY
@@ -219,6 +251,11 @@ E4:7A:2C
 90:3A:E6
 A0:14:3D
 38:1D:14
+7C:2A:9E
+CC:66:0A
+F4:03:43
+5C:E9:1E
+98:59:49
 ```
 
 <div align="center">
@@ -245,7 +282,7 @@ Found a new OUI? Help build the database!
 
 <div align="center">
 
-**Total OUIs:** `27` | **Last Updated:** Auto-generated from categorized lists
+**Total OUIs:** `32` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 
