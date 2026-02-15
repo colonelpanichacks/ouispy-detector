@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <DNSServer.h>
 #include <Preferences.h>
 #include <NimBLEDevice.h>
 #include <NimBLEUtils.h>
@@ -60,6 +61,9 @@ enum OperatingMode {
 // ================================
 OperatingMode currentMode = CONFIG_MODE;
 AsyncWebServer server(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+const IPAddress captivePortalIP(192, 168, 4, 1);
 Preferences preferences;
 NimBLEScan* pBLEScan;
 unsigned long configStartTime = 0;
@@ -1547,6 +1551,15 @@ String generateConfigHTML() {
     return html;
 }
 
+// Android captive portal detection (expects 204 response, we send redirect instead)
+void handleGenerate204(AsyncWebServerRequest *request) {
+    request->redirect("http://192.168.4.1/");
+}
+
+void handleCaptiveDetect(AsyncWebServerRequest *request) {
+    request->send(200, "text/html", "<!DOCTYPE html><html><head><meta http-equiv='refresh' content='0;url=http://192.168.4.1/'></head><body><a href='http://192.168.4.1/'>Click here to configure OUI SPY detector</a></body></html>");
+}
+
 // ================================
 // WiFi and Web Server Functions
 // ================================
@@ -1583,6 +1596,10 @@ void startConfigMode() {
     IPAddress IP = WiFi.softAPIP();
     Serial.println("AP IP address: " + IP.toString());
     Serial.println("Config portal: http://" + IP.toString());
+    
+    // Start DNS server for captive portal - redirect all DNS queries to our IP
+    dnsServer.start(DNS_PORT, "*", captivePortalIP);
+    Serial.println("DNS server started (captive portal active)");
     Serial.println("==============================\n");
     
     // NOW start the countdown - AP is fully ready and visible
@@ -2158,6 +2175,16 @@ void startConfigMode() {
         // Schedule normal restart after 3 seconds (NOT factory reset)
         normalRestartScheduled = millis() + 3000;
     });
+
+    // Captive portal detection routes:
+    server.on("/generate_204", HTTP_GET, handleGenerate204);
+    server.on("/gen_204", HTTP_GET, handleGenerate204);
+    server.on("/connecttest.txt", HTTP_GET, handleCaptiveDetect);
+    server.on("/ncsi.txt", HTTP_GET, handleCaptiveDetect);
+    server.on("/hotspot-detect.html", HTTP_GET, handleCaptiveDetect);
+    server.on("/library/test/success.html", HTTP_GET, handleCaptiveDetect);
+    server.on("/canonical.html", HTTP_GET, handleCaptiveDetect);
+    server.on("/success.txt", HTTP_GET, handleCaptiveDetect);
     
     server.begin();
     
@@ -2257,7 +2284,8 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 void startScanningMode() {
     currentMode = SCANNING_MODE;
     
-    // Stop web server and WiFi
+    // Stop DNS server, web server, and WiFi
+    dnsServer.stop();
     server.end();
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -2500,6 +2528,9 @@ void loop() {
                 }
             }
         }
+        
+        // Process DNS requests for captive portal
+        dnsServer.processNextRequest();
         
         // Handle web server
         delay(100);
