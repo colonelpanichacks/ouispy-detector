@@ -1005,6 +1005,15 @@ const char* getConfigHTML() {
             color: #ffffff;
             border: 1px solid rgba(255, 20, 147, 0.2);
         }
+        .oui-db details { margin-bottom: 8px; }
+        .oui-db summary { cursor: pointer; padding: 10px; border-radius: 6px; background: rgba(255,255,255,0.03); transition: background 0.2s; }
+        .oui-db summary:hover { background: rgba(255,255,255,0.07); }
+        .oui-db .oui-entries { padding: 8px 0; line-height: 2; }
+        .oui-db .oui-entries code { display: inline-block; margin: 2px 4px; padding: 2px 8px; background: rgba(78,205,196,0.1); border-radius: 4px; font-size: 12px; color: #4ecdc4; }
+        .oui-add-btn { background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important; font-size: 13px !important; padding: 8px 16px !important; margin: 8px 0 !important; width: 100%; }
+        .oui-add-btn:hover { box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4) !important; }
+        .oui-db .oui-meta { font-size: 12px; color: #a0a0a0; margin: 2px 0; padding-left: 8px; }
+        .oui-db .oui-note { font-size: 11px; color: #888; margin: 4px 0; padding-left: 8px; font-style: italic; }
     </style>
 </head>
 <body>
@@ -1026,6 +1035,75 @@ DD:EE:FF
                 <div class="help-text">
                     OUI prefixes (first 3 bytes) match all devices from a manufacturer.<br>
                     Format: XX:XX:XX (8 characters with colons)
+                </div>
+            </div>
+            
+            <div class="section">
+                <h3>OUI Database</h3>
+                <div class="help-text" style="margin-bottom: 15px;">
+                    Browse known surveillance device OUI prefixes by manufacturer. Click <strong>"+ Add"</strong> to append them to your filter list above.
+                </div>
+                <div class="oui-db">
+                    <!-- OUI_DB_START -->
+                    <details>
+                    <summary><b>RING</b> <code>11 OUIs</code></summary>
+                    <div class="oui-entries"><code>18:7F:88</code> <code>24:2B:D6</code> <code>34:3E:A4</code> <code>54:E0:19</code> <code>5C:47:5E</code> <code>64:9A:63</code> <code>90:48:6C</code> <code>9C:76:13</code> <code>AC:9F:C3</code> <code>C4:DB:AD</code> <code>CC:3B:FB</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Doorbell/Security Camera</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> Typical WiFi/BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Ring Doorbell, Ring Camera, Ring Chime</div>
+                    </details>
+                    <details>
+                    <summary><b>AXON</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>00:25:DF</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('00:25:DF')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> Short-range BLE/WiFi</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Axon Body Camera, Axon Fleet</div>
+                    </details>
+                    <details>
+                    <summary><b>FLOCK SAFETY</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>B4:1E:52</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('B4:1E:52')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Automated License Plate Reader (ALPR) / Security Camera</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi/Cellular</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Flock Safety Camera, Falcon Camera, Raven Camera</div>
+                    </details>
+                    <details>
+                    <summary><b>DJI</b> <code>8 OUIs</code></summary>
+                    <div class="oui-entries"><code>0C:9A:E6</code> <code>8C:58:23</code> <code>04:A8:5A</code> <code>58:B8:58</code> <code>E4:7A:2C</code> <code>60:60:1F</code> <code>48:1C:B9</code> <code>34:D2:62</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Consumer & Commercial Drones</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi/OcuSync up to several km</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Mavic, Phantom, Inspire, Mini series</div>
+                    </details>
+                    <details>
+                    <summary><b>PARROT</b> <code>5 OUIs</code></summary>
+                    <div class="oui-entries"><code>00:12:1C</code> <code>00:26:7E</code> <code>90:03:B7</code> <code>90:3A:E6</code> <code>A0:14:3D</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Consumer & Commercial Drones</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Parrot Anafi, Parrot Bebop, Parrot AR.Drone</div>
+                    </details>
+                    <details>
+                    <summary><b>SKYDIO</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>38:1D:14</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('38:1D:14')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Commercial & Enterprise Drones</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Skydio 2, Skydio X2, Skydio 3</div>
+                    </details>
+                    <details>
+                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
+                    <div class="oui-note"><em>sourced from <a href=\"https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21\" target=\"_blank\" style=\"color:#4ecdc4;\">glass-detect repository</a></em></div>
+                    <div class="oui-note">Last one from Luxottica Group S.P.A. detected by @konradit.</div>
+                    <div class="oui-entries"><code>7C:2A:9E</code> <code>CC:66:0A</code> <code>F4:03:43</code> <code>5C:E9:1E</code> <code>98:59:49</code></div>
+                    <button type="button" class="oui-add-btn" onclick="appendOUIs('7C:2A:9E,CC:66:0A,F4:03:43,5C:E9:1E,98:59:49')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Meta/Ray-Ban Smartglasses</div>
+                    </details>
+                    <!-- OUI_DB_END -->
                 </div>
             </div>
             
@@ -1429,6 +1507,22 @@ DD:EE:FF:ab:cd:ef
                             });
                     }
                 }
+            }
+            
+            function appendOUIs(ouiStr) {
+                var ta = document.getElementById('ouis');
+                var current = ta.value.trim();
+                var existing = current ? current.split('\n').map(function(s){return s.trim();}).filter(Boolean) : [];
+                var toAdd = ouiStr.split(',').map(function(s){return s.trim();}).filter(Boolean);
+                var added = 0;
+                toAdd.forEach(function(oui) {
+                    if (existing.indexOf(oui) === -1) { existing.push(oui); added++; }
+                });
+                ta.value = existing.join('\n');
+                ta.style.borderColor = '#10b981';
+                ta.style.boxShadow = '0 0 0 3px rgba(16,185,129,0.3)';
+                setTimeout(function(){ ta.style.borderColor = ''; ta.style.boxShadow = ''; }, 1500);
+                ta.scrollIntoView({behavior:'smooth',block:'center'});
             }
             
             function burnInConfig() {
