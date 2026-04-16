@@ -27,6 +27,14 @@ Professional BLE scanning system that detects specific devices by MAC address or
 
 ## Features
 
+### MQTT / Home Assistant Integration
+- Publishes detections to any MQTT broker (Mosquitto, etc.)
+- Auto-discovery: OUI Spy appears as a device in Home Assistant automatically
+- Detection blips: sensor shows MAC on detection, returns to "idle" after 10 seconds of silence
+- WiFi STA auto-reconnect if connection drops
+- Configurable broker, port, credentials, and topic from the web UI
+- No external libraries required (raw MQTT over TCP)
+
 ### Detection System
 - OUI filtering for device manufacturers
 - Full MAC address matching
@@ -147,6 +155,44 @@ pio run -e seeed_xiao_esp32s3 --target upload
 ```
 
 **Warning:** Simple reflash without erase will NOT unlock the device.
+
+## MQTT Setup (Home Assistant)
+
+### 1. Configure the Detector
+On the config portal at `http://192.168.4.1`, scroll to the **MQTT** section:
+- **Enable MQTT** checkbox
+- **WiFi SSID / Password** - your home network (not the detector AP)
+- **Broker IP** - your Mosquitto/MQTT broker address
+- **Port** - default `1883`
+- **Username / Password** - broker credentials (optional if broker allows anonymous)
+- **Topic** - default `ouispy/detection`
+
+Save configuration. The detector connects to your home WiFi as a station and publishes detections.
+
+### 2. Home Assistant Auto-Discovery
+Once connected, OUI Spy automatically registers as a device in Home Assistant via MQTT discovery. No `configuration.yaml` edits needed.
+
+- **Device:** OUI Spy (manufacturer: Colonel Panic, model: OUI Spy Detector)
+- **Sensor:** Detection - shows the detected MAC address
+- Assign it to a room under **Settings > Devices > OUI Spy > Edit**
+
+### 3. Detection Payload
+```json
+{"mac":"AA:BB:CC:DD:EE:FF","alias":"my-device","rssi":-65}
+```
+
+The sensor state shows the detected MAC, then returns to `idle` after 10 seconds of no detections. This creates distinct blips in HA history rather than a flat line.
+
+### 4. Subscribe Manually (Optional)
+```bash
+mosquitto_sub -h <broker_ip> -u <user> -P <pass> -t ouispy/detection
+```
+
+### Notes
+- MAC randomization is disabled when MQTT is enabled (stable DHCP lease required)
+- WiFi auto-reconnects if the connection drops (BLE scanning shares the radio)
+- MQTT keepalive is 120 seconds for BLE+WiFi coexistence tolerance
+- All MQTT settings persist in NVS across reboots
 
 ## Operation
 

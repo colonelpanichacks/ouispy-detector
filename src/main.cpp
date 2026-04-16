@@ -14,6 +14,7 @@
 #include <vector>
 #include <algorithm>
 #include <Adafruit_NeoPixel.h>
+#include "mqtt.h"
 
 // ================================
 // Pin and Buzzer Definitions - Xiao ESP32 S3
@@ -832,8 +833,8 @@ const char* getASCIIArt() {
 )";
 }
 
-const char* getConfigHTML() {
-    return R"html(
+const char CONFIG_HTML[] PROGMEM =
+R"html(
 <!DOCTYPE html>
 <html>
 <head>
@@ -850,23 +851,7 @@ const char* getConfigHTML() {
             position: relative;
             overflow-x: hidden;
         }
-        .ascii-background {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            opacity: 0.6;
-            color: #ff1493;
-            font-family: 'Courier New', monospace;
-            font-size: 8px;
-            line-height: 8px;
-            white-space: pre;
-            pointer-events: none;
-            overflow: hidden;
-        }
-        .container { 
+        .container {
             max-width: 700px; 
             margin: 0 auto; 
             background: rgba(255, 255, 255, 0.02); 
@@ -902,7 +887,7 @@ const char* getConfigHTML() {
                 margin-bottom: 15px;
                 text-align: center;
                 display: block;
-                width: 100%;
+                width: 100%%;
             }
             .container {
                 padding: 20px;
@@ -925,7 +910,7 @@ const char* getConfigHTML() {
             margin-bottom: 15px;
         }
         textarea { 
-            width: 100%; 
+            width: 100%%; 
             min-height: 120px;
             padding: 15px; 
             border: 1px solid rgba(255, 255, 255, 0.2); 
@@ -974,7 +959,7 @@ const char* getConfigHTML() {
             user-select: none;
         }
         button { 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%); 
             color: #ffffff; 
             padding: 14px 28px; 
             border: none; 
@@ -1010,14 +995,13 @@ const char* getConfigHTML() {
         .oui-db summary:hover { background: rgba(255,255,255,0.07); }
         .oui-db .oui-entries { padding: 8px 0; line-height: 2; }
         .oui-db .oui-entries code { display: inline-block; margin: 2px 4px; padding: 2px 8px; background: rgba(78,205,196,0.1); border-radius: 4px; font-size: 12px; color: #4ecdc4; }
-        .oui-add-btn { background: linear-gradient(135deg, #10b981 0%, #059669 100%) !important; font-size: 13px !important; padding: 8px 16px !important; margin: 8px 0 !important; width: 100%; }
+        .oui-add-btn { background: linear-gradient(135deg, #10b981 0%%, #059669 100%%) !important; font-size: 13px !important; padding: 8px 16px !important; margin: 8px 0 !important; width: 100%%; }
         .oui-add-btn:hover { box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4) !important; }
         .oui-db .oui-meta { font-size: 12px; color: #a0a0a0; margin: 2px 0; padding-left: 8px; }
         .oui-db .oui-note { font-size: 11px; color: #888; margin: 4px 0; padding-left: 8px; font-style: italic; }
     </style>
 </head>
 <body>
-    <div class="ascii-background">%ASCII_ART%</div>
     <div class="container">
         <h1>OUI-SPY Detector</h1>
         
@@ -1143,12 +1127,12 @@ DD:EE:FF:ab:cd:ef
                 </div>
                 <div style="margin-bottom: 15px;">
                     <label for="ap_ssid" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Network Name (SSID)</label>
-                    <input type="text" id="ap_ssid" name="ap_ssid" value="%AP_SSID%" maxlength="32" style="width: 100%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <input type="text" id="ap_ssid" name="ap_ssid" value="%AP_SSID%" maxlength="32" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
                     <div class="help-text" style="margin-top: 5px;">1-32 characters</div>
                 </div>
                 <div>
                     <label for="ap_password" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Password</label>
-                    <input type="text" id="ap_password" name="ap_password" value="%AP_PASSWORD%" minlength="8" maxlength="63" style="width: 100%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <input type="text" id="ap_password" name="ap_password" value="%AP_PASSWORD%" minlength="8" maxlength="63" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
                     <div class="help-text" style="margin-top: 5px;">8-63 characters (leave empty for open network)</div>
                 </div>
             </div>
@@ -1171,6 +1155,32 @@ DD:EE:FF:ab:cd:ef
                 </div>
             </div>
 
+            <div class="section">
+                <h3>MQTT</h3>
+                <div class="help-text" style="margin-bottom:15px">Publish detections to MQTT broker on your network.</div>
+                <div class="toggle-item" style="margin-bottom:15px">
+                    <input type="checkbox" id="mqtt_en" name="mqtt_en" %MQTT_EN%>
+                    <label class="toggle-label" for="mqtt_en">Enable MQTT</label>
+                </div>
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Device ID</label>
+                <input type="text" name="mq_id" value="%MQ_ID%" maxlength="32" placeholder="ouispy" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <div class="help-text" style="margin-bottom:12px">Unique name for this device (e.g. ouispy-front, ouispy-garage). Used as MQTT client ID and auto-generates topic.</div>
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi SSID</label>
+                <input type="text" name="mq_ss" value="%MQ_SS%" maxlength="32" placeholder="Home WiFi" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi Password</label>
+                <input type="password" name="mq_sp" value="%MQ_SP%" maxlength="63" placeholder="Password" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Broker IP</label>
+                <input type="text" name="mq_bk" value="%MQ_BK%" maxlength="64" placeholder="192.168.1.100" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Port</label>
+                <input type="number" name="mq_pt" value="%MQ_PT%" min="1" max="65535" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Username (optional)</label>
+                <input type="text" name="mq_us" value="%MQ_US%" maxlength="64" placeholder="Leave blank if none" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Password (optional)</label>
+                <input type="password" name="mq_pw" value="%MQ_PW%" maxlength="64" placeholder="Leave blank if none" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Topic</label>
+                <input type="text" name="mq_tp" value="%MQ_TP%" maxlength="128" placeholder="ouispy/detection" style="width:100%%;padding:10px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+            </div>
+
             <div class="button-container">
                 <button type="submit">Save Configuration & Start Scanning</button>
                 <button type="button" onclick="clearConfig()" style="background: #8b0000; margin-left: 20px;">Clear All Filters</button>
@@ -1178,12 +1188,12 @@ DD:EE:FF:ab:cd:ef
             </div>
             
             <!-- Burn In Configuration Section -->
-            <div class="section" style="border: 2px solid #8b0000; background: linear-gradient(135deg, rgba(139, 0, 0, 0.03) 0%, rgba(139, 0, 0, 0.08) 100%); margin-top: 40px;">
+            <div class="section" style="border: 2px solid #8b0000; background: linear-gradient(135deg, rgba(139, 0, 0, 0.03) 0%%, rgba(139, 0, 0, 0.08) 100%%); margin-top: 40px;">
                 <h3 style="color: #ff6b6b; margin-top: 0; font-size: 18px; letter-spacing: 1px; text-transform: uppercase; border-bottom: 2px solid rgba(255, 107, 107, 0.3); padding-bottom: 12px; margin-bottom: 20px; text-align: center;">
                     Burn In Settings
                 </h3>
                 
-                <div style="background: linear-gradient(135deg, #1a0a0a 0%, #2d0a0a 100%); color: #ff9999; padding: 18px; border-radius: 8px; margin: 15px 0; border: 2px solid #8b0000; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.3);">
+                <div style="background: linear-gradient(135deg, #1a0a0a 0%%, #2d0a0a 100%%); color: #ff9999; padding: 18px; border-radius: 8px; margin: 15px 0; border: 2px solid #8b0000; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.3);">
                     <p style="font-weight: 600; font-size: 13px; margin: 0 0 10px 0; color: #ff6b6b; text-transform: uppercase; letter-spacing: 0.5px;">
                         Warning - Requires Flash Erase to Unlock
                     </p>
@@ -1203,7 +1213,7 @@ DD:EE:FF:ab:cd:ef
                     </p>
                 </div>
                 
-                <div style="background: linear-gradient(135deg, #0a1a0a 0%, #0a2d0a 100%); color: #99ff99; padding: 18px; border-radius: 8px; margin: 15px 0; border: 1px solid #166534; box-shadow: 0 2px 10px rgba(22, 101, 52, 0.2);">
+                <div style="background: linear-gradient(135deg, #0a1a0a 0%%, #0a2d0a 100%%); color: #99ff99; padding: 18px; border-radius: 8px; margin: 15px 0; border: 1px solid #166534; box-shadow: 0 2px 10px rgba(22, 101, 52, 0.2);">
                     <p style="font-weight: 600; margin: 0 0 8px 0; color: #4ade80; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px;">
                         Use Cases:
                     </p>
@@ -1216,7 +1226,7 @@ DD:EE:FF:ab:cd:ef
                 </div>
                 
                 <div style="text-align: center; margin-top: 25px; padding-top: 20px; border-top: 1px solid rgba(255, 107, 107, 0.2);">
-                    <button type="button" onclick="burnInConfig()" style="background: linear-gradient(135deg, #8b0000 0%, #6b0000 100%); color: #ffffff; font-size: 15px; padding: 15px 35px; font-weight: 600; border: 2px solid #ff0000; border-radius: 8px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.4); transition: all 0.3s;">
+                    <button type="button" onclick="burnInConfig()" style="background: linear-gradient(135deg, #8b0000 0%%, #6b0000 100%%); color: #ffffff; font-size: 15px; padding: 15px 35px; font-weight: 600; border: 2px solid #ff0000; border-radius: 8px; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 15px rgba(139, 0, 0, 0.4); transition: all 0.3s;">
                         Lock Configuration Permanently
                     </button>
                     <p style="font-size: 11px; color: #888888; margin-top: 12px; font-style: italic;">
@@ -1252,7 +1262,7 @@ DD:EE:FF:ab:cd:ef
                     display: flex;
                     align-items: center;
                     gap: 10px;
-                    width: 100%;
+                    width: 100%%;
                 }
                 .device-mac {
                     font-family: 'Courier New', monospace;
@@ -1437,7 +1447,7 @@ DD:EE:FF:ab:cd:ef
                 .then(response => response.json())
                 .then(data => {
                     button.textContent = 'Saved!';
-                    button.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+                    button.style.background = 'linear-gradient(135deg, #10b981 0%%, #059669 100%%)';
                     button.style.opacity = '1';
                     setTimeout(() => {
                         button.textContent = originalText;
@@ -1448,7 +1458,7 @@ DD:EE:FF:ab:cd:ef
                 .catch(error => {
                     console.error('Error saving alias:', error);
                     button.textContent = 'Error';
-                    button.style.background = 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)';
+                    button.style.background = 'linear-gradient(135deg, #ef4444 0%%, #dc2626 100%%)';
                     button.style.opacity = '1';
                     setTimeout(() => {
                         button.textContent = originalText;
@@ -1578,7 +1588,6 @@ DD:EE:FF:ab:cd:ef
 </body>
 </html>
 )html";
-}
 
 String generateRandomOUI() {
     String oui = "";
@@ -1604,45 +1613,32 @@ String generateRandomMAC() {
     return mac;
 }
 
-String generateConfigHTML() {
-    String html = getConfigHTML();
-    String ouiValues = "";
-    String macValues = "";
-    
-    // Populate existing saved values (if any)
-    for (const TargetFilter& filter : targetFilters) {
-        if (filter.isFullMAC) {
-            if (macValues.length() > 0) macValues += "\n";
-            macValues += filter.identifier;
-        } else {
-            if (ouiValues.length() > 0) ouiValues += "\n";
-            ouiValues += filter.identifier;
-        }
+String configProcessor(const String& var) {
+    if (var == "OUI_VALUES") {
+        String v;
+        for (const TargetFilter& f : targetFilters) { if (!f.isFullMAC) { if (v.length()) v += "\n"; v += f.identifier; } }
+        return v;
     }
-    
-    // Generate random examples for placeholders
-    String randomOUIExamples = generateRandomOUI() + "\n" + generateRandomOUI() + "\n" + generateRandomOUI();
-    String randomMACExamples = generateRandomMAC() + "\n" + generateRandomMAC() + "\n" + generateRandomMAC();
-    
-    // Replace static placeholders with random examples
-    html.replace("AA:BB:CC\nDD:EE:FF\n11:22:33", randomOUIExamples);
-    html.replace("AA:BB:CC:12:34:56\nDD:EE:FF:ab:cd:ef\n11:22:33:44:55:66", randomMACExamples);
-    
-    // Remove ASCII art - causes memory exhaustion on ESP32
-    html.replace("%ASCII_ART%", "");
-    
-    html.replace("%OUI_VALUES%", ouiValues);
-    html.replace("%MAC_VALUES%", macValues);
-    
-    // Replace toggle states
-    html.replace("%BUZZER_CHECKED%", buzzerEnabled ? "checked" : "");
-    html.replace("%LED_CHECKED%", ledEnabled ? "checked" : "");
-    
-    // Replace WiFi credentials
-    html.replace("%AP_SSID%", AP_SSID);
-    html.replace("%AP_PASSWORD%", AP_PASSWORD);
-    
-    return html;
+    if (var == "MAC_VALUES") {
+        String v;
+        for (const TargetFilter& f : targetFilters) { if (f.isFullMAC) { if (v.length()) v += "\n"; v += f.identifier; } }
+        return v;
+    }
+    if (var == "BUZZER_CHECKED") return buzzerEnabled ? "checked" : "";
+    if (var == "LED_CHECKED") return ledEnabled ? "checked" : "";
+    if (var == "AP_SSID") return AP_SSID;
+    if (var == "AP_PASSWORD") return AP_PASSWORD;
+    if (var == "ASCII_ART") return "";
+    if (var == "MQTT_EN") return mqttCfg.enabled ? "checked" : "";
+    if (var == "MQ_SS") return mqttCfg.sta_ssid;
+    if (var == "MQ_SP") return mqttCfg.sta_pass;
+    if (var == "MQ_BK") return mqttCfg.broker;
+    if (var == "MQ_PT") return String(mqttCfg.port);
+    if (var == "MQ_US") return mqttCfg.user;
+    if (var == "MQ_PW") return mqttCfg.pass;
+    if (var == "MQ_ID") return mqttCfg.device_id;
+    if (var == "MQ_TP") return mqttCfg.topic;
+    return String();
 }
 
 // Android captive portal detection (expects 204 response, we send redirect instead)
@@ -1703,7 +1699,7 @@ void startConfigMode() {
     // Setup web server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         lastConfigActivity = millis();
-        request->send(200, "text/html", generateConfigHTML());
+        request->send_P(200, "text/html", CONFIG_HTML, configProcessor);
     });
     
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -1809,7 +1805,22 @@ void startConfigMode() {
         
         // Save WiFi credentials
         saveWiFiCredentials();
-        
+
+        // Process MQTT
+        mqttCfg.enabled = request->hasParam("mqtt_en", true);
+        if (request->hasParam("mq_id", true)) strlcpy(mqttCfg.device_id, request->getParam("mq_id", true)->value().c_str(), sizeof(mqttCfg.device_id));
+        if (request->hasParam("mq_ss", true)) strlcpy(mqttCfg.sta_ssid, request->getParam("mq_ss", true)->value().c_str(), sizeof(mqttCfg.sta_ssid));
+        if (request->hasParam("mq_sp", true)) strlcpy(mqttCfg.sta_pass, request->getParam("mq_sp", true)->value().c_str(), sizeof(mqttCfg.sta_pass));
+        if (request->hasParam("mq_bk", true)) strlcpy(mqttCfg.broker, request->getParam("mq_bk", true)->value().c_str(), sizeof(mqttCfg.broker));
+        if (request->hasParam("mq_pt", true)) mqttCfg.port = request->getParam("mq_pt", true)->value().toInt();
+        if (request->hasParam("mq_us", true)) strlcpy(mqttCfg.user, request->getParam("mq_us", true)->value().c_str(), sizeof(mqttCfg.user));
+        if (request->hasParam("mq_pw", true)) strlcpy(mqttCfg.pass, request->getParam("mq_pw", true)->value().c_str(), sizeof(mqttCfg.pass));
+        if (request->hasParam("mq_tp", true)) strlcpy(mqttCfg.topic, request->getParam("mq_tp", true)->value().c_str(), sizeof(mqttCfg.topic));
+        if (mqttCfg.device_id[0] == 0) strlcpy(mqttCfg.device_id, "ouispy", sizeof(mqttCfg.device_id));
+        if (mqttCfg.port == 0) mqttCfg.port = 1883;
+        if (mqttCfg.topic[0] == 0) snprintf(mqttCfg.topic, sizeof(mqttCfg.topic), "%s/detection", mqttCfg.device_id);
+        mqtt_saveConfig();
+
         if (isSerialConnected()) {
             Serial.println("Buzzer enabled: " + String(buzzerEnabled ? "Yes" : "No"));
             Serial.println("LED enabled: " + String(ledEnabled ? "Yes" : "No"));
@@ -2378,11 +2389,27 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 void startScanningMode() {
     currentMode = SCANNING_MODE;
     
-    // Stop DNS server, web server, and WiFi
+    // Stop DNS server, web server, and AP
     dnsServer.stop();
     server.end();
     WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
+
+    if (mqttCfg.enabled && mqttCfg.sta_ssid[0] && mqttCfg.broker[0]) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
+        Serial.printf("WiFi STA connecting to %s\n", mqttCfg.sta_ssid);
+        unsigned long ws = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - ws < 10000) delay(250);
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("WiFi connected: " + WiFi.localIP().toString());
+            mqtt_connect();
+        } else {
+            Serial.println("WiFi STA failed, continuing offline");
+            WiFi.mode(WIFI_OFF);
+        }
+    } else {
+        WiFi.mode(WIFI_OFF);
+    }
     
     if (isSerialConnected()) {
         Serial.println("\n=== STARTING SCANNING MODE ===");
@@ -2464,18 +2491,23 @@ void setup() {
     }
     Serial.println();
     
-    // STEALTH MODE: Randomize ALL 6 bytes for maximum anonymity
-    randomSeed(analogRead(0) + micros()); // Better randomization
-    for (int i = 0; i < 6; i++) {
-        newMAC[i] = random(0, 256);
+    // Load MQTT config early so we know whether to skip MAC randomization
+    mqtt_loadConfig();
+
+    // Skip MAC randomization when MQTT is enabled (need stable IP for broker)
+    if (!mqttCfg.enabled) {
+        // STEALTH MODE: Randomize ALL 6 bytes for maximum anonymity
+        randomSeed(analogRead(0) + micros());
+        for (int i = 0; i < 6; i++) {
+            newMAC[i] = random(0, 256);
+        }
+        newMAC[0] |= 0x02; // Set locally administered bit
+        newMAC[0] &= 0xFE; // Clear multicast bit
+        WiFi.mode(WIFI_STA);
+        esp_wifi_set_mac(WIFI_IF_STA, newMAC);
+    } else {
+        Serial.println("MQTT enabled - keeping original MAC for stable DHCP");
     }
-    // Ensure it's a valid locally administered address
-    newMAC[0] |= 0x02; // Set locally administered bit
-    newMAC[0] &= 0xFE; // Clear multicast bit
-    
-    // Set the randomized MAC for both STA and AP modes
-    WiFi.mode(WIFI_STA);
-    esp_wifi_set_mac(WIFI_IF_STA, newMAC);
     
     Serial.print("Randomized MAC: ");
     for (int i = 0; i < 6; i++) {
@@ -2525,6 +2557,7 @@ void setup() {
         // Load configuration from NVS
         loadConfiguration();
         loadWiFiCredentials();
+        mqtt_loadConfig();
         loadDeviceAliases();
         loadDetectedDevices();
     }
@@ -2635,17 +2668,16 @@ void loop() {
     if (currentMode == SCANNING_MODE) {
         // Handle match detection messages (JSON output for API)
         if (newMatchFound) {
-            if (isSerialConnected()) {
-                String alias = getDeviceAlias(detectedMAC);
-                
-                // Output clean JSON
-                Serial.print("{\"mac\":\"");
-                Serial.print(detectedMAC);
-                Serial.print("\",\"alias\":\"");
-                Serial.print(alias);
-                Serial.print("\",\"rssi\":");
-                Serial.print(detectedRSSI);
-                Serial.println("}");
+            String alias = getDeviceAlias(detectedMAC);
+            char json[256];
+            snprintf(json, sizeof(json),
+                "{\"mac\":\"%s\",\"alias\":\"%s\",\"rssi\":%d}",
+                detectedMAC.c_str(), alias.c_str(), detectedRSSI);
+            if (isSerialConnected()) Serial.println(json);
+            if (mqttConnected) {
+                mqtt_publish(mqttCfg.topic, json);
+                lastDetectionTime = currentMillis;
+                detectionActive = true;
             }
             newMatchFound = false;
         }
@@ -2668,6 +2700,8 @@ void loop() {
         if (currentMillis - lastStatusTime >= 30000) {
             lastStatusTime = currentMillis;
         }
+
+        mqtt_loop(currentMillis);
     }
     
     // Update NeoPixel animation
