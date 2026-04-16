@@ -10,6 +10,7 @@ struct MQTTConfig {
     char user[65];
     char pass[65];
     char topic[129];
+    char device_id[33];
     bool enabled;
 };
 

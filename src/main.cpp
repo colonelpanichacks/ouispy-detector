@@ -1162,6 +1162,9 @@ DD:EE:FF:ab:cd:ef
                     <input type="checkbox" id="mqtt_en" name="mqtt_en" %MQTT_EN%>
                     <label class="toggle-label" for="mqtt_en">Enable MQTT</label>
                 </div>
+                <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Device ID</label>
+                <input type="text" name="mq_id" value="%MQ_ID%" maxlength="32" placeholder="ouispy" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <div class="help-text" style="margin-bottom:12px">Unique name for this device (e.g. ouispy-front, ouispy-garage). Used as MQTT client ID and auto-generates topic.</div>
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi SSID</label>
                 <input type="text" name="mq_ss" value="%MQ_SS%" maxlength="32" placeholder="Home WiFi" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi Password</label>
@@ -1633,6 +1636,7 @@ String configProcessor(const String& var) {
     if (var == "MQ_PT") return String(mqttCfg.port);
     if (var == "MQ_US") return mqttCfg.user;
     if (var == "MQ_PW") return mqttCfg.pass;
+    if (var == "MQ_ID") return mqttCfg.device_id;
     if (var == "MQ_TP") return mqttCfg.topic;
     return String();
 }
@@ -1804,6 +1808,7 @@ void startConfigMode() {
 
         // Process MQTT
         mqttCfg.enabled = request->hasParam("mqtt_en", true);
+        if (request->hasParam("mq_id", true)) strlcpy(mqttCfg.device_id, request->getParam("mq_id", true)->value().c_str(), sizeof(mqttCfg.device_id));
         if (request->hasParam("mq_ss", true)) strlcpy(mqttCfg.sta_ssid, request->getParam("mq_ss", true)->value().c_str(), sizeof(mqttCfg.sta_ssid));
         if (request->hasParam("mq_sp", true)) strlcpy(mqttCfg.sta_pass, request->getParam("mq_sp", true)->value().c_str(), sizeof(mqttCfg.sta_pass));
         if (request->hasParam("mq_bk", true)) strlcpy(mqttCfg.broker, request->getParam("mq_bk", true)->value().c_str(), sizeof(mqttCfg.broker));
@@ -1811,8 +1816,9 @@ void startConfigMode() {
         if (request->hasParam("mq_us", true)) strlcpy(mqttCfg.user, request->getParam("mq_us", true)->value().c_str(), sizeof(mqttCfg.user));
         if (request->hasParam("mq_pw", true)) strlcpy(mqttCfg.pass, request->getParam("mq_pw", true)->value().c_str(), sizeof(mqttCfg.pass));
         if (request->hasParam("mq_tp", true)) strlcpy(mqttCfg.topic, request->getParam("mq_tp", true)->value().c_str(), sizeof(mqttCfg.topic));
+        if (mqttCfg.device_id[0] == 0) strlcpy(mqttCfg.device_id, "ouispy", sizeof(mqttCfg.device_id));
         if (mqttCfg.port == 0) mqttCfg.port = 1883;
-        if (mqttCfg.topic[0] == 0) strlcpy(mqttCfg.topic, "ouispy/detection", sizeof(mqttCfg.topic));
+        if (mqttCfg.topic[0] == 0) snprintf(mqttCfg.topic, sizeof(mqttCfg.topic), "%s/detection", mqttCfg.device_id);
         mqtt_saveConfig();
 
         if (isSerialConnected()) {
