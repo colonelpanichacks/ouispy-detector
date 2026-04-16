@@ -16,9 +16,15 @@ void mqtt_loadConfig() {
     mqttCfg.port = p.getUShort("port", 1883);
     strlcpy(mqttCfg.user, p.getString("user", "ouispy").c_str(), sizeof(mqttCfg.user));
     strlcpy(mqttCfg.pass, p.getString("pw", "ouispy").c_str(), sizeof(mqttCfg.pass));
-    strlcpy(mqttCfg.topic, p.getString("topic", "ouispy/detection").c_str(), sizeof(mqttCfg.topic));
+    strlcpy(mqttCfg.device_id, p.getString("devid", "ouispy").c_str(), sizeof(mqttCfg.device_id));
+    strlcpy(mqttCfg.topic, p.getString("topic", "").c_str(), sizeof(mqttCfg.topic));
     mqttCfg.enabled = p.getBool("on", false);
     p.end();
+
+    // Auto-generate topic from device_id if not set
+    if (mqttCfg.topic[0] == 0) {
+        snprintf(mqttCfg.topic, sizeof(mqttCfg.topic), "%s/detection", mqttCfg.device_id);
+    }
 }
 
 void mqtt_saveConfig() {
@@ -30,6 +36,7 @@ void mqtt_saveConfig() {
     p.putUShort("port", mqttCfg.port);
     p.putString("user", mqttCfg.user);
     p.putString("pw", mqttCfg.pass);
+    p.putString("devid", mqttCfg.device_id);
     p.putString("topic", mqttCfg.topic);
     p.putBool("on", mqttCfg.enabled);
     p.end();
@@ -48,21 +55,23 @@ void mqtt_connect() {
     if (mqttTcp == nullptr) mqttTcp = new WiFiClient();
     if (mqttTcp->connected()) mqttTcp->stop();
 
-    Serial.printf("MQTT: connecting %s:%d\n", mqttCfg.broker, mqttCfg.port);
+    const char* cid = mqttCfg.device_id;
+    Serial.printf("MQTT: connecting %s:%d as %s\n", mqttCfg.broker, mqttCfg.port, cid);
     if (!mqttTcp->connect(mqttCfg.broker, mqttCfg.port)) {
         Serial.println("MQTT: TCP failed");
         mqttConnected = false;
         return;
     }
 
-    uint32_t remain = 10 + 2 + 6;
+    uint32_t cidLen = strlen(cid);
+    uint32_t remain = 10 + 2 + cidLen;
     uint8_t flags = 0x02;
     if (mqttCfg.user[0]) { flags |= 0x80; remain += 2 + strlen(mqttCfg.user); }
     if (mqttCfg.pass[0]) { flags |= 0x40; remain += 2 + strlen(mqttCfg.pass); }
 
     wr8(0x10); wrLen(remain);
     wrStr("MQTT"); wr8(0x04); wr8(flags); wr16(120); // 120s keepalive
-    wrStr("ouispy");
+    wrStr(cid);
     if (mqttCfg.user[0]) wrStr(mqttCfg.user);
     if (mqttCfg.pass[0]) wrStr(mqttCfg.pass);
     mqttTcp->flush();
@@ -77,18 +86,23 @@ void mqtt_connect() {
     }
     Serial.println(mqttConnected ? "MQTT: connected!" : "MQTT: failed");
 
-    // Publish HA MQTT discovery so the sensor auto-appears in Home Assistant
+    // Publish HA MQTT discovery — unique per device_id
     if (mqttConnected) {
-        const char* disco = "{\"name\":\"OUI Spy Detection\","
-            "\"state_topic\":\"ouispy/detection\","
+        char disco[512];
+        char discoTopic[128];
+        snprintf(discoTopic, sizeof(discoTopic), "homeassistant/sensor/%s/detection/config", cid);
+        snprintf(disco, sizeof(disco),
+            "{\"name\":\"%s Detection\","
+            "\"state_topic\":\"%s\","
             "\"value_template\":\"{{ value_json.mac }}\","
-            "\"json_attributes_topic\":\"ouispy/detection\","
-            "\"unique_id\":\"ouispy_detection_01\","
-            "\"device\":{\"identifiers\":[\"ouispy_01\"],\"name\":\"OUI Spy\",\"manufacturer\":\"Colonel Panic\",\"model\":\"OUI Spy Detector\"}}";
-        mqtt_publish("homeassistant/sensor/ouispy/detection/config", disco);
-        // Set initial state to "online" instead of unknown
+            "\"json_attributes_topic\":\"%s\","
+            "\"unique_id\":\"%s_detection\","
+            "\"device\":{\"identifiers\":[\"%s\"],\"name\":\"%s\",\"manufacturer\":\"Colonel Panic\",\"model\":\"OUI Spy Detector\"}}",
+            cid, mqttCfg.topic, mqttCfg.topic, cid, cid, cid);
+        mqtt_publish(discoTopic, disco);
+        // Set initial state to "online"
         mqtt_publish(mqttCfg.topic, "{\"mac\":\"online\",\"alias\":\"\",\"rssi\":0}");
-        Serial.println("MQTT: HA discovery published, status: online");
+        Serial.printf("MQTT: HA discovery published for %s\n", cid);
     }
 }
 
