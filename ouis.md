@@ -96,6 +96,115 @@ B4:1E:52
 
 <details>
 
+<summary><b>FLOCK SAFETY (WiFi Promiscuous — @NitekryDPaul research)</b> <code>30 OUIs</code></summary>
+
+- `70:C9:4E`
+
+- `3C:91:80`
+
+- `D8:F3:BC`
+
+- `80:30:49`
+
+- `B8:35:32`
+
+- `14:5A:FC`
+
+- `74:4C:A1`
+
+- `08:3A:88`
+
+- `9C:2F:9D`
+
+- `C0:35:32`
+
+- `94:08:53`
+
+- `E4:AA:EA`
+
+- `F4:6A:DD`
+
+- `F8:A2:D6`
+
+- `24:B2:B9`
+
+- `00:F4:8D`
+
+- `D0:39:57`
+
+- `E8:D0:FC`
+
+- `E0:4F:43`
+
+- `B8:1E:A4`
+
+- `70:08:94`
+
+- `58:8E:81`
+
+- `EC:1B:BD`
+
+- `3C:71:BF`
+
+- `58:00:E3`
+
+- `90:35:EA`
+
+- `5C:93:A2`
+
+- `64:6E:69`
+
+- `48:27:EA`
+
+- `A4:CF:12`
+
+**Copy OUIs:**
+
+```
+70:C9:4E
+3C:91:80
+D8:F3:BC
+80:30:49
+B8:35:32
+14:5A:FC
+74:4C:A1
+08:3A:88
+9C:2F:9D
+C0:35:32
+94:08:53
+E4:AA:EA
+F4:6A:DD
+F8:A2:D6
+24:B2:B9
+00:F4:8D
+D0:39:57
+E8:D0:FC
+E0:4F:43
+B8:1E:A4
+70:08:94
+58:8E:81
+EC:1B:BD
+3C:71:BF
+58:00:E3
+90:35:EA
+5C:93:A2
+64:6E:69
+48:27:EA
+A4:CF:12
+```
+
+> **Category:** Automated License Plate Reader (ALPR) / Security Camera  
+
+> **Detection Range:** WiFi 2.4 GHz (promiscuous mode, addr1 + addr2)  
+
+> **Common Devices:** Flock Safety infrastructure (cameras, uplinks, peripherals)  
+
+> **Research Credit:** ØяĐöØцяöЪöяцฐ / **@NitekryDPaul** — identified these prefixes through 2.4 GHz promiscuous-mode analysis, including the addr1-receiver detection technique that catches Flock stations during their burst-sleep duty cycle
+
+</details>
+
+<details>
+
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
 - `0C:9A:E6`
