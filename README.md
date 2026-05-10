@@ -6,7 +6,7 @@ Professional BLE scanning system that detects specific devices by MAC address or
 
 ## Hardware
 
-**OUI-SPY Board** - Available on [Tindie](https://www.tindie.com)
+**OUI-SPY Board** - Available on [colonelpanic.tech](https://colonelpanic.tech)
 - ESP32-S3 based detection system
 - Integrated buzzer and power management
 - Ready-to-use, no additional components required
