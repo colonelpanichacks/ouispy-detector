@@ -14,6 +14,7 @@
 #include <vector>
 #include <algorithm>
 #include <Adafruit_NeoPixel.h>
+#include <ESPmDNS.h>
 #include "mqtt.h"
 
 // ================================
@@ -2402,6 +2403,13 @@ void startScanningMode() {
         while (WiFi.status() != WL_CONNECTED && millis() - ws < 10000) delay(250);
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println("WiFi connected: " + WiFi.localIP().toString());
+            // Start mDNS so we can resolve ".local" broker names (e.g. homeassistant.local)
+            const char* mdnsName = mqttCfg.device_id[0] ? mqttCfg.device_id : "ouispy";
+            if (MDNS.begin(mdnsName)) {
+                Serial.printf("mDNS responder started as %s.local\n", mdnsName);
+            } else {
+                Serial.println("mDNS responder failed to start");
+            }
             mqtt_connect();
         } else {
             Serial.println("WiFi STA failed, continuing offline");

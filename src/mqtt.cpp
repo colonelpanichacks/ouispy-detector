@@ -1,4 +1,5 @@
 #include "mqtt.h"
+#include <ESPmDNS.h>
 
 MQTTConfig mqttCfg;
 bool mqttConnected = false;
@@ -14,8 +15,8 @@ void mqtt_loadConfig() {
     strlcpy(mqttCfg.sta_pass, p.getString("pass", "").c_str(), sizeof(mqttCfg.sta_pass));
     strlcpy(mqttCfg.broker, p.getString("host", "").c_str(), sizeof(mqttCfg.broker));
     mqttCfg.port = p.getUShort("port", 1883);
-    strlcpy(mqttCfg.user, p.getString("user", "ouispy").c_str(), sizeof(mqttCfg.user));
-    strlcpy(mqttCfg.pass, p.getString("pw", "ouispy").c_str(), sizeof(mqttCfg.pass));
+    strlcpy(mqttCfg.user, p.getString("user", "").c_str(), sizeof(mqttCfg.user));
+    strlcpy(mqttCfg.pass, p.getString("pw", "").c_str(), sizeof(mqttCfg.pass));
     strlcpy(mqttCfg.device_id, p.getString("devid", "ouispy").c_str(), sizeof(mqttCfg.device_id));
     strlcpy(mqttCfg.topic, p.getString("topic", "").c_str(), sizeof(mqttCfg.topic));
     mqttCfg.enabled = p.getBool("on", false);
@@ -56,8 +57,32 @@ void mqtt_connect() {
     if (mqttTcp->connected()) mqttTcp->stop();
 
     const char* cid = mqttCfg.device_id;
+
+    // Resolve the broker address. ".local" (mDNS) names don't resolve via normal
+    // DNS, so query mDNS and connect by IP. Literal IPs and regular DNS hostnames
+    // fall through and connect as-is. This lets the broker field be
+    // "homeassistant.local" so it survives the HA host's IP changing.
+    IPAddress brokerIP;
+    bool useIP = false;
+    size_t blen = strlen(mqttCfg.broker);
+    if (blen > 6 && strcasecmp(mqttCfg.broker + blen - 6, ".local") == 0) {
+        char host[65];
+        strlcpy(host, mqttCfg.broker, sizeof(host));
+        host[blen - 6] = 0;  // strip trailing ".local"
+        Serial.printf("MQTT: resolving %s via mDNS...\n", mqttCfg.broker);
+        brokerIP = MDNS.queryHost(host, 3000);
+        if (brokerIP != IPAddress((uint32_t)0)) {
+            useIP = true;
+            Serial.printf("MQTT: %s -> %s\n", mqttCfg.broker, brokerIP.toString().c_str());
+        } else {
+            Serial.println("MQTT: mDNS resolve failed, trying broker as-is");
+        }
+    }
+
     Serial.printf("MQTT: connecting %s:%d as %s\n", mqttCfg.broker, mqttCfg.port, cid);
-    if (!mqttTcp->connect(mqttCfg.broker, mqttCfg.port)) {
+    bool tcpOk = useIP ? mqttTcp->connect(brokerIP, mqttCfg.port)
+                       : mqttTcp->connect(mqttCfg.broker, mqttCfg.port);
+    if (!tcpOk) {
         Serial.println("MQTT: TCP failed");
         mqttConnected = false;
         return;
