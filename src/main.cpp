@@ -96,10 +96,22 @@ struct DeviceInfo {
     String filterDescription;  // Store filter description for persistence
 };
 
+// Filter classification — determines which BLE advert field the matcher
+// checks against `identifier`. Values are persisted to NVS; do NOT
+// renumber existing entries or old configs will break.
+enum FilterType : uint8_t {
+    FT_MAC_PREFIX      = 0,  // identifier = 6-char OUI (e.g. "985949")
+    FT_FULL_MAC        = 1,  // identifier = 12-char MAC
+    FT_COMPANY_ID      = 2,  // identifier = 4-char hex "0D53" (BT SIG mfr CID)
+    FT_SERVICE_UUID_16 = 3,  // identifier = 4-char hex "FD5F" (BT SIG 16-bit svc UUID)
+    FT_NAME_SUBSTRING  = 4,  // identifier = case-insensitive substring
+};
+
 struct TargetFilter {
     String identifier;
-    bool isFullMAC;
+    bool isFullMAC;      // kept for NVS backwards-compat with pre-typed configs
     String description;
+    FilterType type = FT_MAC_PREFIX;  // set from isFullMAC on legacy load
 };
 
 struct DeviceAlias {
@@ -370,13 +382,15 @@ void saveConfiguration() {
     preferences.putBool("ledEnabled", ledEnabled);
     
     for (int i = 0; i < targetFilters.size(); i++) {
-        String keyId = "id_" + String(i);
-        String keyMAC = "mac_" + String(i);
+        String keyId   = "id_"   + String(i);
+        String keyMAC  = "mac_"  + String(i);
         String keyDesc = "desc_" + String(i);
-        
-        preferences.putString(keyId.c_str(), targetFilters[i].identifier);
-        preferences.putBool(keyMAC.c_str(), targetFilters[i].isFullMAC);
+        String keyType = "type_" + String(i);
+
+        preferences.putString(keyId.c_str(),   targetFilters[i].identifier);
+        preferences.putBool  (keyMAC.c_str(),  targetFilters[i].isFullMAC);
         preferences.putString(keyDesc.c_str(), targetFilters[i].description);
+        preferences.putUChar (keyType.c_str(), (uint8_t)targetFilters[i].type);
     }
     
     preferences.end();
@@ -397,15 +411,27 @@ void loadConfiguration() {
     // Load saved filters (no defaults - start empty)
     if (filterCount > 0) {
         for (int i = 0; i < filterCount; i++) {
-            String keyId = "id_" + String(i);
-            String keyMAC = "mac_" + String(i);
+            String keyId   = "id_"   + String(i);
+            String keyMAC  = "mac_"  + String(i);
             String keyDesc = "desc_" + String(i);
-            
+            String keyType = "type_" + String(i);
+
             TargetFilter filter;
-            filter.identifier = preferences.getString(keyId.c_str(), "");
-            filter.isFullMAC = preferences.getBool(keyMAC.c_str(), false);
+            filter.identifier  = preferences.getString(keyId.c_str(), "");
+            filter.isFullMAC   = preferences.getBool  (keyMAC.c_str(), false);
             filter.description = preferences.getString(keyDesc.c_str(), "");
-            
+
+            // Legacy compat: if `type_i` is missing (255 sentinel), derive
+            // from the old boolean — old configs are all MAC-based.
+            uint8_t rawType = preferences.getUChar(keyType.c_str(), 0xFF);
+            if (rawType == 0xFF) {
+                filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
+            } else if (rawType <= FT_NAME_SUBSTRING) {
+                filter.type = (FilterType)rawType;
+            } else {
+                filter.type = FT_MAC_PREFIX;  // corrupt value, fail safe
+            }
+
             if (filter.identifier.length() > 0) {
                 targetFilters.push_back(filter);
             }
@@ -461,27 +487,169 @@ bool isValidMAC(const String& mac) {
     return true;
 }
 
-bool matchesTargetFilter(const String& deviceMAC, String& matchedDescription) {
+// Case-insensitive substring for FT_NAME_SUBSTRING.
+static bool nameContains(const String& haystack, const String& needle) {
+    if (needle.length() == 0 || haystack.length() < needle.length()) return false;
+    String h = haystack; h.toLowerCase();
+    String n = needle;   n.toLowerCase();
+    return h.indexOf(n) >= 0;
+}
+
+// Normalise a hex-string identifier ("0x0D53", "0d53", "0D 53") to a
+// bare lowercase hex string so string compares work.
+static String normalizeHexId(const String& in) {
+    String s = in;
+    s.toLowerCase();
+    if (s.startsWith("0x")) s = s.substring(2);
+    String out;
+    out.reserve(s.length());
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) out += c;
+    }
+    return out;
+}
+
+bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
+                          String& matchedDescription) {
     String normalizedDeviceMAC = deviceMAC;
     normalizeMACAddress(normalizedDeviceMAC);
-    
+
     for (const TargetFilter& filter : targetFilters) {
-        String filterID = filter.identifier;
-        normalizeMACAddress(filterID);
-        
-        if (filter.isFullMAC) {
-            if (normalizedDeviceMAC.equals(filterID)) {
-                matchedDescription = filter.description;
-                return true;
+        switch (filter.type) {
+            case FT_MAC_PREFIX: {
+                String filterID = filter.identifier;
+                normalizeMACAddress(filterID);
+                if (normalizedDeviceMAC.startsWith(filterID)) {
+                    matchedDescription = filter.description;
+                    return true;
+                }
+                break;
             }
-        } else {
-            if (normalizedDeviceMAC.startsWith(filterID)) {
-                matchedDescription = filter.description;
-                return true;
+            case FT_FULL_MAC: {
+                String filterID = filter.identifier;
+                normalizeMACAddress(filterID);
+                if (normalizedDeviceMAC.equals(filterID)) {
+                    matchedDescription = filter.description;
+                    return true;
+                }
+                break;
+            }
+            case FT_COMPANY_ID: {
+                if (!dev || !dev->haveManufacturerData()) break;
+                std::string mfr = dev->getManufacturerData();
+                if (mfr.length() < 2) break;
+                uint16_t cid = (uint8_t)mfr[0] | ((uint8_t)mfr[1] << 8);
+                char cidHex[5];
+                snprintf(cidHex, sizeof(cidHex), "%04x", cid);
+                if (normalizeHexId(filter.identifier).equals(cidHex)) {
+                    matchedDescription = filter.description;
+                    return true;
+                }
+                break;
+            }
+            case FT_SERVICE_UUID_16: {
+                if (!dev) break;
+                String target = normalizeHexId(filter.identifier);
+                for (int i = 0; i < dev->getServiceUUIDCount(); i++) {
+                    NimBLEUUID uuid = dev->getServiceUUID(i);
+                    String s = uuid.toString().c_str();
+                    s.toLowerCase();
+                    if (s.length() == 4 && s.equals(target)) {
+                        matchedDescription = filter.description;
+                        return true;
+                    }
+                    if (s.length() >= 8 && s.substring(4, 8).equals(target)) {
+                        matchedDescription = filter.description;
+                        return true;
+                    }
+                }
+                break;
+            }
+            case FT_NAME_SUBSTRING: {
+                if (!dev || !dev->haveName()) break;
+                String name = dev->getName().c_str();
+                if (nameContains(name, filter.identifier)) {
+                    matchedDescription = filter.description;
+                    return true;
+                }
+                break;
             }
         }
     }
     return false;
+}
+
+// ================================
+// Detection Presets
+// ================================
+//
+// One-click "add every known signature for a device family" bundles.
+// Signatures triple-sourced: Bluetooth SIG assigned-numbers registry
+// (company IDs + 16-bit service UUIDs), IEEE OUI registry (MAC prefixes),
+// and cross-referenced against the community friendorfoe project
+// (lnxgod/friendorfoe/esp32/scanner/main/detection/ble_fingerprint.c)
+// which ships the same discrimination logic on ESP32-S3 hardware.
+
+struct PresetEntry {
+    FilterType type;
+    const char* identifier;
+    const char* description;
+};
+
+// Ray-Ban Meta / Oakley Meta smart glasses.
+// Discrimination strategy: Luxottica CID 0x0D53 (frame manufacturer) is
+// the strongest signal since it doesn't fire on Quest/Portal like Meta's
+// own 0x01AB/0x058E do. Service UUID 0xFD5F is Ray-Ban Meta Gen 2 specific.
+static const PresetEntry PRESET_RAYBAN[] = {
+    { FT_COMPANY_ID,      "0D53",       "Luxottica CID (Ray-Ban/Oakley Meta frames)" },
+    { FT_SERVICE_UUID_16, "FD5F",       "Meta Ray-Ban Gen 2 service UUID" },
+    { FT_NAME_SUBSTRING,  "Ray-Ban",    "Meta glasses name pattern" },
+    { FT_NAME_SUBSTRING,  "Wayfarer",   "Meta glasses name pattern" },
+    { FT_NAME_SUBSTRING,  "Oakley Meta","Meta glasses name pattern" },
+    { FT_MAC_PREFIX,      "985949",     "Luxottica Group frame OUI" },
+    { FT_MAC_PREFIX,      "80AA1C",     "Luxottica Tristar Dongguan frame OUI" },
+    { FT_MAC_PREFIX,      "384712",     "Luxottica Tristar Dongguan frame OUI" },
+};
+static const size_t PRESET_RAYBAN_COUNT = sizeof(PRESET_RAYBAN) / sizeof(PRESET_RAYBAN[0]);
+
+// Axon body cameras (Body 3/4, Fleet dash, Taser 7/10).
+// Uses all three signal types: dedicated IEEE OUI 00:25:DF ("Axon
+// Enterprise, Inc."), Bluetooth SIG company ID 0x034D ("TASER
+// International, Inc." — Axon's earlier registered name), and service
+// UUID 0xFC81 ("Axon Enterprise, Inc."). All three uniquely attributable.
+static const PresetEntry PRESET_AXON[] = {
+    { FT_MAC_PREFIX,      "0025DF", "Axon Enterprise OUI (IEEE)" },
+    { FT_COMPANY_ID,      "034D",   "TASER International CID (Axon body cams)" },
+    { FT_SERVICE_UUID_16, "FC81",   "Axon Enterprise service UUID" },
+};
+static const size_t PRESET_AXON_COUNT = sizeof(PRESET_AXON) / sizeof(PRESET_AXON[0]);
+
+// Returns count added. Skips entries whose (type, identifier) already
+// exists so repeated clicks don't duplicate rows.
+int applyPreset(const PresetEntry* preset, size_t count, const char* labelPrefix) {
+    int added = 0;
+    for (size_t i = 0; i < count; i++) {
+        const PresetEntry& p = preset[i];
+        bool exists = false;
+        for (const TargetFilter& f : targetFilters) {
+            if (f.type == p.type && f.identifier.equalsIgnoreCase(p.identifier)) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) continue;
+
+        TargetFilter f;
+        f.type        = p.type;
+        f.identifier  = p.identifier;
+        f.isFullMAC   = (p.type == FT_FULL_MAC);
+        f.description = String(labelPrefix) + ": " + p.description;
+        targetFilters.push_back(f);
+        added++;
+    }
+    if (added > 0) saveConfiguration();
+    return added;
 }
 
 // ================================
@@ -1011,6 +1179,27 @@ R"html(
 
         <form id="configForm" method="POST" action="/save">
             <div class="section">
+                <h3>Detection Presets</h3>
+                <div class="help-text" style="margin-bottom: 12px;">
+                    One-click bundles that add every known signal for a device family — MAC prefixes, BLE company IDs, service UUIDs, and name patterns. Clicking is safe; duplicates are skipped. Presets install to persistent storage immediately (no Save required).
+                </div>
+                <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                    <button type="button" onclick="applyPreset('rayban', 'Ray-Ban / Oakley Meta smart glasses')"
+                            style="background: linear-gradient(135deg, #4b1e5f 0%, #6b2a86 100%); color: #fff; padding: 12px 20px; font-size: 14px; font-weight: 600; border: 1px solid #8a3fb0; border-radius: 6px; cursor: pointer;">
+                        Add Ray-Ban / Oakley Meta
+                    </button>
+                    <button type="button" onclick="applyPreset('axon', 'Axon body cam / Taser')"
+                            style="background: linear-gradient(135deg, #1c3e5a 0%, #285883 100%); color: #fff; padding: 12px 20px; font-size: 14px; font-weight: 600; border: 1px solid #4a7ba8; border-radius: 6px; cursor: pointer;">
+                        Add Axon body cam
+                    </button>
+                </div>
+                <div id="presetStatus" style="margin-top: 10px; font-size: 13px; color: #aaddff; min-height: 18px;"></div>
+                <div class="help-text" style="margin-top: 8px; font-size: 11px; opacity: 0.75;">
+                    Signatures cross-verified against Bluetooth SIG assigned-numbers, IEEE OUI registry, and community project <a href="https://github.com/lnxgod/friendorfoe" style="color: #aaddff;" target="_blank">lnxgod/friendorfoe</a>.
+                </div>
+            </div>
+
+            <div class="section">
                 <h3>OUI Prefixes</h3>
                 <textarea id="ouis" name="ouis" placeholder="Enter OUI prefixes, one per line:
 AA:BB:CC
@@ -1483,6 +1672,36 @@ DD:EE:FF:ab:cd:ef
                 }
             }
             
+            function applyPreset(name, label) {
+                var statusEl = document.getElementById('presetStatus');
+                statusEl.textContent = 'Adding ' + label + '…';
+                statusEl.style.color = '#aaddff';
+                var body = 'name=' + encodeURIComponent(name);
+                fetch('/api/presets/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: body
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.ok) {
+                        statusEl.style.color = '#88ee88';
+                        if (data.added > 0) {
+                            statusEl.textContent = 'Added ' + data.added + ' new filter(s) for ' + label + '. Total filters: ' + data.total_filters + '.';
+                        } else {
+                            statusEl.textContent = label + ' preset already installed — no changes.';
+                        }
+                    } else {
+                        statusEl.style.color = '#ff7777';
+                        statusEl.textContent = 'Error: ' + (data.error || 'unknown');
+                    }
+                })
+                .catch(function(err) {
+                    statusEl.style.color = '#ff7777';
+                    statusEl.textContent = 'Preset request failed: ' + err;
+                });
+            }
+
             function clearConfig() {
                 if (confirm('Are you sure you want to clear all filters? This action cannot be undone.')) {
                     document.getElementById('ouis').value = '';
@@ -1704,13 +1923,21 @@ void startConfigMode() {
     
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
         lastConfigActivity = millis();
-        
+
         if (isSerialConnected()) {
             Serial.println("\n=== WEB CONFIG SUBMISSION ===");
         }
-        
-        targetFilters.clear();
-        
+
+        // The textareas only speak MAC/OUI. Preserve any preset-installed
+        // filters (company IDs, service UUIDs, name substrings) so the
+        // /save round-trip doesn't nuke them.
+        targetFilters.erase(
+            std::remove_if(targetFilters.begin(), targetFilters.end(),
+                [](const TargetFilter& f) {
+                    return f.type == FT_MAC_PREFIX || f.type == FT_FULL_MAC;
+                }),
+            targetFilters.end());
+
         // Process OUI entries
         if (request->hasParam("ouis", true)) {
             String ouiData = request->getParam("ouis", true)->value();
@@ -1740,6 +1967,7 @@ void startConfigMode() {
                         filter.identifier = oui;
                         filter.description = "OUI: " + oui;
                         filter.isFullMAC = false;
+                        filter.type = FT_MAC_PREFIX;
                         targetFilters.push_back(filter);
                     }
                 }
@@ -1775,6 +2003,7 @@ void startConfigMode() {
                         filter.identifier = mac;
                         filter.description = "MAC: " + mac;
                         filter.isFullMAC = true;
+                        filter.type = FT_FULL_MAC;
                         targetFilters.push_back(filter);
                     }
                 }
@@ -2071,6 +2300,7 @@ void startConfigMode() {
                         filter.identifier = oui;
                         filter.description = "OUI: " + oui;
                         filter.isFullMAC = false;
+                        filter.type = FT_MAC_PREFIX;
                         targetFilters.push_back(filter);
                     }
                 }
@@ -2111,6 +2341,7 @@ void startConfigMode() {
                         filter.identifier = mac;
                         filter.description = "MAC: " + mac;
                         filter.isFullMAC = true;
+                        filter.type = FT_FULL_MAC;
                         targetFilters.push_back(filter);
                     }
                 }
@@ -2281,6 +2512,41 @@ void startConfigMode() {
         normalRestartScheduled = millis() + 3000;
     });
 
+    // One-click add all known signatures for a device family.
+    // POST body/query: name=rayban|axon
+    server.on("/api/presets/apply", HTTP_POST, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+
+        String presetName;
+        if (request->hasParam("name", true))       presetName = request->getParam("name", true)->value();
+        else if (request->hasParam("name", false)) presetName = request->getParam("name", false)->value();
+        presetName.toLowerCase();
+
+        int added = 0;
+        String label;
+        if (presetName == "rayban") {
+            label = "Ray-Ban Meta";
+            added = applyPreset(PRESET_RAYBAN, PRESET_RAYBAN_COUNT, "Ray-Ban Meta");
+        } else if (presetName == "axon") {
+            label = "Axon body cam";
+            added = applyPreset(PRESET_AXON, PRESET_AXON_COUNT, "Axon body cam");
+        } else {
+            request->send(400, "application/json",
+                "{\"ok\":false,\"error\":\"unknown preset — use name=rayban or name=axon\"}");
+            return;
+        }
+
+        String body = "{\"ok\":true,\"preset\":\"" + presetName + "\",\"label\":\"" + label +
+                      "\",\"added\":" + String(added) +
+                      ",\"total_filters\":" + String(targetFilters.size()) + "}";
+        request->send(200, "application/json", body);
+
+        if (isSerialConnected()) {
+            Serial.printf("Preset %s applied — %d new filters (total: %u)\n",
+                          presetName.c_str(), added, (unsigned)targetFilters.size());
+        }
+    });
+
     // Captive portal detection routes:
     server.on("/generate_204", HTTP_GET, handleGenerate204);
     server.on("/gen_204", HTTP_GET, handleGenerate204);
@@ -2310,7 +2576,7 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         unsigned long currentMillis = millis();
 
         String matchedDescription;
-        bool matchFound = matchesTargetFilter(mac, matchedDescription);
+        bool matchFound = matchesTargetFilter(advertisedDevice, mac, matchedDescription);
         
         if (matchFound) {
             bool known = false;
