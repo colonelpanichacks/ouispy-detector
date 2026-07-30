@@ -22,5 +22,12 @@ extern bool detectionActive;
 void mqtt_loadConfig();
 void mqtt_saveConfig();
 void mqtt_connect();
+// Publishes with retain=1 by default so HA never sees "unknown" after
+// a broker or HA restart. For an idle sensor an unretained publish
+// means the entity stays unknown until the next detection.
 void mqtt_publish(const char* topic, const char* payload);
+// Explicit retained publish (identical to mqtt_publish today; separate
+// symbol so future non-retained call sites can be added without
+// changing semantics of existing detection publishes).
+void mqtt_publish_retained(const char* topic, const char* payload);
 void mqtt_loop(unsigned long now);
