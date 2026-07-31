@@ -36,6 +36,7 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - No external libraries required (raw MQTT over TCP)
 
 ### Detection System
+- **One-click vendor signatures:** Add every known signal for Axon or Ray-Ban Meta from the OUI Database — OUIs, company IDs, service UUIDs, and name patterns
 - OUI filtering for device manufacturers
 - Full MAC address matching
 - Persistent configuration storage
@@ -62,7 +63,7 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - **Permanent Lock:** Lock configuration and bypass setup on boot
 - **Instant Scanning:** Device boots directly into scanning mode
 - **Protected Settings:** All filters, aliases, and preferences preserved
-- **Secure Reset:** Requires flash erase + reflash to unlock
+- **Reversible:** Hold the BOOT button 1.5s to clear the lock and return to config mode
 
 ## Installation
 
@@ -111,9 +112,52 @@ GND              →    GND (Ground)
 - **Brightness:** Normal (50/255), Detection (200/255)
 
 ### Filter Types
-- **OUI:** First 3 bytes (manufacturer prefix)
-- **MAC:** Complete 6-byte address
-- **Format:** Supports colons, hyphens, or spaces
+
+Five signature classes. The first two are typed into the OUI/MAC boxes; the
+rest are installed from the OUI Database and cannot be expressed as text.
+
+| Type | Matches on | Example |
+|---|---|---|
+| **OUI** | First 3 bytes of the MAC | `00:25:DF` |
+| **MAC** | Complete 6-byte address | `00:25:DF:12:34:56` |
+| **Company ID** | BT SIG manufacturer ID in the advertisement | `0x034D` |
+| **Service UUID** | 16-bit BLE service UUID | `0xFC81` |
+| **Name** | Case-insensitive substring of the device name | `Ray-Ban` |
+
+Format for OUI/MAC supports colons, hyphens, or spaces.
+
+### OUI Database
+
+Below the OUI box is a browsable database of known surveillance hardware —
+RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META/RAYBAN — each with its
+prefixes, category, and typical devices. Click **+ Add** to append a vendor's
+OUIs to your filter list.
+
+**AXON** and **META/RAYBAN** carry more than OUIs, so their button reads
+**+ Add all signatures**:
+
+| Vendor | Signatures installed |
+|---|---|
+| **AXON** | OUI `00:25:DF`, company ID `0x034D` (TASER International), service UUID `0xFC81` |
+| **META/RAYBAN** | 5 OUIs, company ID `0x0D53` (Luxottica), service UUID `0xFD5F`, names `Ray-Ban` / `Wayfarer` / `Oakley Meta` |
+
+OUIs alone are the weakest signal for both. Meta glasses rotate their MAC
+address, and Axon hardware may never expose its OUI in a BLE advertisement —
+so the company ID and service UUID do most of the work. For Meta specifically,
+the Luxottica company ID is what separates glasses from Quest headsets and
+other Meta devices, which share Meta's own IDs.
+
+Each added vendor shows one colour-coded line under the OUI box — cyan for
+MAC prefixes, amber for company IDs, green for service UUIDs, purple for name
+patterns — with an `x` to remove. Removing drops only the non-MAC signatures;
+OUIs stay in the textbox for you to manage.
+
+Manual entry is unaffected. Preset OUIs land in the same textbox as anything
+you type, and stay editable.
+
+Signatures are cross-verified against the Bluetooth SIG assigned-numbers
+registry, the IEEE OUI registry, and the community
+[lnxgod/friendorfoe](https://github.com/lnxgod/friendorfoe) project.
 
 ### Device Alias Management
 Assign custom names to detected devices via the web portal:
@@ -145,16 +189,29 @@ Permanently lock settings for deployment scenarios:
 6. Device restarts in 3 seconds into scanning mode
 
 #### How to Unlock
-**Required:** Flash erase followed by firmware reflash
-```bash
-# Erase flash memory
-pio run -e seeed_xiao_esp32s3 --target erase
 
-# Reflash firmware
+**Hold the BOOT button (GPIO0) for 1.5 seconds.** You get a triple beep,
+the lock clears, and the device reboots into config mode. This works two ways:
+
+- **While running** — hold BOOT at any time, even mid-scan. No power-cycle,
+  no cable.
+- **At power-on** — hold BOOT while plugging in or resetting. Beeps every
+  300ms while counting; releasing early aborts.
+
+The same hold works when the device is *not* locked, so it doubles as a way
+to break out of scanning back into config mode.
+
+Erasing flash also works, but it wipes everything — filters, aliases, AP
+credentials, MQTT config:
+
+```bash
+pio run -e seeed_xiao_esp32s3 --target erase
 pio run -e seeed_xiao_esp32s3 --target upload
 ```
 
-**Warning:** Simple reflash without erase will NOT unlock the device.
+**Note:** Reflashing *without* erasing does NOT unlock the device. NVS
+survives a reflash. Earlier firmware told you otherwise — that was wrong,
+and is why the BOOT escape hatch exists.
 
 ## MQTT Setup (Home Assistant)
 
