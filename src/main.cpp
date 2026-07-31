@@ -1922,7 +1922,10 @@ DD:EE:FF:ab:cd:ef
                         alert('Error locking configuration. Check console.');
                     });
             }
-            </script>
+            
+            // populate preset signature lines on load
+            loadSigLines();
+        </script>
         </form>
     </div>
 </body>
@@ -2630,7 +2633,6 @@ void startConfigMode() {
             setTimeout(function() {
                 window.location.href = 'about:blank';
             }, 3000);
-                    loadSigLines();
         </script>
     </div>
 </body>
