@@ -673,6 +673,20 @@ int removePreset(const PresetEntry* preset, size_t count) {
     return removed;
 }
 
+// True if any of the preset's non-MAC signatures are currently installed.
+// MAC prefixes are excluded on purpose: those live in the OUI textarea and
+// may have been added manually, so they don't indicate preset state.
+bool presetInstalled(const PresetEntry* preset, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        const PresetEntry& p = preset[i];
+        if (p.type == FT_MAC_PREFIX || p.type == FT_FULL_MAC) continue;
+        for (const TargetFilter& f : targetFilters) {
+            if (f.type == p.type && f.identifier.equalsIgnoreCase(p.identifier)) return true;
+        }
+    }
+    return false;
+}
+
 // ================================
 // Device Alias Functions
 // ================================
@@ -1764,6 +1778,26 @@ DD:EE:FF:ab:cd:ef
             // Signature sets that cannot be expressed in the OUI textarea.
             // MAC prefixes still flow through appendOUIs() so they stay
             // visible and hand-editable in the box like they always were.
+            var VENDOR_OUIS = {
+                axon:   '00:25:DF',
+                rayban: '7C:2A:9E,CC:66:0A,F4:03:43,5C:E9:1E,98:59:49'
+            };
+            var VENDOR_LABELS = { axon: 'AXON', rayban: 'META/RAYBAN' };
+
+            // Repopulate the signature lines on page load. Without this the
+            // filters stay installed in NVS but the UI looks empty after a
+            // refresh, which reads as "my presets vanished".
+            function loadSigLines() {
+                fetch('/api/presets/status')
+                    .then(function(r){ return r.json(); })
+                    .then(function(d){
+                        Object.keys(VENDOR_LABELS).forEach(function(k){
+                            if (d && d[k]) renderSigLine(k, VENDOR_LABELS[k], VENDOR_OUIS[k], null);
+                        });
+                    })
+                    .catch(function(){ /* device offline: leave lines empty */ });
+            }
+
             var VENDOR_SIGS = {
                 axon:   [ {t:'cid',  v:'0x034D', l:'CID'},
                           {t:'uuid', v:'0xFC81', l:'UUID'} ],
@@ -2596,6 +2630,7 @@ void startConfigMode() {
             setTimeout(function() {
                 window.location.href = 'about:blank';
             }, 3000);
+                    loadSigLines();
         </script>
     </div>
 </body>
@@ -2658,6 +2693,15 @@ void startConfigMode() {
         request->send(200, "application/json",
             "{\"ok\":true,\"removed\":" + String(removed) +
             ",\"total_filters\":" + String(targetFilters.size()) + "}");
+    });
+
+    server.on("/api/presets/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String body = "{\"axon\":";
+        body += presetInstalled(PRESET_AXON, PRESET_AXON_COUNT) ? "true" : "false";
+        body += ",\"rayban\":";
+        body += presetInstalled(PRESET_RAYBAN, PRESET_RAYBAN_COUNT) ? "true" : "false";
+        body += "}";
+        request->send(200, "application/json", body);
     });
 
     // Captive portal detection routes:
