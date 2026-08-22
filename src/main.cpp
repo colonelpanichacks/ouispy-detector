@@ -14,6 +14,8 @@
 #include <vector>
 #include <algorithm>
 #include <Adafruit_NeoPixel.h>
+#include <LittleFS.h>
+#include <ArduinoJson.h>
 #include "mqtt.h"
 
 // ================================
@@ -84,6 +86,31 @@ String matchType = "";  // "NEW", "RE-3s", "RE-30s"
 bool buzzerEnabled = true;
 bool ledEnabled = true;
 
+// Filter classification — determines which BLE advert field the matcher
+// checks against `identifier`. Values are persisted to NVS; do NOT
+// renumber existing entries or old configs will break.
+enum FilterType : uint8_t {
+    FT_MAC_PREFIX      = 0,  // identifier = 6-char OUI (e.g. "985949")
+    FT_FULL_MAC        = 1,  // identifier = 12-char MAC
+    FT_COMPANY_ID      = 2,  // identifier = 4-char hex "0D53" (BT SIG mfr CID)
+    FT_SERVICE_UUID_16 = 3,  // identifier = 4-char hex "FD5F" (BT SIG 16-bit svc UUID)
+    FT_NAME_SUBSTRING  = 4,  // identifier = case-insensitive substring
+};
+
+// Short code shown on the dashboard match-type badge and persisted in
+// the session JSON. Kept stable across firmware versions — the UI's
+// colour palette is keyed off these exact strings.
+static const char* filterTypeCode(FilterType t) {
+    switch (t) {
+        case FT_MAC_PREFIX:      return "OUI";
+        case FT_FULL_MAC:        return "MAC";
+        case FT_COMPANY_ID:      return "CID";
+        case FT_SERVICE_UUID_16: return "SVC";
+        case FT_NAME_SUBSTRING:  return "NAME";
+    }
+    return "OUI";
+}
+
 // Device tracking
 struct DeviceInfo {
     String macAddress;
@@ -94,17 +121,8 @@ struct DeviceInfo {
     unsigned long cooldownUntil;
     const char* matchedFilter;
     String filterDescription;  // Store filter description for persistence
-};
-
-// Filter classification — determines which BLE advert field the matcher
-// checks against `identifier`. Values are persisted to NVS; do NOT
-// renumber existing entries or old configs will break.
-enum FilterType : uint8_t {
-    FT_MAC_PREFIX      = 0,  // identifier = 6-char OUI (e.g. "985949")
-    FT_FULL_MAC        = 1,  // identifier = 12-char MAC
-    FT_COMPANY_ID      = 2,  // identifier = 4-char hex "0D53" (BT SIG mfr CID)
-    FT_SERVICE_UUID_16 = 3,  // identifier = 4-char hex "FD5F" (BT SIG 16-bit svc UUID)
-    FT_NAME_SUBSTRING  = 4,  // identifier = case-insensitive substring
+    String matchedIdentifier;  // Raw identifier that triggered (e.g. "985949")
+    FilterType matchedType = FT_MAC_PREFIX;  // Which of the 5 filter types hit
 };
 
 struct TargetFilter {
@@ -127,6 +145,12 @@ std::vector<DeviceAlias> deviceAliases;
 void startScanningMode();
 void startDetectionFlash();
 class MyAdvertisedDeviceCallbacks;
+
+// LittleFS session forwards (definitions live further down)
+static void ensureSessionFS();
+static void rotateSessionFiles();
+static void writeCurrentSession();
+static void clearCurrentSessionFile();
 
 // ================================
 // Serial Configuration
@@ -511,7 +535,8 @@ static String normalizeHexId(const String& in) {
 }
 
 bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
-                          String& matchedDescription) {
+                          String& matchedDescription, String& matchedIdentifier,
+                          FilterType& outType) {
     String normalizedDeviceMAC = deviceMAC;
     normalizeMACAddress(normalizedDeviceMAC);
 
@@ -522,6 +547,8 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                 normalizeMACAddress(filterID);
                 if (normalizedDeviceMAC.startsWith(filterID)) {
                     matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
                     return true;
                 }
                 break;
@@ -531,6 +558,8 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                 normalizeMACAddress(filterID);
                 if (normalizedDeviceMAC.equals(filterID)) {
                     matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
                     return true;
                 }
                 break;
@@ -544,6 +573,8 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                 snprintf(cidHex, sizeof(cidHex), "%04x", cid);
                 if (normalizeHexId(filter.identifier).equals(cidHex)) {
                     matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
                     return true;
                 }
                 break;
@@ -557,10 +588,14 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                     s.toLowerCase();
                     if (s.length() == 4 && s.equals(target)) {
                         matchedDescription = filter.description;
+                        matchedIdentifier  = filter.identifier;
+                        outType            = filter.type;
                         return true;
                     }
                     if (s.length() >= 8 && s.substring(4, 8).equals(target)) {
                         matchedDescription = filter.description;
+                        matchedIdentifier  = filter.identifier;
+                        outType            = filter.type;
                         return true;
                     }
                 }
@@ -571,6 +606,8 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                 String name = dev->getName().c_str();
                 if (nameContains(name, filter.identifier)) {
                     matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
                     return true;
                 }
                 break;
@@ -887,14 +924,149 @@ void loadDetectedDevices() {
 
 void clearDetectedDevices() {
     devices.clear();
-    
+
     preferences.begin("ouispy", false);
     preferences.putInt("deviceCount", 0);
     preferences.end();
-    
+
+    // Also drop the rolling session file so the dashboard is genuinely
+    // empty and a reboot doesn't resurrect the just-cleared list.
+    clearCurrentSessionFile();
+
     if (isSerialConnected()) {
-        Serial.println("All detected devices cleared from memory and NVS");
+        Serial.println("All detected devices cleared from memory, NVS, and LittleFS");
     }
+}
+
+// ================================
+// LittleFS Session Persistence
+// ================================
+//
+// Two-file rolling scheme:
+//   /session_curr.json — this boot's rolling detections, rewritten on
+//                        every NEW hit (not on re-hits within cooldown).
+//   /session_prev.json — the previous boot's session, promoted from
+//                        session_curr on startup and read-only until the
+//                        next reboot rotates it out.
+//
+// Cap: SESSION_MAX_ENTRIES per file; LRU-drop happens in the callback
+// when devices[] grows past the cap so the JSON never gets huge.
+
+static const char*  SESSION_CURR_PATH   = "/session_curr.json";
+static const char*  SESSION_PREV_PATH   = "/session_prev.json";
+static const size_t SESSION_MAX_ENTRIES = 200;
+static const size_t SESSION_JSON_BYTES  = 48 * 1024;
+
+static bool sessionFSReady = false;
+volatile bool sessionDirty = false;   // set by BLE callback, drained in loop()
+
+static void ensureSessionFS() {
+    if (sessionFSReady) return;
+    if (LittleFS.begin(true)) {       // format on failure
+        sessionFSReady = true;
+    } else if (isSerialConnected()) {
+        Serial.println("[detector] LittleFS mount failed");
+    }
+}
+
+// Boot-time rotation: promote last boot's live file to the prev slot,
+// then wipe the live slot so this session starts clean. Logs a one-line
+// summary so a serial capture can prove the persistence path is alive.
+static void rotateSessionFiles() {
+    ensureSessionFS();
+    if (!sessionFSReady) return;
+
+    if (LittleFS.exists(SESSION_CURR_PATH)) {
+        if (LittleFS.exists(SESSION_PREV_PATH)) LittleFS.remove(SESSION_PREV_PATH);
+        if (LittleFS.rename(SESSION_CURR_PATH, SESSION_PREV_PATH)) {
+            if (isSerialConnected()) Serial.println("[detector] rotated session_curr -> session_prev");
+        } else if (isSerialConnected()) {
+            Serial.println("[detector] session rotate failed");
+        }
+    }
+
+    if (LittleFS.exists(SESSION_PREV_PATH)) {
+        File f = LittleFS.open(SESSION_PREV_PATH, "r");
+        size_t entries = 0;
+        if (f) {
+            DynamicJsonDocument doc(SESSION_JSON_BYTES);
+            DeserializationError err = deserializeJson(doc, f);
+            f.close();
+            if (!err && doc.is<JsonArray>()) {
+                entries = doc.as<JsonArray>().size();
+            } else if (isSerialConnected()) {
+                Serial.println("[detector] session_prev parse failed, treating as empty");
+            }
+        }
+        if (isSerialConnected()) {
+            Serial.printf("[detector] session_prev loaded (%u entries)\n", (unsigned)entries);
+        }
+    } else if (isSerialConnected()) {
+        Serial.println("[detector] no previous session");
+    }
+}
+
+// Serialise devices[] out as a plain JSON array. Wrap-crashing writes
+// aren't defended against — the load path tolerates a corrupt file and
+// falls back to empty, which is fine for a detector.
+static void writeCurrentSession() {
+    ensureSessionFS();
+    if (!sessionFSReady) return;
+
+    DynamicJsonDocument doc(SESSION_JSON_BYTES);
+    JsonArray arr = doc.to<JsonArray>();
+
+    size_t start = devices.size() > SESSION_MAX_ENTRIES
+                    ? devices.size() - SESSION_MAX_ENTRIES : 0;
+    for (size_t i = start; i < devices.size(); i++) {
+        const DeviceInfo& d = devices[i];
+        JsonObject o = arr.createNestedObject();
+        o["mac"]      = d.macAddress;
+        o["first_ms"] = d.firstSeen;
+        o["last_ms"]  = d.lastSeen;
+        o["rssi"]     = d.rssi;
+        o["type"]     = filterTypeCode(d.matchedType);
+        o["match"]    = d.matchedIdentifier;
+        o["desc"]     = d.filterDescription;
+    }
+
+    File f = LittleFS.open(SESSION_CURR_PATH, "w");
+    if (!f) {
+        if (isSerialConnected()) Serial.println("[detector] session_curr open failed");
+        return;
+    }
+    serializeJson(doc, f);
+    f.close();
+}
+
+static void clearCurrentSessionFile() {
+    ensureSessionFS();
+    if (sessionFSReady && LittleFS.exists(SESSION_CURR_PATH)) {
+        LittleFS.remove(SESSION_CURR_PATH);
+    }
+}
+
+static void clearPreviousSessionFile() {
+    ensureSessionFS();
+    if (sessionFSReady && LittleFS.exists(SESSION_PREV_PATH)) {
+        LittleFS.remove(SESSION_PREV_PATH);
+    }
+}
+
+// Slurp session_prev.json verbatim for the dashboard. Empty array on
+// any error / missing file — the UI hides its panel when the array is
+// empty, so this is the graceful fallback.
+static String readPreviousSessionJson() {
+    ensureSessionFS();
+    if (!sessionFSReady || !LittleFS.exists(SESSION_PREV_PATH)) return "[]";
+    File f = LittleFS.open(SESSION_PREV_PATH, "r");
+    if (!f) return "[]";
+    String out;
+    out.reserve(f.size() + 2);
+    while (f.available()) out += (char)f.read();
+    f.close();
+    if (out.length() == 0) out = "[]";
+    return out;
 }
 
 // ================================
@@ -1412,6 +1584,16 @@ DD:EE:FF:ab:cd:ef
                 <div id="clearDeviceBtn" style="margin-bottom: 10px; text-align: right; display: none;">
                     <button type="button" onclick="clearDeviceHistory()" style="background: #8b0000; padding: 8px 16px; font-size: 13px; margin: 0;">Clear Device History</button>
                 </div>
+                <div id="previousSessionPanel" style="display: none; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; overflow: hidden; background: rgba(255,255,255,0.015);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding: 10px 14px; background: rgba(255,255,255,0.04); cursor: pointer;" onclick="togglePrevSession()">
+                        <span id="previousSessionTitle" style="font-family:'Courier New',monospace; font-size:12px; letter-spacing:1px; color:#4ecdc4;">PREVIOUS SESSION (0)</span>
+                        <span style="display:flex; align-items:center; gap:10px;">
+                            <button type="button" onclick="event.stopPropagation(); clearPreviousSession();" style="background:#4a0000; padding:4px 10px; font-size:11px; margin:0;">Clear</button>
+                            <span id="previousSessionCaret" style="color:#888; font-size:11px;">[-]</span>
+                        </span>
+                    </div>
+                    <div id="previousSessionList" class="device-list" style="opacity: 0.65; padding: 10px 12px; max-height: 300px;"></div>
+                </div>
                 <div id="deviceList" class="device-list">
                     <div style="text-align: center; padding: 30px; color: #888888;">
                         <p style="font-size: 14px;">No device records in storage.</p>
@@ -1573,12 +1755,42 @@ DD:EE:FF:ab:cd:ef
                     font-size: 11px;
                     font-style: italic;
                 }
+                .match-badge {
+                    display: inline-block;
+                    padding: 2px 7px;
+                    border-radius: 10px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 10px;
+                    font-weight: 700;
+                    letter-spacing: 0.5px;
+                    background: rgba(0,0,0,0.35);
+                    border: 1px solid currentColor;
+                    text-shadow: 0 0 4px currentColor;
+                }
+                .match-badge.type-OUI  { color: #00d4ff; }
+                .match-badge.type-MAC  { color: #ff2ee0; }
+                .match-badge.type-CID  { color: #ffb020; }
+                .match-badge.type-SVC  { color: #a3ff2e; }
+                .match-badge.type-NAME { color: #ff6b9d; }
+                .prev-tag {
+                    display: inline-block;
+                    margin-left: 6px;
+                    padding: 1px 6px;
+                    border-radius: 4px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 9px;
+                    letter-spacing: 0.5px;
+                    color: #888;
+                    border: 1px solid rgba(255,255,255,0.15);
+                    background: rgba(255,255,255,0.03);
+                }
             </style>
             
             <script>
             // Load detected devices on page load
             window.addEventListener('DOMContentLoaded', function() {
                 loadDetectedDevices();
+                loadPreviousSession();
                 
                 // Ensure form submits on first click (mobile fix)
                 const configForm = document.getElementById('configForm');
@@ -1650,9 +1862,12 @@ DD:EE:FF:ab:cd:ef
                                 }
                                 
                                 infoRow.appendChild(macSpan);
+                                if (device.type) {
+                                    infoRow.appendChild(makeMatchBadge(device.type, device.filter, device.match));
+                                }
                                 infoRow.appendChild(rssiSpan);
                                 infoRow.appendChild(timeSpan);
-                                
+
                                 if (device.filter) {
                                     const filterSpan = document.createElement('span');
                                     filterSpan.className = 'device-filter';
@@ -1695,6 +1910,96 @@ DD:EE:FF:ab:cd:ef
                     });
             }
             
+            function makeMatchBadge(type, description, matchIdent) {
+                var badge = document.createElement('span');
+                var allowed = ['OUI','MAC','CID','SVC','NAME'];
+                var t = (allowed.indexOf(type) >= 0) ? type : 'OUI';
+                badge.className = 'match-badge type-' + t;
+                badge.textContent = t;
+                var titleParts = [];
+                if (matchIdent) titleParts.push(matchIdent);
+                if (description) titleParts.push(description);
+                badge.title = titleParts.join(' - ');
+                return badge;
+            }
+
+            function togglePrevSession() {
+                var list = document.getElementById('previousSessionList');
+                var caret = document.getElementById('previousSessionCaret');
+                if (!list) return;
+                if (list.style.display === 'none') {
+                    list.style.display = '';
+                    caret.textContent = '[-]';
+                } else {
+                    list.style.display = 'none';
+                    caret.textContent = '[+]';
+                }
+            }
+
+            function loadPreviousSession() {
+                fetch('/api/session/previous')
+                    .then(function(r) { return r.json(); })
+                    .then(function(arr) {
+                        var panel = document.getElementById('previousSessionPanel');
+                        var list  = document.getElementById('previousSessionList');
+                        var title = document.getElementById('previousSessionTitle');
+                        if (!Array.isArray(arr) || arr.length === 0) {
+                            if (panel) panel.style.display = 'none';
+                            return;
+                        }
+                        panel.style.display = '';
+                        title.textContent = 'PREVIOUS SESSION (' + arr.length + ')';
+                        list.innerHTML = '';
+                        arr.forEach(function(entry) {
+                            var item = document.createElement('div');
+                            item.className = 'device-item';
+                            var row = document.createElement('div');
+                            row.className = 'device-info-row';
+
+                            var macSpan = document.createElement('span');
+                            macSpan.className = 'device-mac';
+                            macSpan.textContent = entry.mac || '?';
+                            row.appendChild(macSpan);
+
+                            row.appendChild(makeMatchBadge(entry.type, entry.desc, entry.match));
+
+                            if (typeof entry.rssi === 'number') {
+                                var rssi = document.createElement('span');
+                                rssi.className = 'device-rssi';
+                                rssi.textContent = entry.rssi + ' dBm';
+                                row.appendChild(rssi);
+                            }
+
+                            var prevTag = document.createElement('span');
+                            prevTag.className = 'prev-tag';
+                            prevTag.textContent = 'PREV';
+                            row.appendChild(prevTag);
+
+                            if (entry.desc) {
+                                var descSpan = document.createElement('span');
+                                descSpan.className = 'device-filter';
+                                descSpan.textContent = entry.desc;
+                                descSpan.title = entry.desc;
+                                row.appendChild(descSpan);
+                            }
+                            item.appendChild(row);
+                            list.appendChild(item);
+                        });
+                    })
+                    .catch(function(err) {
+                        console.error('prev session load failed', err);
+                    });
+            }
+
+            function clearPreviousSession() {
+                fetch('/api/session/clear_previous', { method: 'POST' })
+                    .then(function() {
+                        var panel = document.getElementById('previousSessionPanel');
+                        if (panel) panel.style.display = 'none';
+                    })
+                    .catch(function(err) { console.error(err); });
+            }
+
             function saveAlias(mac, alias, button) {
                 const originalText = button.textContent;
                 const originalBg = button.style.background;
@@ -2364,6 +2669,8 @@ void startConfigMode() {
             json += "\"mac\":\"" + devices[i].macAddress + "\",";
             json += "\"rssi\":" + String(devices[i].rssi) + ",";
             json += "\"filter\":\"" + filterDesc + "\",";
+            json += "\"type\":\"" + String(filterTypeCode(devices[i].matchedType)) + "\",";
+            json += "\"match\":\"" + devices[i].matchedIdentifier + "\",";
             json += "\"alias\":\"" + alias + "\",";
             json += "\"lastSeen\":" + String(devices[i].lastSeen) + ",";
             json += "\"timeSince\":" + String(timeSince);
@@ -2402,6 +2709,21 @@ void startConfigMode() {
         }
     });
     
+    // Previous-session panel data source. Serves /session_prev.json
+    // straight from LittleFS; the UI does its own rendering.
+    server.on("/api/session/previous", HTTP_GET, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        request->send(200, "application/json", readPreviousSessionJson());
+    });
+
+    // Clear the previous-session file so the panel disappears on the
+    // next dashboard refresh. Does not touch the current session.
+    server.on("/api/session/clear_previous", HTTP_POST, [](AsyncWebServerRequest *request) {
+        lastConfigActivity = millis();
+        clearPreviousSessionFile();
+        request->send(200, "application/json", "{\"success\":true}");
+    });
+
     // API endpoint to clear device history
     server.on("/api/clear-devices", HTTP_POST, [](AsyncWebServerRequest *request) {
         lastConfigActivity = millis();
@@ -2774,7 +3096,11 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         unsigned long currentMillis = millis();
 
         String matchedDescription;
-        bool matchFound = matchesTargetFilter(advertisedDevice, mac, matchedDescription);
+        String matchedIdent;
+        FilterType matchedTypeOut = FT_MAC_PREFIX;
+        bool matchFound = matchesTargetFilter(advertisedDevice, mac,
+                                              matchedDescription, matchedIdent,
+                                              matchedTypeOut);
         
         if (matchFound) {
             bool known = false;
@@ -2831,7 +3157,15 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
                 newDev.cooldownUntil = 0;
                 newDev.matchedFilter = matchedDescription.c_str();
                 newDev.filterDescription = matchedDescription;
+                newDev.matchedIdentifier = matchedIdent;
+                newDev.matchedType = matchedTypeOut;
                 devices.push_back(newDev);
+
+                // LRU-drop oldest so the session cap holds even with a
+                // firehose of unique MACs.
+                while (devices.size() > 200) {
+                    devices.erase(devices.begin());
+                }
 
                 // Store data for main loop to process
                 detectedMAC = mac;
@@ -2839,9 +3173,10 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
                 matchedFilter = matchedDescription;
                 matchType = "NEW";
                 newMatchFound = true;
-                
+                sessionDirty  = true;  // main loop will flush to LittleFS
+
                 threeBeeps();
-                
+
                 auto& dev = devices.back();
                 dev.inCooldown = true;
                 dev.cooldownUntil = currentMillis + 3000;
@@ -3024,8 +3359,12 @@ void setup() {
         loadWiFiCredentials();
         mqtt_loadConfig();
         loadDeviceAliases();
-        loadDetectedDevices();
     }
+
+    // Detections now live in LittleFS as a rolling session, promoted to
+    // /session_prev.json on each boot. devices[] starts empty; the
+    // dashboard's PREVIOUS SESSION panel reads the prev file directly.
+    rotateSessionFiles();
     
     // Check if configuration is locked/burned in
     preferences.begin("ouispy", true);
@@ -3197,10 +3536,19 @@ void loop() {
             lastScanTime = currentMillis;
         }
 
-        // Auto-save detected devices to NVS every 10 seconds
-        if (currentMillis - lastCleanupTime >= 10000) {
-            saveDetectedDevices();
+        // Flush session file whenever a NEW detection landed. Doing the
+        // I/O here (not in the BLE callback) keeps NimBLE off the flash
+        // driver's toes.
+        if (sessionDirty) {
+            sessionDirty = false;
+            writeCurrentSession();
+        }
+
+        // Belt-and-suspenders periodic flush in case last_ms on existing
+        // rows drifted and we want it durable across a crash.
+        if (currentMillis - lastCleanupTime >= 30000) {
             lastCleanupTime = currentMillis;
+            if (!devices.empty()) writeCurrentSession();
         }
 
         // Status report disabled - using JSON output only
