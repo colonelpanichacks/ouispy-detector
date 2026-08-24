@@ -36,7 +36,7 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - No external libraries required (raw MQTT over TCP)
 
 ### Detection System
-- **One-click vendor signatures:** Add every known signal for Axon or Ray-Ban Meta from the OUI Database — OUIs, company IDs, service UUIDs, and name patterns
+- **One-click vendor signatures:** Add every known signal for Axon from the OUI Database — OUIs, company IDs, service UUIDs
 - OUI filtering for device manufacturers
 - Full MAC address matching
 - Persistent configuration storage
@@ -129,28 +129,37 @@ Format for OUI/MAC supports colons, hyphens, or spaces.
 ### OUI Database
 
 Below the OUI box is a browsable database of known surveillance hardware —
-RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META/RAYBAN — each with its
-prefixes, category, and typical devices. Click **+ Add** to append a vendor's
-OUIs to your filter list.
+RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO — each with its prefixes,
+category, and typical devices. Click **+ Add** to append a vendor's OUIs to
+your filter list.
 
-**AXON** and **META/RAYBAN** carry more than OUIs, so their button reads
-**+ Add all signatures**:
+**AXON** carries more than OUIs, so its button reads **+ Add all signatures**:
 
 | Vendor | Signatures installed |
 |---|---|
 | **AXON** | OUI `00:25:DF`, company ID `0x034D` (TASER International), service UUID `0xFC81` |
-| **META/RAYBAN** | 5 OUIs, company ID `0x0D53` (Luxottica), service UUID `0xFD5F`, names `Ray-Ban` / `Wayfarer` / `Oakley Meta` |
 
-OUIs alone are the weakest signal for both. Meta glasses rotate their MAC
-address, and Axon hardware may never expose its OUI in a BLE advertisement —
-so the company ID and service UUID do most of the work. For Meta specifically,
-the Luxottica company ID is what separates glasses from Quest headsets and
-other Meta devices, which share Meta's own IDs.
+OUIs alone are the weakest signal — Axon hardware may never expose its OUI
+in a BLE advertisement, so the company ID and service UUID do most of the
+work.
 
 Each added vendor shows one colour-coded line under the OUI box — cyan for
 MAC prefixes, amber for company IDs, green for service UUIDs, purple for name
 patterns — with an `x` to remove. Removing drops only the non-MAC signatures;
 OUIs stay in the textbox for you to manage.
+
+### Meta / Ray-Ban detection
+
+Meta / Ray-Ban glasses have no OUI-Database preset. The glasses use RPA
+(rotating random MAC per BT spec), so OUI-based matching is pure noise, and
+CID-only or svc-UUID-only auto-installers were false-positive magnets.
+Detection is instead handled by a hardcoded composite matcher that runs on
+every advert regardless of user filter config and fires only when either:
+mfr company ID `0x0D53` (Luxottica) AND service UUID `0xFD5F` (Meta) are
+present in the same advert, or the complete local name contains `Ray-Ban`,
+`Wayfarer`, or `Oakley Meta`. Hits render with a red-pink `META` badge.
+Manually adding `0x0D53`, `0xFD5F`, or a Luxottica MAC via the target
+config UI still triggers via the normal filter path, with its normal badge.
 
 Manual entry is unaffected. Preset OUIs land in the same textbox as anything
 you type, and stay editable.
