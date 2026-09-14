@@ -113,7 +113,7 @@ GND              →    GND (Ground)
 
 ### Filter Types
 
-Five signature classes. The first two are typed into the OUI/MAC boxes; the
+Six signature classes. The first two are typed into the OUI/MAC boxes; the
 rest are installed from the OUI Database and cannot be expressed as text.
 
 | Type | Matches on | Example |
@@ -123,15 +123,16 @@ rest are installed from the OUI Database and cannot be expressed as text.
 | **Company ID** | BT SIG manufacturer ID in the advertisement | `0x034D` |
 | **Service UUID** | 16-bit BLE service UUID | `0xFC81` |
 | **Name** | Case-insensitive substring of the device name | `Ray-Ban` |
+| **Meta composite** | CID `0x0D53` + UUID `0xFD5F` in the same advert, or name `Ray-Ban`/`Wayfarer`/`Oakley Meta` | META / RAY-BAN preset |
 
 Format for OUI/MAC supports colons, hyphens, or spaces.
 
 ### OUI Database
 
 Below the OUI box is a browsable database of known surveillance hardware —
-RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO — each with its prefixes,
-category, and typical devices. Click **+ Add** to append a vendor's OUIs to
-your filter list.
+RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META / RAY-BAN — each with
+its prefixes, category, and typical devices. Click **+ Add** to append a
+vendor's OUIs to your filter list.
 
 **AXON** carries more than OUIs, so its button reads **+ Add all signatures**:
 
@@ -145,24 +146,27 @@ work.
 
 Each added vendor shows one colour-coded line under the OUI box — cyan for
 MAC prefixes, amber for company IDs, green for service UUIDs, purple for name
-patterns — with an `x` to remove. Removing drops only the non-MAC signatures;
-OUIs stay in the textbox for you to manage.
+patterns, red-pink for the Meta composite — with an `x` to remove. Removing
+drops only the non-MAC signatures; OUIs stay in the textbox for you to
+manage.
 
 ### Meta / Ray-Ban detection
 
-Meta / Ray-Ban glasses have no OUI-Database preset. The glasses use RPA
-(rotating random MAC per BT spec), so OUI-based matching is pure noise, and
-CID-only or svc-UUID-only auto-installers were false-positive magnets.
-Detection is instead handled by a hardcoded composite matcher that runs on
-every advert regardless of user filter config and fires only when either:
-mfr company ID `0x0D53` (Luxottica) AND service UUID `0xFD5F` (Meta) are
-present in the same advert, or the complete local name contains `Ray-Ban`,
-`Wayfarer`, or `Oakley Meta`. Hits render with a red-pink `META` badge.
-Manually adding `0x0D53`, `0xFD5F`, or a Luxottica MAC via the target
-config UI still triggers via the normal filter path, with its normal badge.
+**META / RAY-BAN** has its own OUI-Database card whose button reads **+ Add
+composite signature**. The glasses use RPA (rotating random MAC per BT
+spec), so OUI-based matching is pure noise, and CID-only or svc-UUID-only
+filters are false-positive magnets (`0xFD5F` is advertised by phones running
+Meta apps). The preset therefore installs a single composite filter that
+fires only when either: mfr company ID `0x0D53` (Luxottica) AND service
+UUID `0xFD5F` (Meta) are present in the same advert, or the complete local
+name contains `Ray-Ban`, `Wayfarer`, or `Oakley Meta`. Hits render with a
+red-pink `META` badge. Not installed = no Meta detection — it behaves like
+any other filter: remove it with the `x` on its signature line, or wipe it
+via **Clear All Filters**.
 
-Manual entry is unaffected. Preset OUIs land in the same textbox as anything
-you type, and stay editable.
+Manually adding `0x0D53`, `0xFD5F`, or a Luxottica MAC via the target
+config UI still triggers via the normal single-signature filter path, with
+its normal badge.
 
 Signatures are cross-verified against the Bluetooth SIG assigned-numbers
 registry, the IEEE OUI registry, and the community
