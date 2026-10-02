@@ -3469,10 +3469,33 @@ String configProcessor(const String& var) {
 
 // Shared: parse the 'filters' JSON form field and rebuild targetFilters.
 // Clears user-managed filter types (FT_MAC_PREFIX, FT_FULL_MAC,
-// FT_WIFI_PROBE, FT_WIFI_BEACON) first; preserves preset-only types.
-// Returns the number of new filter entries added.
+// FT_WIFI_PROBE, FT_WIFI_BEACON) and preserves preset-only types.
+// The POSTed JSON is parsed and fully validated BEFORE anything is erased,
+// so a malformed or oversized payload leaves the stored configuration
+// untouched. Returns the number of new filter entries added, or -1 if the
+// posted filter list could not be parsed (caller must reject the save).
 static int parseFiltersFromJSON(AsyncWebServerRequest *request) {
-    // Clear user-managed filter types
+    if (!request->hasParam("filters", true)) {
+        return 0;
+    }
+    String filtersJson = request->getParam("filters", true)->value();
+    filtersJson.trim();
+    if (filtersJson.length() == 0) return 0;
+
+    // Heap document (like rotateSessionFiles) — an 8 KB stack document
+    // inside the async-web handler task would be dicey, and a single
+    // Flock 30-OUI card click already posts ~3 KB of rows.
+    DynamicJsonDocument doc(8192);
+    DeserializationError err = deserializeJson(doc, filtersJson);
+    if (err.code() != DeserializationError::Ok) {
+        if (isSerialConnected()) Serial.print("filters JSON parse error: ");
+        if (isSerialConnected()) Serial.println(err.c_str());
+        return -1;
+    }
+    if (!doc.is<JsonArray>()) return -1;
+
+    // Parse succeeded — only now is it safe to clear the user-managed filter
+    // types (preset-only types are always preserved).
     targetFilters.erase(
         std::remove_if(targetFilters.begin(), targetFilters.end(),
             [](const TargetFilter& f) {
@@ -3481,23 +3504,7 @@ static int parseFiltersFromJSON(AsyncWebServerRequest *request) {
             }),
         targetFilters.end());
 
-    if (!request->hasParam("filters", true)) {
-        return 0;
-    }
-    String filtersJson = request->getParam("filters", true)->value();
-    filtersJson.trim();
-    if (filtersJson.length() == 0) return 0;
-
-    StaticJsonDocument<2048> doc;
-    DeserializationError err = deserializeJson(doc, filtersJson);
-    if (err.code() != DeserializationError::Ok) {
-        if (isSerialConnected()) Serial.print("filters JSON parse error: ");
-        if (isSerialConnected()) Serial.println(err.c_str());
-        return 0;
-    }
-
     int added = 0;
-    if (!doc.is<JsonArray>()) return 0;
     for (JsonObject entry : doc.as<JsonArray>()) {
         const char* ouiRaw = entry["oui"];
         if (ouiRaw == NULL || strlen(ouiRaw) == 0) continue;
@@ -3624,6 +3631,15 @@ void startConfigMode() {
 
         // Parse filters from JSON array (new filter UI format)
         int filterCount = parseFiltersFromJSON(request);
+        if (filterCount < 0) {
+            // Parse failed BEFORE anything was erased — stored config is
+            // untouched. Reject the save so it can't pretend to succeed.
+            request->send(400, "text/html",
+                "<!DOCTYPE html><html><head><title>Save failed</title></head><body style='font-family:sans-serif;background:#1a1a1a;color:#eee'>"
+                "<h1>Could not save</h1><p>The filter list failed to parse (too large or malformed). "
+                "Your saved configuration was <b>not</b> changed. Go back and retry.</p></body></html>");
+            return;
+        }
 
         // Process buzzer and LED toggles
         // (only set to true if explicitly provided — otherwise leave at saved state)
@@ -3898,7 +3914,13 @@ void startConfigMode() {
         }
 
         // Parse filters from JSON array (same shared logic as /save)
-        parseFiltersFromJSON(request);
+        if (parseFiltersFromJSON(request) < 0) {
+            // Parse failed before anything was erased — abort the lock so
+            // the burn-in can't proceed on a half-saved configuration.
+            request->send(400, "application/json",
+                "{\"success\":false,\"error\":\"filter list parse error — configuration unchanged\"}");
+            return;
+        }
 
         // Process buzzer and LED toggles
         // (only set to true if explicitly provided — otherwise leave at saved state)
