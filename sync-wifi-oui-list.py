@@ -22,13 +22,18 @@ END_MARKER = "<!-- WIFI_OUI_DB_END -->"
 INDENT = "                    "
 
 # Map a vendor's <summary> display name to the firmware preset key the
-# /api/presets/* endpoints understand. Vendors not listed fall back to a
-# slugified version of the name (lowercase, non-alnum -> underscore).
+# /api/presets/apply endpoint accepts (axon | meta | ipro). Vendors WITHOUT a
+# preset endpoint fall back to plain WiFi-domain filter rows via addFilterRow
+# — see flush_card().
 VENDOR_PRESET_KEYS = {
-    "AXON (WiFi)": "axon_wifi",
-    "AXON": "axon_wifi",
+    "AXON (WiFi)": "axon",
+    "AXON": "axon",
     "I-PRO": "ipro",
 }
+
+# Preset keys the firmware actually understands; anything else falls back to
+# addFilterRow so a typo here can't emit a button that 400s at runtime.
+VALID_PRESETS = {"axon", "meta", "ipro"}
 
 
 def slugify(name):
@@ -76,10 +81,24 @@ def convert_wifi_ouis_md_to_html():
         )
         if codes:
             output.append(f'<div class="oui-entries">{codes}</div>')
-        output.append(
-            '<button type="button" class="oui-add-btn" '
-            f"onclick=\"addVendor('{preset_key}','{vendor}','{rep_oui}')\">+ Add WiFi signatures</button>"
-        )
+        if preset_key in VALID_PRESETS:
+            # Vendor with a firmware preset: one click installs the whole
+            # bundle (FT_WIFI_PROBE/FT_WIFI_BEACON via /api/presets/apply).
+            output.append(
+                '<button type="button" class="oui-add-btn" '
+                f"onclick=\"addVendor('{preset_key}','{vendor}','{rep_oui}')\">+ Add WiFi signatures</button>"
+            )
+        else:
+            # No preset for this vendor: add plain WiFi-domain filter rows
+            # (ble=false, wifi=true) straight into the filter list.
+            row_calls = ";".join(
+                f"addFilterRow('{o.replace(':', '').upper()}',false,true,'{vendor}')"
+                for o in entries
+            )
+            output.append(
+                '<button type="button" class="oui-add-btn" '
+                f"onclick=\"{row_calls}\">+ Add to filter list</button>"
+            )
         output.extend(card["meta"])
         output.extend(card["note"])
         output.append("</details>")

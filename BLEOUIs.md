@@ -56,46 +56,6 @@ CC:3B:FB
 
 <details>
 
-<summary><b>AXON</b> <code>1 OUI</code></summary>
-
-- `00:25:DF`
-
-**Copy OUIs:**
-
-```
-00:25:DF
-```
-
-> **Category:** Body Camera / Law Enforcement  
-
-> **Detection Range:** Short-range BLE/WiFi  
-
-> **Common Devices:** Axon Body Camera, Axon Fleet
-
-</details>
-
-<details>
-
-<summary><b>I-PRO</b> <code>1 OUI</code></summary>
-
-- `D4:2D:C5`
-
-**Copy OUIs:**
-
-```
-D4:2D:C5
-```
-
-> **Category:** Body Camera / Law Enforcement
-
-> **Detection Range:** Short-range BLE/WiFi
-
-> **Common Devices:** I-PRO Body Camera
-
-</details>
-
-<details>
-
 <summary><b>FLOCK SAFETY</b> <code>1 OUI</code></summary>
 
 - `B4:1E:52`
@@ -364,7 +324,6 @@ F4:03:43
 AC:9F:C3
 C4:DB:AD
 CC:3B:FB
-00:25:DF
 B4:1E:52
 0C:9A:E6
 8C:58:23

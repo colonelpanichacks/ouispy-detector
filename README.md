@@ -167,10 +167,12 @@ GND              →    GND (Ground)
 ## MQTT Setup (Home Assistant)
 
 1. On the config portal, scroll to **MQTT** and fill in your home WiFi SSID/password, broker IP/port, optional credentials, and topic.
-2. Save. The detector connects to your home WiFi only in config mode; in scanning mode STA is off and the radio is dedicated to detection.
-3. On detection (when MQTT is enabled), the device briefly drops STA mode to publish, then returns to the time-sliced scan. Expected blind window per detection: ~2–12 s.
-4. Home Assistant auto-registers an OUI Spy device via MQTT discovery — no `configuration.yaml` edits needed.
-5. Payload example:
+2. Save. How the STA is used depends on the installed filters:
+   - **BLE-only filters:** STA stays up the whole time — MQTT connects once and reports every detection live, exactly like single-domain firmware.
+   - **BLE + WiFi filters:** promiscuous sweeps own the radio, so detections queue up and flush during the next BLE phase: STA comes up in a bounded report window, publishes everything queued, sends an MQTT DISCONNECT, and tearing down before the sweep resumes. Expected blind window per batch: ~2–12 s.
+   - **WiFi-only filters:** no BLE phase ever opens a report window, so detections are **not** reported over MQTT (the device logs this on serial at scanning start). Use at least one BLE filter if you need reporting.
+3. Home Assistant auto-registers an OUI Spy device via MQTT discovery — no `configuration.yaml` edits needed.
+4. Payload example:
 
 ```json
 {"mac":"aa:bb:cc:dd:ee:ff","alias":"my-device","rssi":-65,"type":"PROBE","match":"0025DF","desc":"AXON (WiFi)"}
@@ -194,7 +196,7 @@ GND              →    GND (Ground)
 - **BLE matching:** real-time OUI/MAC/CID/UUID/name matching against advertisements in the NimBLE callback.
 - **Ring-buffer handoff:** both producer callbacks push a fixed-size `DetectionEntry` into a ring; the main loop drains it and drives the buzzer, LED, and MQTT publish. Beeps and flash are *not* called from the ISR context.
 - **De-duplication:** per (MAC, frame type) 30 s cooldown suppresses beacon-flood re-alerts; 3 s re-alert timer for repeat sightings.
-- **STA report:** on each detection (when MQTT is enabled) the time-slice pauses, STA mode comes up long enough to publish, an MQTT DISCONNECT packet is sent, and scanning resumes.
+- **STA report:** with WiFi filters installed, detections that land during sweeps queue as JSON payloads and flush in one bounded report window during the next BLE phase (STA up → publish all → MQTT DISCONNECT → STA down → sweep resumes). BLE-only configs publish directly because STA never drops.
 
 ## Serial Output
 

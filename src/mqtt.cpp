@@ -209,9 +209,10 @@ void mqtt_publish_retained(const char* topic, const char* payload) {
 }
 
 // Orderly teardown of the MQTT TCP session. Sends a DISCONNECT control packet
-// (0xE0) if we're connected, then stops the socket. Called from doStaReport()
-// right after a publish, before the device drops STA mode — this lets the
-// broker register a clean disconnect instead of a dropped connection.
+// (0xE0) if we're connected, then stops the socket. Called by the main loop's
+// time-sliced report flush right after publishing, before the device drops
+// STA mode — this lets the broker register a clean disconnect instead of a
+// dropped connection.
 void mqtt_disconnect() {
     if (mqttTcp && mqttTcp->connected()) {
         wr8(0xE0);  // DISCONNECT
@@ -244,11 +245,12 @@ static void hardResetWifi() {
 void mqtt_loop(unsigned long now) {
     if (!mqttCfg.enabled) return;
 
-    // In scanning mode, the main loop manages WiFi state directly
-    // (promiscuous on/off). Don't call WiFi.reconnect() here — it
-    // blocks indefinitely when WiFi is in promiscuous teardown state
-    // with no configured SSID.
-    if (currentMode == SCANNING_MODE) {
+    // Time-sliced scanning (WiFi filters installed): the main loop owns the
+    // radio state (promiscuous on/off, bounded STA report windows during
+    // BLE phases). Don't call WiFi.reconnect() here — it blocks indefinitely
+    // when WiFi is in promiscuous teardown state with no configured SSID.
+    // BLE-only scanning keeps STA up and falls through to normal supervision.
+    if (currentMode == SCANNING_MODE && g_mqttRadioTimeslice) {
         // Still check MQTT TCP health if we were connected
         if (mqttConnected && mqttTcp && !mqttTcp->connected()) {
             mqttConnected = false;

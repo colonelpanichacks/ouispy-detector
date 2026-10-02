@@ -9,6 +9,13 @@ enum OperatingMode {
 };
 extern OperatingMode currentMode;
 
+// True while scanning with WiFi filters installed: the radio time-slices
+// between promiscuous sweeps and BLE scans, and the main loop brings STA up
+// in bounded report windows during BLE phases (mqttReportTick). mqtt_loop()
+// must skip its usual WiFi supervision/reconnect then — it would fight the
+// radio. BLE-only scanning keeps STA up permanently and leaves this false.
+extern bool g_mqttRadioTimeslice;
+
 struct MQTTConfig {
     char sta_ssid[33];
     char sta_pass[64];
@@ -38,7 +45,8 @@ void mqtt_publish(const char* topic, const char* payload);
 // changing semantics of existing detection publishes).
 void mqtt_publish_retained(const char* topic, const char* payload);
 void mqtt_loop(unsigned long now);
-// Cleanly tear down the TCP connection before the device drops STA. Called
-// from doStaReport() after a publish so the broker sees an orderly disconnect
-// rather than a dropped socket.
+// Cleanly tear down the TCP connection: sends a DISCONNECT control packet
+// (0xE0) if connected, then stops the socket. Called by the main loop's
+// time-sliced report flush after publishing, before the device drops STA
+// mode — the broker sees an orderly disconnect rather than a dropped socket.
 void mqtt_disconnect();

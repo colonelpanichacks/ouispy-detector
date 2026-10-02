@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <NimBLEDevice.h>
 #include <NimBLEUtils.h>
 #include <NimBLEScan.h>
@@ -84,6 +85,13 @@ String AP_PASSWORD = "astheysnoopuntous";
 // Global Variables
 // ================================
 OperatingMode currentMode = CONFIG_MODE;
+
+// Set while scanning with WiFi filters installed: the radio time-slices
+// between promiscuous sweeps and BLE scans, so the STA only comes up during
+// BLE phases (see the report flush in loop()). mqtt_loop() must not run its
+// usual WiFi supervision/reconnect in that state — it would fight the radio.
+// BLE-only scanning keeps STA up permanently and leaves this false.
+bool g_mqttRadioTimeslice = false;
 AsyncWebServer server(80);
 DNSServer dnsServer;
 const byte DNS_PORT = 53;
@@ -99,7 +107,9 @@ unsigned long normalRestartScheduled = 0; // When to do normal restart (0 = not 
 // cameras probing in the same 200 ms channel dwell would overwrite each other.
 // The BLE callback and the WiFi promiscuous callback both enqueue into this
 // small ring; loop() drains it. Entries use fixed char buffers so the producer
-// (a driver/ISR-context callback) never touches the heap.
+// (a driver/ISR-context callback) never touches the heap, and the head/count
+// update runs inside a short critical section because the two producers run
+// on different tasks.
 // Filter classification — determines which BLE advert field the matcher
 // checks against `identifier`. Values are persisted to NVS; do NOT
 // renumber existing entries or old configs will break.
@@ -123,19 +133,22 @@ enum FilterType : uint8_t {
     FT_WIFI_BEACON     = 7,  // WiFi beacon from OUI
 };
 
+// Raw detection report. Producers (BLE callback, WiFi promiscuous callback)
+// only fill this and push it; everything heavier — device bookkeeping,
+// cooldown, alerts, MQTT, session file — happens when loop() drains the ring.
 struct DetectionEntry {
     char mac[18];
     char identifier[18];
     char description[64];
     int rssi;
     FilterType matchedType;
-    char matchType[8];
-    bool wifiDomain;
+    bool wifiDomain;      // true = 802.11 MGMT frame match, false = BLE advert
 };
 
 static const int DET_QUEUE_SIZE = 16;
 
 static DetectionEntry detQueue[DET_QUEUE_SIZE];
+static portMUX_TYPE detQueueMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint8_t detQueueHead = 0;  // write index
 static volatile uint8_t detQueueTail = 0;  // read index
 static volatile uint8_t detQueueCount = 0;  // entries currently queued
@@ -204,19 +217,20 @@ void startConfigMode();
 void startDetectionFlash();
 class MyAdvertisedDeviceCallbacks;
 void enqueueDetection(const String& mac, const String& ident, const String& desc,
-                      int rssi, FilterType type, const char* matchType, bool wifi);
+                      int rssi, FilterType type, bool wifi);
 void enqueueDetection(const char* mac, const char* ident, const char* desc,
-                      int rssi, FilterType type, const char* matchType, bool wifi);
+                      int rssi, FilterType type, bool wifi);
 
 // WiFi promiscuous mode forward declarations
 static bool wifiOuiInTargets(const uint8_t oui[3]);
 static void rebuildWifiOuiTable();
 static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi);
-static void startWifiSweep();
-static void stopWifiSweep();
-static void startBleScan();
-static void stopBleScan();
-static void doStaReport(const String& payload);
+
+// LittleFS session forwards (definitions live further down)
+static void ensureSessionFS();
+static void rotateSessionFiles();
+static void writeCurrentSession();
+static void clearCurrentSessionFile();
 
 
 // ================================
@@ -616,51 +630,55 @@ static String normalizeHexId(const String& in) {
     return out;
 }
 
-// Enqueue a detection into the ring buffer from String objects. Used in the
-// BLE callback path. Drops the entry if the queue is full.
+// Enqueue a detection report from String objects. Used in the BLE callback
+// path. The slot copy and the head/count update happen inside one critical
+// section — two producers on different tasks (NimBLE host, WiFi driver)
+// enqueue concurrently with the loop() drain. Drops the entry if full.
 void enqueueDetection(const String& mac, const String& ident, const String& desc,
-                      int rssi, FilterType type, const char* matchType, bool wifi) {
-    if (detQueueCount >= DET_QUEUE_SIZE) return;  // queue full, drop
+                      int rssi, FilterType type, bool wifi) {
+    DetectionEntry e;
+    strncpy(e.mac, mac.c_str(), sizeof(e.mac) - 1);
+    e.mac[sizeof(e.mac) - 1] = '\0';
+    strncpy(e.identifier, ident.c_str(), sizeof(e.identifier) - 1);
+    e.identifier[sizeof(e.identifier) - 1] = '\0';
+    strncpy(e.description, desc.c_str(), sizeof(e.description) - 1);
+    e.description[sizeof(e.description) - 1] = '\0';
+    e.rssi = rssi;
+    e.matchedType = type;
+    e.wifiDomain = wifi;
 
-    int slot = detQueueHead;
-    strncpy(detQueue[slot].mac, mac.c_str(), sizeof(detQueue[slot].mac) - 1);
-    detQueue[slot].mac[sizeof(detQueue[slot].mac) - 1] = '\0';
-    strncpy(detQueue[slot].identifier, ident.c_str(), sizeof(detQueue[slot].identifier) - 1);
-    detQueue[slot].identifier[sizeof(detQueue[slot].identifier) - 1] = '\0';
-    strncpy(detQueue[slot].description, desc.c_str(), sizeof(detQueue[slot].description) - 1);
-    detQueue[slot].description[sizeof(detQueue[slot].description) - 1] = '\0';
-    detQueue[slot].rssi = rssi;
-    detQueue[slot].matchedType = type;
-    strncpy(detQueue[slot].matchType, matchType, sizeof(detQueue[slot].matchType) - 1);
-    detQueue[slot].matchType[sizeof(detQueue[slot].matchType) - 1] = '\0';
-    detQueue[slot].wifiDomain = wifi;
-
-    detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
-    detQueueCount++;
+    portENTER_CRITICAL(&detQueueMux);
+    if (detQueueCount < DET_QUEUE_SIZE) {
+        detQueue[detQueueHead] = e;
+        detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
+        detQueueCount++;
+    }
+    portEXIT_CRITICAL(&detQueueMux);
 }
 
-// Enqueue a detection into the ring buffer from char* buffers. Used in the
-// WiFi promiscuous callback — no String allocation in driver context.
-// Drops the entry if the queue is full.
+// Enqueue a detection report from stack buffers. Used in the WiFi promiscuous
+// callback — no heap, no String in driver context; the critical section is
+// equally short. Drops the entry if the queue is full.
 void enqueueDetection(const char* mac, const char* ident, const char* desc,
-                      int rssi, FilterType type, const char* matchType, bool wifi) {
-    if (detQueueCount >= DET_QUEUE_SIZE) return;  // queue full, drop
+                      int rssi, FilterType type, bool wifi) {
+    DetectionEntry e;
+    strncpy(e.mac, mac, sizeof(e.mac) - 1);
+    e.mac[sizeof(e.mac) - 1] = '\0';
+    strncpy(e.identifier, ident, sizeof(e.identifier) - 1);
+    e.identifier[sizeof(e.identifier) - 1] = '\0';
+    strncpy(e.description, desc, sizeof(e.description) - 1);
+    e.description[sizeof(e.description) - 1] = '\0';
+    e.rssi = rssi;
+    e.matchedType = type;
+    e.wifiDomain = wifi;
 
-    int slot = detQueueHead;
-    strncpy(detQueue[slot].mac, mac, sizeof(detQueue[slot].mac) - 1);
-    detQueue[slot].mac[sizeof(detQueue[slot].mac) - 1] = '\0';
-    strncpy(detQueue[slot].identifier, ident, sizeof(detQueue[slot].identifier) - 1);
-    detQueue[slot].identifier[sizeof(detQueue[slot].identifier) - 1] = '\0';
-    strncpy(detQueue[slot].description, desc, sizeof(detQueue[slot].description) - 1);
-    detQueue[slot].description[sizeof(detQueue[slot].description) - 1] = '\0';
-    detQueue[slot].rssi = rssi;
-    detQueue[slot].matchedType = type;
-    strncpy(detQueue[slot].matchType, matchType, sizeof(detQueue[slot].matchType) - 1);
-    detQueue[slot].matchType[sizeof(detQueue[slot].matchType) - 1] = '\0';
-    detQueue[slot].wifiDomain = wifi;
-
-    detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
-    detQueueCount++;
+    portENTER_CRITICAL(&detQueueMux);
+    if (detQueueCount < DET_QUEUE_SIZE) {
+        detQueue[detQueueHead] = e;
+        detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
+        detQueueCount++;
+    }
+    portEXIT_CRITICAL(&detQueueMux);
 }
 
 // WiFi OUI fast-path table. A small const array of 3-byte OUIs extracted
@@ -1090,9 +1108,11 @@ static void checkBootButtonLoop() {
 // WiFi Promiscuous Mode Detection
 // ================================
 
-// Promiscuous callback — runs in driver context. No String, no Serial, no delay.
-// Fast path: frame-control check + 3-byte OUI pre-check against wifiOuiTable.
-// Slow path: full filter match + dedup + enqueue.
+// Promiscuous callback — runs in driver context. No String, no Serial, no
+// delay, no heap, and no devices[] access (that vector is owned by loop()).
+// Fast path: frame-control check + 3-byte OUI pre-check against
+// wifiOuiTable. Slow path: full filter match + enqueue — dedup and cooldown
+// happen when loop() drains the entry (registerDetection), same as BLE.
 static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi) {
     // Format MAC as "aa:bb:cc:dd:ee:ff" (lowercase, matches NimBLE toString()
     // output) so a device seen by both radios dedups under one entry
@@ -1111,24 +1131,7 @@ static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi) 
     FilterType outType;
     if (!matchesWifiFilter(mac, subtype, desc, ident, outType)) return;
 
-    // De-dup check: use the devices vector with (MAC, type) as key
-    for (auto& dev : devices) {
-        if (strcmp(dev.macAddress.c_str(), macStr) == 0 && dev.matchedType == outType) {
-            unsigned long now = millis();
-            if (dev.inCooldown && now < dev.cooldownUntil) return;  // still cooling
-            if (dev.inCooldown) {
-                dev.inCooldown = false;
-                // Re-alert after cooldown — use single producer with overflow guard
-                enqueueDetection(macStr, ident, desc, rssi, outType, "RE", true);
-                dev.lastSeen = now;
-                return;
-            }
-            break;
-        }
-    }
-
-    // First detection of this (MAC, type) — use single producer with overflow guard
-    enqueueDetection(macStr, ident, desc, rssi, outType, "NEW", true);
+    enqueueDetection(macStr, ident, desc, rssi, outType, true);
 }
 
 // promiscuous API: the callback is `void (*)(void* buf, wifi_promiscuous_pkt_type_t type)`.
@@ -1156,37 +1159,8 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
     uint8_t oui[3] = { hdr->addr2[0], hdr->addr2[1], hdr->addr2[2] };
     if (!wifiOuiInTargets(oui)) return;
 
-    // Rare path: full match, de-dup, enqueue
+    // Rare path: full match + enqueue (fixed stack buffers only)
     handleWifiMatch(hdr->addr2, subtype, rssi);
-}
-
-// Start WiFi promiscuous sweep. Enables MGMT-only capture.
-static void startWifiSweep() {
-    if (isSerialConnected()) Serial.println("[SWEEP] Starting WiFi sweep...");
-    esp_wifi_set_promiscuous(false);
-    delay(100);
-    wifi_promiscuous_filter_t filt = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
-    esp_wifi_set_promiscuous_filter(&filt);
-    esp_wifi_set_promiscuous(true);
-}
-
-// Stop WiFi promiscuous sweep. 50 ms drain delay before disabling.
-static void stopWifiSweep() {
-    delay(50);
-    esp_wifi_set_promiscuous(false);
-    if (isSerialConnected()) Serial.println("[SWEEP] WiFi sweep done");
-}
-
-// Start BLE scan for 2 seconds (matches WiFi sweep duration).
-static void startBleScan() {
-    if (isSerialConnected()) Serial.println("[SWEEP] Starting BLE scan...");
-    pBLEScan->start(2, nullptr, false);
-}
-
-// Stop BLE scan.
-static void stopBleScan() {
-    if (pBLEScan) pBLEScan->stop();
-    if (isSerialConnected()) Serial.println("[SWEEP] BLE scan done");
 }
 
 // Forward declaration for callback class
@@ -1199,7 +1173,6 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 
         String mac = advertisedDevice->getAddress().toString().c_str();
         int rssi = advertisedDevice->getRSSI();
-        unsigned long currentMillis = millis();
 
         String matchedDescription;
         String matchedIdent;
@@ -1213,64 +1186,12 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         // trigger.
 
         if (matchFound) {
-            bool known = false;
-            for (auto& dev : devices) {
-                if (dev.macAddress == mac) {
-                    known = true;
-
-                    if (dev.inCooldown && currentMillis < dev.cooldownUntil) {
-                        return;
-                    }
-
-                    if (dev.inCooldown && currentMillis >= dev.cooldownUntil) {
-                        dev.inCooldown = false;
-                    }
-
-                    unsigned long timeSinceLastSeen = currentMillis - dev.lastSeen;
-
-                    if (timeSinceLastSeen >= 30000) {
-                        enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "RE-30s", false);
-                        dev.inCooldown = true;
-                        dev.cooldownUntil = currentMillis + 10000;
-                    } else if (timeSinceLastSeen >= 3000) {
-                        enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "RE-3s", false);
-                        dev.inCooldown = true;
-                        dev.cooldownUntil = currentMillis + 3000;
-                    }
-
-                    dev.lastSeen = currentMillis;
-                    break;
-                }
-            }
-
-            if (!known) {
-                DeviceInfo newDev;
-                newDev.macAddress = mac;
-                newDev.rssi = rssi;
-                newDev.firstSeen = currentMillis;
-                newDev.lastSeen = currentMillis;
-                newDev.inCooldown = false;
-                newDev.cooldownUntil = 0;
-                newDev.matchedFilter = matchedDescription.c_str();
-                newDev.filterDescription = matchedDescription;
-                newDev.matchedIdentifier = matchedIdent;
-                newDev.matchedType = matchedTypeOut;
-                devices.push_back(newDev);
-
-                // LRU-drop oldest so the session cap holds even with a
-                // firehose of unique MACs.
-                while (devices.size() > 200) {
-                    devices.erase(devices.begin());
-                }
-
-                // Store data for main loop to process (beep + flash happen in
-                // loop() drain — calling them here blocks the NimBLE host task)
-                enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "NEW", false);
-
-                auto& dev = devices.back();
-                dev.inCooldown = true;
-                dev.cooldownUntil = currentMillis + 3000;
-            }
+            // Match-and-enqueue only. Device bookkeeping, cooldown, alerts,
+            // MQTT and the session file all happen in loop() when the entry
+            // is drained (registerDetection) — this callback never touches
+            // devices[], which the WiFi callback used to read concurrently.
+            enqueueDetection(mac, matchedIdent, matchedDescription, rssi,
+                             matchedTypeOut, false);
         }
     }
 };
@@ -1297,7 +1218,7 @@ static const unsigned long WIFI_HOP_MS   = 200;
 // drain, not in NimBLE/WiFi callbacks. The promiscuous callback runs in driver context and must reject frames
 // cheaply, so a 3-byte OUI table (wifiOuiTable) is rebuilt when WiFi filters change.
 // One-time scanning init (idempotent). Must run before any scan_to_* call.
-// Sequence: stop config services -> init BLE -> set up WiFi -> idle.
+// Sequence: stop config services -> compute filter presence -> init BLE -> set up WiFi -> idle.
 static bool scan_init() {
     if (g_scanInitialized) return true;
 
@@ -1306,7 +1227,7 @@ static bool scan_init() {
     server.end();
     WiFi.softAPdisconnect(true);
 
-    // (c) Compute filter presence
+    // (b) Compute filter presence
     bool hasWifiFilters = false;
     bool hasBleFilters = false;
     for (const TargetFilter& f : targetFilters) {
@@ -1314,7 +1235,7 @@ static bool scan_init() {
         else hasBleFilters = true;
     }
 
-    // (b) BLE init — MUST happen before WiFi mode is set to STA/promiscuous
+    // (c) BLE init — MUST happen before WiFi mode is set to STA/promiscuous
     if (hasBleFilters) {
         NimBLEDevice::init("");
         delay(1000);
@@ -1327,11 +1248,15 @@ static bool scan_init() {
         }
     }
 
-    // (d) WiFi setup — always STA if WiFi filters exist, connect only if MQTT enabled
-    bool needsWifi = hasWifiFilters;
-    if (needsWifi) {
+    // (d) WiFi setup. STA is kept up permanently only when MQTT needs it and
+    // no WiFi filters are installed — BLE scans coexist with an associated
+    // STA. With WiFi filters the sweeps own the radio: STA only comes up
+    // during BLE phases, in bounded report windows (see mqttReportTick).
+    bool wantsMqtt = mqttCfg.enabled && mqttCfg.sta_ssid[0] && mqttCfg.broker[0];
+    g_mqttRadioTimeslice = hasWifiFilters && wantsMqtt;
+    if (hasWifiFilters || wantsMqtt) {
         WiFi.mode(WIFI_STA);
-        if (mqttCfg.enabled && mqttCfg.sta_ssid[0] && mqttCfg.broker[0]) {
+        if (wantsMqtt && !hasWifiFilters) {
             WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
             if (isSerialConnected()) Serial.printf("WiFi STA connecting to %s\n", mqttCfg.sta_ssid);
             unsigned long ws = millis();
@@ -1423,6 +1348,92 @@ static void scan_exit() {
     g_scanInitialized = false;
     g_radioPhase = PHASE_IDLE;
     if (isSerialConnected()) Serial.println("[SWEEP] Scanning exited");
+}
+
+// ================================
+// Time-Sliced MQTT Reporting
+// ================================
+//
+// With WiFi filters installed, promiscuous sweeps own the radio and the STA
+// can only exist while promiscuous is off — i.e. during BLE phases.
+// Detections that land during sweeps are queued as JSON payloads and flushed
+// by this state machine during a BLE phase, after the 2 s scan window has
+// expired. Every step is wall-clock bounded (STA association timeout below;
+// mqtt_connect() adds its own TCP/CONNACK timeouts), so a missing broker or
+// hung DHCP can delay the next sweep but can never wedge scanning.
+//
+// WiFi-only configs never reach a BLE phase, so their events stay queued and
+// are eventually dropped past the cap — loop() logs this once, and the
+// README documents it. BLE-only configs don't use this path at all: STA
+// stays up and the drain publishes directly.
+
+enum MqttReportState { MR_IDLE, MR_CONNECTING, MR_PUBLISHING };
+static MqttReportState g_mqttReportState = MR_IDLE;
+static unsigned long g_mqttReportStart = 0;
+static const unsigned long MQTT_STA_TIMEOUT_MS = 2500;
+
+// Queued detection payloads awaiting a report window. loop()-context only.
+static const int MQTT_PENDING_SIZE = 8;
+static char mqttPending[MQTT_PENDING_SIZE][256];
+static int mqttPendingCount = 0;
+
+static bool mqttPendingPush(const String& payload) {
+    if (mqttPendingCount >= MQTT_PENDING_SIZE) return false;
+    strncpy(mqttPending[mqttPendingCount], payload.c_str(), 255);
+    mqttPending[mqttPendingCount][255] = '\0';
+    mqttPendingCount++;
+    return true;
+}
+
+// Called every scanning-loop iteration. `canOpenWindow` is true only while
+// promiscuous is off and the BLE scan window has expired. A running cycle
+// freezes phase transitions (loop() gates on g_mqttReportState == MR_IDLE)
+// so the radio stays off promiscuous until the flush finishes.
+static void mqttReportTick(unsigned long now, bool canOpenWindow) {
+    switch (g_mqttReportState) {
+        case MR_IDLE:
+            if (canOpenWindow && mqttPendingCount > 0) {
+                if (isSerialConnected()) Serial.println("[MQTT] report window opening (STA up)");
+                WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
+                g_mqttReportStart = now;
+                g_mqttReportState = MR_CONNECTING;
+            }
+            break;
+
+        case MR_CONNECTING:
+            if (WiFi.status() == WL_CONNECTED) {
+                mqtt_connect();
+                g_mqttReportState = MR_PUBLISHING;
+            } else if (now - g_mqttReportStart > MQTT_STA_TIMEOUT_MS) {
+                if (isSerialConnected()) Serial.println("[MQTT] report window: STA timeout, dropping queued events");
+                WiFi.disconnect();
+                mqttPendingCount = 0;
+                g_mqttReportState = MR_IDLE;
+            }
+            break;
+
+        case MR_PUBLISHING: {
+            int sent = 0;
+            if (mqttConnected) {
+                for (int i = 0; i < mqttPendingCount; i++) {
+                    mqtt_publish(mqttCfg.topic, mqttPending[i]);
+                    sent++;
+                }
+            } else if (isSerialConnected()) {
+                Serial.println("[MQTT] report window: broker connect failed, dropping queued events");
+            }
+            mqttPendingCount = 0;
+            mqtt_disconnect();   // orderly DISCONNECT packet, then socket stop
+            WiFi.disconnect();
+            if (isSerialConnected()) Serial.printf("[MQTT] report window closed (%d published)\n", sent);
+            g_mqttReportState = MR_IDLE;
+            // Resume sweeping immediately rather than letting the BLE phase
+            // clock run out on its own.
+            scan_to_wifi_sweep();
+            g_phaseStartTime = millis();
+            break;
+        }
+    }
 }
 
 // ================================
@@ -1591,9 +1602,208 @@ void clearDetectedDevices() {
     preferences.putInt("deviceCount", 0);
     preferences.end();
 
+    // Also drop the rolling session file so the dashboard is genuinely
+    // empty and a reboot doesn't resurrect the just-cleared list.
+    clearCurrentSessionFile();
+
     if (isSerialConnected()) {
-        Serial.println("All detected devices cleared from memory and NVS");
+        Serial.println("All detected devices cleared from memory, NVS, and LittleFS");
     }
+}
+
+// ================================
+// LittleFS Session Persistence
+// ================================
+//
+// Two-file rolling scheme:
+//   /session_curr.json — this boot's rolling detections, rewritten on
+//                        every NEW hit (not on re-hits within cooldown).
+//   /session_prev.json — the previous boot's session, promoted from
+//                        session_curr on startup and read-only until the
+//                        next reboot rotates it out.
+//
+// Cap: SESSION_MAX_ENTRIES per file; LRU-drop happens in registerDetection()
+// when devices[] grows past the cap so the JSON never gets huge.
+
+static const char*  SESSION_CURR_PATH   = "/session_curr.json";
+static const char*  SESSION_PREV_PATH   = "/session_prev.json";
+static const size_t SESSION_MAX_ENTRIES = 200;
+static const size_t SESSION_JSON_BYTES  = 48 * 1024;
+
+static bool sessionFSReady = false;
+volatile bool sessionDirty = false;   // set by registerDetection, drained in loop()
+
+static void ensureSessionFS() {
+    if (sessionFSReady) return;
+    if (LittleFS.begin(true)) {       // format on failure
+        sessionFSReady = true;
+    } else if (isSerialConnected()) {
+        Serial.println("[detector] LittleFS mount failed");
+    }
+}
+
+// Boot-time rotation: promote last boot's live file to the prev slot,
+// then wipe the live slot so this session starts clean. Logs a one-line
+// summary so a serial capture can prove the persistence path is alive.
+static void rotateSessionFiles() {
+    ensureSessionFS();
+    if (!sessionFSReady) return;
+
+    if (LittleFS.exists(SESSION_CURR_PATH)) {
+        if (LittleFS.exists(SESSION_PREV_PATH)) LittleFS.remove(SESSION_PREV_PATH);
+        if (LittleFS.rename(SESSION_CURR_PATH, SESSION_PREV_PATH)) {
+            if (isSerialConnected()) Serial.println("[detector] rotated session_curr -> session_prev");
+        } else if (isSerialConnected()) {
+            Serial.println("[detector] session rotate failed");
+        }
+    }
+
+    if (LittleFS.exists(SESSION_PREV_PATH)) {
+        File f = LittleFS.open(SESSION_PREV_PATH, "r");
+        size_t entries = 0;
+        if (f) {
+            DynamicJsonDocument doc(SESSION_JSON_BYTES);
+            DeserializationError err = deserializeJson(doc, f);
+            f.close();
+            if (!err && doc.is<JsonArray>()) {
+                entries = doc.as<JsonArray>().size();
+            } else if (isSerialConnected()) {
+                Serial.println("[detector] session_prev parse failed, treating as empty");
+            }
+        }
+        if (isSerialConnected()) {
+            Serial.printf("[detector] session_prev loaded (%u entries)\n", (unsigned)entries);
+        }
+    } else if (isSerialConnected()) {
+        Serial.println("[detector] no previous session");
+    }
+}
+
+// Serialise devices[] out as a plain JSON array. Wrap-crashing writes
+// aren't defended against — the load path tolerates a corrupt file and
+// falls back to empty, which is fine for a detector.
+static void writeCurrentSession() {
+    ensureSessionFS();
+    if (!sessionFSReady) return;
+
+    DynamicJsonDocument doc(SESSION_JSON_BYTES);
+    JsonArray arr = doc.to<JsonArray>();
+
+    size_t start = devices.size() > SESSION_MAX_ENTRIES
+                    ? devices.size() - SESSION_MAX_ENTRIES : 0;
+    for (size_t i = start; i < devices.size(); i++) {
+        const DeviceInfo& d = devices[i];
+        JsonObject o = arr.createNestedObject();
+        o["mac"]      = d.macAddress;
+        o["first_ms"] = d.firstSeen;
+        o["last_ms"]  = d.lastSeen;
+        o["rssi"]     = d.rssi;
+        o["type"]     = filterTypeCode(d.matchedType);
+        o["match"]    = d.matchedIdentifier;
+        o["desc"]     = d.filterDescription;
+    }
+
+    File f = LittleFS.open(SESSION_CURR_PATH, "w");
+    if (!f) {
+        if (isSerialConnected()) Serial.println("[detector] session_curr open failed");
+        return;
+    }
+    serializeJson(doc, f);
+    f.close();
+}
+
+static void clearCurrentSessionFile() {
+    ensureSessionFS();
+    if (sessionFSReady && LittleFS.exists(SESSION_CURR_PATH)) {
+        LittleFS.remove(SESSION_CURR_PATH);
+    }
+}
+
+static void clearPreviousSessionFile() {
+    ensureSessionFS();
+    if (sessionFSReady && LittleFS.exists(SESSION_PREV_PATH)) {
+        LittleFS.remove(SESSION_PREV_PATH);
+    }
+}
+
+// Slurp session_prev.json verbatim for the dashboard. Empty array on
+// any error / missing file — the UI hides its panel when the array is
+// empty, so this is the graceful fallback.
+static String readPreviousSessionJson() {
+    ensureSessionFS();
+    if (!sessionFSReady || !LittleFS.exists(SESSION_PREV_PATH)) return "[]";
+    File f = LittleFS.open(SESSION_PREV_PATH, "r");
+    if (!f) return "[]";
+    String out;
+    out.reserve(f.size() + 2);
+    while (f.available()) out += (char)f.read();
+    f.close();
+    if (out.length() == 0) out = "[]";
+    return out;
+}
+
+// ================================
+// Detection Registration (loop context only)
+// ================================
+
+// Single-threaded owner of devices[]. Called from loop() when draining the
+// detection ring — never from a BLE or WiFi callback — so the vector and
+// its Strings are only ever touched by the loop task (the WiFi promiscuous
+// callback used to iterate this vector from the driver task while the BLE
+// callback mutated it: a use-after-free waiting to happen). Returns the
+// alert label ("NEW" / "RE-3s" / "RE-30s") or nullptr when the hit is
+// suppressed by the cooldown ladder. WiFi matches key on (MAC, filter type)
+// so one camera can register separately as probe source and beacon source;
+// BLE matches keep the historic MAC-only key.
+static const char* registerDetection(const char* mac, FilterType type, int rssi,
+                                     bool wifiDomain, const String& ident,
+                                     const String& desc) {
+    unsigned long now = millis();
+
+    for (auto& dev : devices) {
+        if (strcmp(dev.macAddress.c_str(), mac) != 0) continue;
+        if (wifiDomain && dev.matchedType != type) continue;
+
+        if (dev.inCooldown && now < dev.cooldownUntil) return nullptr;
+        if (dev.inCooldown) dev.inCooldown = false;
+
+        unsigned long timeSinceLastSeen = now - dev.lastSeen;
+        dev.lastSeen = now;
+
+        if (timeSinceLastSeen >= 30000) {
+            dev.inCooldown = true;
+            dev.cooldownUntil = now + 10000;
+            return "RE-30s";
+        }
+        if (timeSinceLastSeen >= 3000) {
+            dev.inCooldown = true;
+            dev.cooldownUntil = now + 3000;
+            return "RE-3s";
+        }
+        return nullptr;
+    }
+
+    DeviceInfo newDev;
+    newDev.macAddress = mac;
+    newDev.rssi = rssi;
+    newDev.firstSeen = now;
+    newDev.lastSeen = now;
+    newDev.inCooldown = false;
+    newDev.cooldownUntil = 0;
+    newDev.matchedFilter = desc.c_str();
+    newDev.filterDescription = desc;
+    newDev.matchedIdentifier = ident;
+    newDev.matchedType = type;
+    devices.push_back(newDev);
+
+    // LRU-drop oldest so the session cap holds even with a
+    // firehose of unique MACs.
+    while (devices.size() > 200) {
+        devices.erase(devices.begin());
+    }
+
+    sessionDirty = true;  // main loop will flush to LittleFS
+    return "NEW";
 }
 
 // ================================
@@ -2012,22 +2222,6 @@ DD:EE:FF
                     <div class="oui-meta"><strong>Common Devices:</strong> Ring Doorbell, Ring Camera, Ring Chime</div>
                     </details>
                     <details>
-                    <summary><b>AXON</b> <code>1 OUI</code></summary>
-                    <div class="oui-entries"><code>00:25:DF</code></div>
-                    <button type="button" class="oui-add-btn" onclick="addVendor('axon', 'AXON', '00:25:DF')">+ Add to filter list</button>
-                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
-                    <div class="oui-meta"><strong>Detection Range:</strong> Short-range BLE/WiFi</div>
-                    <div class="oui-meta"><strong>Common Devices:</strong> Axon Body Camera, Axon Fleet</div>
-                    </details>
-                    <details>
-                    <summary><b>I-PRO</b> <code>1 OUI</code></summary>
-                    <div class="oui-entries"><code>D4:2D:C5</code></div>
-                    <button type="button" class="oui-add-btn" onclick="addVendor('ipro', 'I-PRO', 'D4:2D:C5')">+ Add to filter list</button>
-                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
-                    <div class="oui-meta"><strong>Detection Range:</strong> Short-range BLE/WiFi</div>
-                    <div class="oui-meta"><strong>Common Devices:</strong> I-PRO Body Camera</div>
-                    </details>
-                    <details>
                     <summary><b>FLOCK SAFETY</b> <code>1 OUI</code></summary>
                     <div class="oui-entries"><code>B4:1E:52</code></div>
                     <button type="button" class="oui-add-btn" onclick="addFilterRow('B41E52',true,true,'Flock Safety camera')">+ Add to filter list</button>
@@ -2079,6 +2273,24 @@ DD:EE:FF
                     <div class="oui-meta"><strong>Common Devices:</strong> Meta/Ray-Ban Smartglasses</div>
                     </details>
                     <!-- OUI_DB_END -->
+                    <!-- WIFI_OUI_DB_START -->
+                    <details>
+                    <summary><b>AXON (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>00:25:DF</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('axon','AXON (WiFi)','00:25:DF')">+ Add WiFi signatures</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Axon Body Camera (probe), Axon AP (beacon)</div>
+                    </details>
+                    <details>
+                    <summary><b>I-PRO</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>D4:2D:C5</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('ipro','I-PRO','D4:2D:C5')">+ Add WiFi signatures</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> I-PRO Body Camera</div>
+                    </details>
+                    <!-- WIFI_OUI_DB_END -->
                 </div>
             </div>
 
@@ -2126,6 +2338,16 @@ DD:EE:FF
                 </div>
                 <div id="clearDeviceBtn" style="margin-bottom: 10px; text-align: right; display: none;">
                     <button type="button" onclick="clearDeviceHistory()" style="background: #8b0000; padding: 8px 16px; font-size: 13px; margin: 0;">Clear Device History</button>
+                </div>
+                <div id="previousSessionPanel" style="display: none; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; overflow: hidden; background: rgba(255,255,255,0.015);">
+                    <div style="display:flex; align-items:center; justify-content:space-between; padding: 10px 14px; background: rgba(255,255,255,0.04); cursor: pointer;" onclick="togglePrevSession()">
+                        <span id="previousSessionTitle" style="font-family:'Courier New',monospace; font-size:12px; letter-spacing:1px; color:#4ecdc4;">PREVIOUS SESSION (0)</span>
+                        <span style="display:flex; align-items:center; gap:10px;">
+                            <button type="button" onclick="event.stopPropagation(); clearPreviousSession();" style="background:#4a0000; padding:4px 10px; font-size:11px; margin:0;">Clear</button>
+                            <span id="previousSessionCaret" style="color:#888; font-size:11px;">[-]</span>
+                        </span>
+                    </div>
+                    <div id="previousSessionList" class="device-list" style="opacity: 0.65; padding: 10px 12px; max-height: 300px;"></div>
                 </div>
                 <div id="deviceList" class="device-list">
                     <div style="text-align: center; padding: 30px; color: #888888;">
@@ -2308,6 +2530,18 @@ DD:EE:FF
                 .match-badge.type-META { color: #e94560; }
                 .match-badge.type-PROBE  { background: rgba(78,205,196,0.15); color: #4ecdc4; border-color: rgba(78,205,196,0.3); }
                 .match-badge.type-BEACON { background: rgba(78,205,196,0.15); color: #4ecdc4; border-color: rgba(78,205,196,0.3); }
+                .prev-tag {
+                    display: inline-block;
+                    margin-left: 6px;
+                    padding: 1px 6px;
+                    border-radius: 4px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 9px;
+                    letter-spacing: 0.5px;
+                    color: #888;
+                    border: 1px solid rgba(255,255,255,0.15);
+                    background: rgba(255,255,255,0.03);
+                }
                 .match-badge.type-BLE { color: #00d4ff; }
                 .match-badge.type-WiFi { color: #4ecdc4; }
 
@@ -2357,6 +2591,7 @@ DD:EE:FF
             // Load detected devices on page load
             window.addEventListener('DOMContentLoaded', function() {
                 loadDetectedDevices();
+                loadPreviousSession();
                 
                 // Ensure form submits on first click (mobile fix)
                 const configForm = document.getElementById('configForm');
@@ -2487,6 +2722,83 @@ DD:EE:FF
                 if (description) titleParts.push(description);
                 badge.title = titleParts.join(' - ');
                 return badge;
+            }
+
+            function togglePrevSession() {
+                var list = document.getElementById('previousSessionList');
+                var caret = document.getElementById('previousSessionCaret');
+                if (!list) return;
+                if (list.style.display === 'none') {
+                    list.style.display = '';
+                    caret.textContent = '[-]';
+                } else {
+                    list.style.display = 'none';
+                    caret.textContent = '[+]';
+                }
+            }
+
+            function loadPreviousSession() {
+                fetch('/api/session/previous')
+                    .then(function(r) { return r.json(); })
+                    .then(function(arr) {
+                        var panel = document.getElementById('previousSessionPanel');
+                        var list  = document.getElementById('previousSessionList');
+                        var title = document.getElementById('previousSessionTitle');
+                        if (!Array.isArray(arr) || arr.length === 0) {
+                            if (panel) panel.style.display = 'none';
+                            return;
+                        }
+                        panel.style.display = '';
+                        title.textContent = 'PREVIOUS SESSION (' + arr.length + ')';
+                        list.innerHTML = '';
+                        arr.forEach(function(entry) {
+                            var item = document.createElement('div');
+                            item.className = 'device-item';
+                            var row = document.createElement('div');
+                            row.className = 'device-info-row';
+
+                            var macSpan = document.createElement('span');
+                            macSpan.className = 'device-mac';
+                            macSpan.textContent = entry.mac || '?';
+                            row.appendChild(macSpan);
+
+                            row.appendChild(makeMatchBadge(entry.type, entry.desc, entry.match));
+
+                            if (typeof entry.rssi === 'number') {
+                                var rssi = document.createElement('span');
+                                rssi.className = 'device-rssi';
+                                rssi.textContent = entry.rssi + ' dBm';
+                                row.appendChild(rssi);
+                            }
+
+                            var prevTag = document.createElement('span');
+                            prevTag.className = 'prev-tag';
+                            prevTag.textContent = 'PREV';
+                            row.appendChild(prevTag);
+
+                            if (entry.desc) {
+                                var descSpan = document.createElement('span');
+                                descSpan.className = 'device-filter';
+                                descSpan.textContent = entry.desc;
+                                descSpan.title = entry.desc;
+                                row.appendChild(descSpan);
+                            }
+                            item.appendChild(row);
+                            list.appendChild(item);
+                        });
+                    })
+                    .catch(function(err) {
+                        console.error('prev session load failed', err);
+                    });
+            }
+
+            function clearPreviousSession() {
+                fetch('/api/session/clear_previous', { method: 'POST' })
+                    .then(function() {
+                        var panel = document.getElementById('previousSessionPanel');
+                        if (panel) panel.style.display = 'none';
+                    })
+                    .catch(function(err) { console.error(err); });
             }
 
             function saveAlias(mac, alias, button) {
@@ -3542,6 +3854,19 @@ void startConfigMode() {
         
         request->send(200, "application/json", "{\"success\":true}");
     });
+
+    // Previous-session panel data source. Serves /session_prev.json
+    // straight from LittleFS; the UI does its own rendering.
+    server.on("/api/session/previous", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "application/json", readPreviousSessionJson());
+    });
+
+    // Clear the previous-session file so the panel disappears on the
+    // next dashboard refresh. Does not touch the current session.
+    server.on("/api/session/clear_previous", HTTP_POST, [](AsyncWebServerRequest *request) {
+        clearPreviousSessionFile();
+        request->send(200, "application/json", "{\"success\":true}");
+    });
     
     // API endpoint to lock/burn-in configuration
     server.on("/api/lock-config", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -3969,6 +4294,11 @@ void setup() {
         mqtt_loadConfig();
         loadDeviceAliases();
     }
+
+    // Detections live in LittleFS as a rolling session, promoted to
+    // /session_prev.json on each boot. devices[] starts empty; the
+    // dashboard's PREVIOUS SESSION panel reads the prev file directly.
+    rotateSessionFiles();
     
     // Check if configuration is locked/burned in
     preferences.begin("ouispy", true);
@@ -4037,7 +4367,6 @@ void setup() {
 // ================================
 void loop() {
     checkBootButtonLoop();   // BOOT hold -> clear lock, back to config mode
-    static unsigned long lastScanTime = 0;
     static unsigned long lastCleanupTime = 0;
     static unsigned long lastStatusTime = 0;
     unsigned long currentMillis = millis();
@@ -4088,11 +4417,13 @@ void loop() {
         return;
     }
     
-    // Scanning mode loop — time-sliced WiFi/BLE with ring-buffer drain
+    // Scanning mode loop — time-sliced WiFi/BLE with ring-buffer drain.
+    // Single pass per loop() invocation: the top-of-loop housekeeping
+    // (checkBootButtonLoop) and the bottom NeoPixel animation must get a
+    // chance to run every iteration.
     if (currentMode == SCANNING_MODE) {
-        while (true) {
-            unsigned long currentMillis = millis();
-            bool hasWifiFilters = false;
+        unsigned long currentMillis = millis();
+        bool hasWifiFilters = false;
         bool hasBleFilters = false;
         for (const TargetFilter& f : targetFilters) {
             if (isWifiDomain(f.type)) hasWifiFilters = true;
@@ -4105,10 +4436,30 @@ void loop() {
             return;
         }
 
+        // WiFi-only scanning never reaches a BLE phase, so the time-sliced
+        // MQTT report window can never open — say so once instead of
+        // silently dropping queued events.
+        static bool wifiOnlyMqttNoted = false;
+        if (!wifiOnlyMqttNoted && hasWifiFilters && !hasBleFilters && mqttCfg.enabled) {
+            wifiOnlyMqttNoted = true;
+            if (isSerialConnected()) {
+                Serial.println("[MQTT] WiFi-only scanning keeps STA down; detections are not reported (see README)");
+            }
+        }
+
+        // Time-sliced MQTT report window: only while promiscuous is off and
+        // the BLE scan window has expired. A running report cycle freezes
+        // the phase transitions below so the radio stays off promiscuous
+        // until the flush completes or its deadline passes.
+        mqttReportTick(currentMillis, g_mqttRadioTimeslice &&
+                                      g_radioPhase == PHASE_BLE_SCAN &&
+                                      pBLEScan && !pBLEScan->isScanning());
+
         unsigned long phaseDur = (g_radioPhase == PHASE_WIFI_SWEEP) ? WIFI_SWEEP_MS : BLE_SCAN_MS;
 
-        // Phase transition on timeout
-        if (currentMillis - g_phaseStartTime >= phaseDur) {
+        // Phase transition on timeout (frozen while an MQTT report cycle
+        // owns the radio).
+        if (g_mqttReportState == MR_IDLE && currentMillis - g_phaseStartTime >= phaseDur) {
             if (hasWifiFilters && hasBleFilters) {
                 if (g_radioPhase == PHASE_WIFI_SWEEP) {
                     scan_to_ble_scan();
@@ -4116,6 +4467,16 @@ void loop() {
                     scan_to_wifi_sweep();
                 }
             }
+            g_phaseStartTime = currentMillis;
+        }
+
+        // Single-domain BLE: the 2 s NimBLE scan window expires before the
+        // 2.2 s phase timer, and with no WiFi domain there's no alternating
+        // transition to re-arm it — top it up here so BLE-only configs keep
+        // scanning instead of going silent after the first window.
+        if (g_mqttReportState == MR_IDLE && hasBleFilters && !hasWifiFilters &&
+            g_radioPhase == PHASE_BLE_SCAN && pBLEScan && !pBLEScan->isScanning()) {
+            pBLEScan->start(2, nullptr, false);
             g_phaseStartTime = currentMillis;
         }
 
@@ -4127,37 +4488,71 @@ void loop() {
             }
         }
 
-        // Drain the ring buffer — replaces old newMatchFound polling
+        // Drain one ring entry per pass. Dedup, cooldown, device tracking,
+        // alerts, MQTT and the session file all happen here in loop context
+        // — never in the NimBLE/WiFi callbacks (see registerDetection).
         if (detQueueCount > 0) {
-            uint8_t tail = detQueueTail;
-            DetectionEntry* e = &detQueue[tail];
-            String alias = getDeviceAlias(String(e->mac));
-            String payload = "{\"mac\":\"" + String(e->mac) + "\",\"alias\":\"" + alias +
-                             "\",\"rssi\":" + String(e->rssi) + ",\"type\":\"" +
-                             filterTypeCode(e->matchedType) + "\",\"match\":\"" +
-                             e->identifier + "\",\"desc\":\"" + e->description + "\"}";
-            if (isSerialConnected()) Serial.println(payload);
-            if (mqttConnected) {
-                mqtt_publish(mqttCfg.topic, payload.c_str());
-                lastDetectionTime = currentMillis;
-                detectionActive = true;
-            }
+            DetectionEntry e;
+            portENTER_CRITICAL(&detQueueMux);
+            e = detQueue[detQueueTail];
             detQueueTail = (detQueueTail + 1) % DET_QUEUE_SIZE;
             detQueueCount--;
+            portEXIT_CRITICAL(&detQueueMux);
 
-            // Alert the user. Do it here in the main loop, not in the NimBLE
-            // host callback or the WiFi driver ISR — blocking those tasks
-            // with multi-hundred-ms delays destabilizes the stacks.
-            startDetectionFlash();
-            if (e->matchType[0] == 'N') {           // "NEW"
-                threeBeeps();
-            } else if (strncmp(e->matchType, "RE-30s", 6) == 0 ||
-                       strncmp(e->matchType, "RE", 2) == 0) {
-                threeBeeps();
-            } else {                                // "RE-3s"
-                twoBeeps();
+            String mac = e.mac;
+            String ident = e.identifier;
+            String desc = e.description;
+            const char* label = registerDetection(e.mac, e.matchedType, e.rssi,
+                                                  e.wifiDomain, ident, desc);
+            if (label != nullptr) {
+                String alias = getDeviceAlias(mac);
+                String payload = "{\"mac\":\"" + mac + "\",\"alias\":\"" + alias +
+                                 "\",\"rssi\":" + String(e.rssi) + ",\"type\":\"" +
+                                 filterTypeCode(e.matchedType) + "\",\"match\":\"" +
+                                 ident + "\",\"desc\":\"" + desc + "\"}";
+                if (isSerialConnected()) Serial.println(payload);
+
+                if (mqttCfg.enabled) {
+                    if (!hasWifiFilters) {
+                        // STA stays up for good in BLE-only configs; publish
+                        // directly (mqtt_loop supervises the connection).
+                        if (mqttConnected) mqtt_publish(mqttCfg.topic, payload.c_str());
+                    } else {
+                        // Radio is time-sliced; flushed during a BLE phase by
+                        // mqttReportTick().
+                        if (!mqttPendingPush(payload) && isSerialConnected()) {
+                            Serial.println("[MQTT] report queue full, event dropped");
+                        }
+                    }
+                    lastDetectionTime = currentMillis;
+                    detectionActive = true;
+                }
+
+                // Alert the user. Doing it here — not in the NimBLE host
+                // callback or the WiFi driver task — keeps multi-hundred-ms
+                // beeps from destabilizing those stacks.
+                startDetectionFlash();
+                if (strcmp(label, "RE-3s") == 0) {
+                    twoBeeps();
+                } else {
+                    threeBeeps();   // "NEW" and "RE-30s"
+                }
             }
-            continue;  // drain all before continuing
+        }
+
+        // Flush the rolling LittleFS session whenever a NEW detection
+        // landed. Doing the I/O here (not in a callback) keeps NimBLE off
+        // the flash driver's toes.
+        if (sessionDirty) {
+            sessionDirty = false;
+            writeCurrentSession();
+        }
+
+        // Belt-and-suspenders periodic flush in case last_ms on existing
+        // rows drifted and we want it durable across a crash.
+        if (currentMillis - lastCleanupTime >= 30000) {
+            lastCleanupTime = currentMillis;
+            if (!devices.empty()) writeCurrentSession();
         }
 
         // Status report disabled - using JSON output only
@@ -4166,15 +4561,17 @@ void loop() {
         }
 
         mqtt_loop(currentMillis);
-        delay(1);
-        
+
         // Periodic heartbeat to confirm loop is alive
         static unsigned long lastHeartbeat = 0;
         if (currentMillis - lastHeartbeat >= 5000) {
             lastHeartbeat = currentMillis;
             if (isSerialConnected()) Serial.printf("[HEARTBEAT] phase=%d ch=%d dev=%zu\n", g_radioPhase, g_wifiChannel, devices.size());
         }
-        }
+
+        updateNeoPixelAnimation();
+        delay(1);
+        return;
     }
 
     // Update NeoPixel animation
