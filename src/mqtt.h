@@ -2,6 +2,13 @@
 #include <WiFi.h>
 #include <Preferences.h>
 
+// Operating mode — defined here so both main.cpp and mqtt.cpp can reference it
+enum OperatingMode {
+    CONFIG_MODE,
+    SCANNING_MODE
+};
+extern OperatingMode currentMode;
+
 struct MQTTConfig {
     char sta_ssid[33];
     char sta_pass[64];
@@ -31,3 +38,7 @@ void mqtt_publish(const char* topic, const char* payload);
 // changing semantics of existing detection publishes).
 void mqtt_publish_retained(const char* topic, const char* payload);
 void mqtt_loop(unsigned long now);
+// Cleanly tear down the TCP connection before the device drops STA. Called
+// from doStaReport() after a publish so the broker sees an orderly disconnect
+// rather than a dropped socket.
+void mqtt_disconnect();

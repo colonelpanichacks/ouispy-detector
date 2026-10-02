@@ -14,9 +14,22 @@
 #include <vector>
 #include <algorithm>
 #include <Adafruit_NeoPixel.h>
-#include <LittleFS.h>
 #include <ArduinoJson.h>
 #include "mqtt.h"
+
+// ================================
+// 802.11 Header Definition
+// ================================
+// Not exposed in the public Arduino ESP32S3 headers — define it ourselves
+// (same layout as the internal ESP-IDF type used by flock-you).
+typedef struct __attribute__((packed)) {
+    uint16_t frame_ctrl;
+    uint16_t duration;
+    uint8_t  addr1[6];
+    uint8_t  addr2[6];
+    uint8_t  addr3[6];
+    uint16_t seq_ctrl;
+} wifi_ieee80211_mac_hdr_t;
 
 // ================================
 // Pin and Buzzer Definitions - Xiao ESP32 S3
@@ -27,6 +40,20 @@
 #define BEEP_DURATION 200  // Duration of each beep in ms
 #define BEEP_PAUSE 50  // Pause between beeps in ms (faster sequence)
 #define LED_PIN 21   // GPIO21 for onboard LED (inverted logic)
+
+// The boot melody  - 153 BPM
+// 8th=196ms, 16th=98ms, transposed up 2 octaves for buzzer range
+struct BootTone { uint16_t freq; uint16_t duration; };
+static const BootTone bootMelody[] = {
+    {1319, 196}, {1319, 196},      // 8E6 8E6
+    {1319, 98}, {1175, 98}, {988, 98},   // 16E6 16D6 16B5
+    {1175, 196}, {1175, 196},      // 8D6 8D6
+    {1175, 98}, {988, 98}, {880, 98},    // 16D6 16B5 16A5
+    {1047, 196}, {1047, 196},      // 8C6 8C6
+    {1047, 98}, {988, 98}, {784, 98},    // 16C6 16B5 16G5
+    {1175, 98}, {784, 98}, {1175, 98}, {1319, 98}  // 16D6 16G5 16D6 16E6
+};
+#define MELODY_BOOT_LEN 19
 
 // ================================
 // NeoPixel Definitions - Xiao ESP32 S3
@@ -49,15 +76,9 @@ int detectionFlashCount = 0;
 // ================================
 String AP_SSID = "snoopuntothem";
 String AP_PASSWORD = "astheysnoopuntous";
-#define CONFIG_TIMEOUT 20000   // 20 seconds timeout for config mode
 
-// ================================
-// Operating Modes
-// ================================
-enum OperatingMode {
-    CONFIG_MODE,
-    SCANNING_MODE
-};
+
+// (OperatingMode enum defined in mqtt.h)
 
 // ================================
 // Global Variables
@@ -69,27 +90,21 @@ const byte DNS_PORT = 53;
 const IPAddress captivePortalIP(192, 168, 4, 1);
 Preferences preferences;
 NimBLEScan* pBLEScan;
-unsigned long configStartTime = 0;
-unsigned long lastConfigActivity = 0;
 unsigned long modeSwitchScheduled = 0; // When to switch modes (0 = not scheduled)
 unsigned long deviceResetScheduled = 0; // When to reset device (0 = not scheduled)
 unsigned long normalRestartScheduled = 0; // When to do normal restart (0 = not scheduled)
 
-// Serial output synchronization - avoid concurrent writes
-volatile bool newMatchFound = false;
-String detectedMAC = "";
-int detectedRSSI = 0;
-String matchedFilter = "";
-String matchType = "";  // "NEW", "RE-3s", "RE-30s"
 
-// Persistent settings
-bool buzzerEnabled = true;
-bool ledEnabled = true;
-
+// A single `volatile bool newMatchFound` could only hold one detection, so two
+// cameras probing in the same 200 ms channel dwell would overwrite each other.
+// The BLE callback and the WiFi promiscuous callback both enqueue into this
+// small ring; loop() drains it. Entries use fixed char buffers so the producer
+// (a driver/ISR-context callback) never touches the heap.
 // Filter classification — determines which BLE advert field the matcher
 // checks against `identifier`. Values are persisted to NVS; do NOT
 // renumber existing entries or old configs will break.
 enum FilterType : uint8_t {
+    // BLE domain (unchanged)
     FT_MAC_PREFIX      = 0,  // identifier = 6-char OUI (e.g. "985949")
     FT_FULL_MAC        = 1,  // identifier = 12-char MAC
     FT_COMPANY_ID      = 2,  // identifier = 4-char hex "0D53" (BT SIG mfr CID)
@@ -98,26 +113,36 @@ enum FilterType : uint8_t {
     // Meta/Ray-Ban composite (mfr CID 0x0D53 + svc UUID 0xFD5F in the SAME
     // advert, or a name-substring hit). User-installable via the META preset
     // in the OUI Database and persisted like any other filter — no filter
-    // installed means no Meta detection. Kept at the end so existing NVS
-    // values 0-4 stay stable.
+    // installed means no Meta detection. Kept so existing NVS values 0-4
+    // stay stable.
     FT_META_COMPOSITE  = 5,
+
+    // WiFi domain (new) — matched in the promiscuous callback against the
+    // source OUI of an 802.11 management frame.
+    FT_WIFI_PROBE      = 6,  // WiFi probe request from OUI
+    FT_WIFI_BEACON     = 7,  // WiFi beacon from OUI
 };
 
-// Short code shown on the dashboard match-type badge and persisted in
-// the session JSON. Kept stable across firmware versions — the UI's
-// colour palette is keyed off these exact strings.
-static const char* filterTypeCode(FilterType t) {
-    switch (t) {
-        case FT_MAC_PREFIX:      return "OUI";
-        case FT_FULL_MAC:        return "MAC";
-        case FT_COMPANY_ID:      return "CID";
-        case FT_SERVICE_UUID_16: return "SVC";
-        case FT_NAME_SUBSTRING:  return "NAME";
-        case FT_META_COMPOSITE:  return "META";
-    }
-    return "OUI";
-}
+struct DetectionEntry {
+    char mac[18];
+    char identifier[18];
+    char description[64];
+    int rssi;
+    FilterType matchedType;
+    char matchType[8];
+    bool wifiDomain;
+};
 
+static const int DET_QUEUE_SIZE = 16;
+
+static DetectionEntry detQueue[DET_QUEUE_SIZE];
+static volatile uint8_t detQueueHead = 0;  // write index
+static volatile uint8_t detQueueTail = 0;  // read index
+static volatile uint8_t detQueueCount = 0;  // entries currently queued
+
+// Persistent settings
+bool buzzerEnabled = true;
+bool ledEnabled = true;
 // Device tracking
 struct DeviceInfo {
     String macAddress;
@@ -132,12 +157,37 @@ struct DeviceInfo {
     FilterType matchedType = FT_MAC_PREFIX;  // Which of the 5 filter types hit
 };
 
+
+
+// Helper: does this filter type belong to the WiFi domain? The domain is
+// derived from the type — no separate field is stored on TargetFilter.
+static inline bool isWifiDomain(FilterType t) { return t >= FT_WIFI_PROBE; }
+
+// Short code shown on the dashboard match-type badge and persisted in
+// the session JSON. Kept stable across firmware versions — the UI's
+// colour palette is keyed off these exact strings.
+static const char* filterTypeCode(FilterType t) {
+    switch (t) {
+        case FT_MAC_PREFIX:      return "OUI";
+        case FT_FULL_MAC:        return "MAC";
+        case FT_COMPANY_ID:      return "CID";
+        case FT_SERVICE_UUID_16: return "SVC";
+        case FT_NAME_SUBSTRING:  return "NAME";
+        case FT_META_COMPOSITE:  return "META";
+        case FT_WIFI_PROBE:      return "PROBE";
+        case FT_WIFI_BEACON:     return "BEACON";
+    }
+    return "OUI";
+}
+
+
 struct TargetFilter {
     String identifier;
     bool isFullMAC;      // kept for NVS backwards-compat with pre-typed configs
     String description;
     FilterType type = FT_MAC_PREFIX;  // set from isFullMAC on legacy load
 };
+
 
 struct DeviceAlias {
     String macAddress;
@@ -150,14 +200,24 @@ std::vector<DeviceAlias> deviceAliases;
 
 // Forward declarations
 void startScanningMode();
+void startConfigMode();
 void startDetectionFlash();
 class MyAdvertisedDeviceCallbacks;
+void enqueueDetection(const String& mac, const String& ident, const String& desc,
+                      int rssi, FilterType type, const char* matchType, bool wifi);
+void enqueueDetection(const char* mac, const char* ident, const char* desc,
+                      int rssi, FilterType type, const char* matchType, bool wifi);
 
-// LittleFS session forwards (definitions live further down)
-static void ensureSessionFS();
-static void rotateSessionFiles();
-static void writeCurrentSession();
-static void clearCurrentSessionFile();
+// WiFi promiscuous mode forward declarations
+static bool wifiOuiInTargets(const uint8_t oui[3]);
+static void rebuildWifiOuiTable();
+static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi);
+static void startWifiSweep();
+static void stopWifiSweep();
+static void startBleScan();
+static void stopBleScan();
+static void doStaReport(const String& payload);
+
 
 // ================================
 // Serial Configuration
@@ -378,6 +438,20 @@ void twoBeeps() {
     }
 }
 
+void playBoot() {
+    if (!buzzerEnabled) return;
+    for (int i = 0; i < MELODY_BOOT_LEN; i++) {
+        ledcSetup(0, bootMelody[i].freq, 8);
+        ledcWrite(0, BUZZER_DUTY);
+        ledOn();
+        delay(bootMelody[i].duration);
+        ledcWrite(0, 0);
+        ledOff();
+    }
+    // Reset to original frequency for future detection beeps
+    ledcSetup(0, BUZZER_FREQ, 8);
+}
+
 void ascendingBeeps() {
     // Two fast ascending beeps to indicate "ready to scan"
     int frequencies[] = {1900, 2200}; // Close melodic interval, not octave
@@ -392,6 +466,7 @@ void ascendingBeeps() {
         delay(BEEP_DURATION);
         if (buzzerEnabled) {
             ledcWrite(0, 0);
+            digitalBeep(BEEP_DURATION);  // Fallback: always works even if LEDC is broken
         }
         ledOff();
         if (i < 1) delay(fastPause);
@@ -457,7 +532,7 @@ void loadConfiguration() {
             uint8_t rawType = preferences.getUChar(keyType.c_str(), 0xFF);
             if (rawType == 0xFF) {
                 filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
-            } else if (rawType <= FT_META_COMPOSITE) {
+            } else if (rawType <= FT_WIFI_BEACON) {
                 filter.type = (FilterType)rawType;
             } else {
                 filter.type = FT_MAC_PREFIX;  // corrupt value, fail safe
@@ -539,6 +614,160 @@ static String normalizeHexId(const String& in) {
         if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) out += c;
     }
     return out;
+}
+
+// Enqueue a detection into the ring buffer from String objects. Used in the
+// BLE callback path. Drops the entry if the queue is full.
+void enqueueDetection(const String& mac, const String& ident, const String& desc,
+                      int rssi, FilterType type, const char* matchType, bool wifi) {
+    if (detQueueCount >= DET_QUEUE_SIZE) return;  // queue full, drop
+
+    int slot = detQueueHead;
+    strncpy(detQueue[slot].mac, mac.c_str(), sizeof(detQueue[slot].mac) - 1);
+    detQueue[slot].mac[sizeof(detQueue[slot].mac) - 1] = '\0';
+    strncpy(detQueue[slot].identifier, ident.c_str(), sizeof(detQueue[slot].identifier) - 1);
+    detQueue[slot].identifier[sizeof(detQueue[slot].identifier) - 1] = '\0';
+    strncpy(detQueue[slot].description, desc.c_str(), sizeof(detQueue[slot].description) - 1);
+    detQueue[slot].description[sizeof(detQueue[slot].description) - 1] = '\0';
+    detQueue[slot].rssi = rssi;
+    detQueue[slot].matchedType = type;
+    strncpy(detQueue[slot].matchType, matchType, sizeof(detQueue[slot].matchType) - 1);
+    detQueue[slot].matchType[sizeof(detQueue[slot].matchType) - 1] = '\0';
+    detQueue[slot].wifiDomain = wifi;
+
+    detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
+    detQueueCount++;
+}
+
+// Enqueue a detection into the ring buffer from char* buffers. Used in the
+// WiFi promiscuous callback — no String allocation in driver context.
+// Drops the entry if the queue is full.
+void enqueueDetection(const char* mac, const char* ident, const char* desc,
+                      int rssi, FilterType type, const char* matchType, bool wifi) {
+    if (detQueueCount >= DET_QUEUE_SIZE) return;  // queue full, drop
+
+    int slot = detQueueHead;
+    strncpy(detQueue[slot].mac, mac, sizeof(detQueue[slot].mac) - 1);
+    detQueue[slot].mac[sizeof(detQueue[slot].mac) - 1] = '\0';
+    strncpy(detQueue[slot].identifier, ident, sizeof(detQueue[slot].identifier) - 1);
+    detQueue[slot].identifier[sizeof(detQueue[slot].identifier) - 1] = '\0';
+    strncpy(detQueue[slot].description, desc, sizeof(detQueue[slot].description) - 1);
+    detQueue[slot].description[sizeof(detQueue[slot].description) - 1] = '\0';
+    detQueue[slot].rssi = rssi;
+    detQueue[slot].matchedType = type;
+    strncpy(detQueue[slot].matchType, matchType, sizeof(detQueue[slot].matchType) - 1);
+    detQueue[slot].matchType[sizeof(detQueue[slot].matchType) - 1] = '\0';
+    detQueue[slot].wifiDomain = wifi;
+
+    detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
+    detQueueCount++;
+}
+
+// WiFi OUI fast-path table. A small const array of 3-byte OUIs extracted
+// from installed FT_WIFI_PROBE and FT_WIFI_BEACON filters, rebuilt whenever
+// those filters change. The promiscuous callback checks the frame's source OUI
+// against this table before doing the full filter match — saving CPU on the
+// common case (99.9% of frames don't match).
+static const int WIFI_OUI_TABLE_SIZE = 16;  // max entries
+static uint8_t wifiOuiTable[WIFI_OUI_TABLE_SIZE][3];
+static int wifiOuiTableCount = 0;
+
+// Rebuild the fast-path OUI table from installed WiFi filters.
+static void rebuildWifiOuiTable() {
+    wifiOuiTableCount = 0;
+    for (const TargetFilter& f : targetFilters) {
+        if (!isWifiDomain(f.type)) continue;
+        // Identifiers are stored as bare 6-char hex ("D42DC5") — no colons.
+        // normalizeMACAddress lowercases; strip colons too in case a legacy
+        // colon form slipped in from an old config.
+        String id = f.identifier;
+        id.replace(":", "");
+        id.replace("-", "");
+        if (id.length() < 6) continue;  // need at least 6 hex chars for an OUI
+
+        uint8_t oui[3];
+        oui[0] = (uint8_t)strtol(id.substring(0, 2).c_str(), NULL, 16);
+        oui[1] = (uint8_t)strtol(id.substring(2, 4).c_str(), NULL, 16);
+        oui[2] = (uint8_t)strtol(id.substring(4, 6).c_str(), NULL, 16);
+
+        // Check if this OUI is already in the table
+        bool exists = false;
+        for (int i = 0; i < wifiOuiTableCount; i++) {
+            if (wifiOuiTable[i][0] == oui[0] &&
+                wifiOuiTable[i][1] == oui[1] &&
+                wifiOuiTable[i][2] == oui[2]) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists && wifiOuiTableCount < WIFI_OUI_TABLE_SIZE) {
+            memcpy(wifiOuiTable[wifiOuiTableCount], oui, 3);
+            wifiOuiTableCount++;
+        }
+    }
+}
+
+// Fast OUI pre-check: is this 3-byte OUI in our target table?
+static bool wifiOuiInTargets(const uint8_t oui[3]) {
+    for (int i = 0; i < wifiOuiTableCount; i++) {
+        if (wifiOuiTable[i][0] == oui[0] &&
+            wifiOuiTable[i][1] == oui[1] &&
+            wifiOuiTable[i][2] == oui[2]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Match WiFi source MAC against FT_WIFI_PROBE / FT_WIFI_BEACON filters.
+// Uses fixed-size char buffers — no String allocation in driver callback context.
+static bool matchesWifiFilter(const uint8_t mac[6], uint8_t subtype,
+                               char desc[64], char ident[18], FilterType& outType) {
+    // Format MAC as "AABBCCDDEEFF" (no colons, uppercase) in a local buffer
+    char macBuf[13];
+    macBuf[0] = '\0';
+    for (int i = 0; i < 6; i++) {
+        char hi = (mac[i] >> 4) & 0x0F;
+        char lo = mac[i] & 0x0F;
+        macBuf[i * 2]     = hi > 9 ? 'A' + hi - 10 : '0' + hi;
+        macBuf[i * 2 + 1] = lo > 9 ? 'A' + lo - 10 : '0' + lo;
+    }
+    macBuf[12] = '\0';
+
+    // OUI is first 6 hex chars (bytes 0-2 of MAC, e.g. "AABBCC")
+    char oui[7];
+    oui[0] = macBuf[0]; oui[1] = macBuf[1]; oui[2] = macBuf[2];
+    oui[3] = macBuf[3]; oui[4] = macBuf[4]; oui[5] = macBuf[5];
+    oui[6] = '\0';
+
+    for (const TargetFilter& f : targetFilters) {
+        if (!isWifiDomain(f.type)) continue;
+
+        bool subtypeMatch = false;
+        if (f.type == FT_WIFI_PROBE && subtype == 0x04) subtypeMatch = true;
+        else if (f.type == FT_WIFI_BEACON && subtype == 0x08) subtypeMatch = true;
+        else continue;
+
+        if (subtypeMatch) {
+            const char* fid = f.identifier.c_str();
+            size_t flen = strlen(fid);
+            bool ouiMatch = (flen <= 6);
+            for (size_t k = 0; k < flen && ouiMatch; k++) {
+                char fc = fid[k];
+                char fcUp = (fc >= 'a' && fc <= 'f') ? (fc - 'a' + 'A') : fc;
+                if (fcUp != oui[k]) ouiMatch = false;
+            }
+            if (ouiMatch) {
+                strncpy(desc, f.description.c_str(), 63);
+                desc[63] = '\0';
+                strncpy(ident, f.identifier.c_str(), 17);
+                ident[17] = '\0';
+                outType = f.type;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Forward declaration — defined below; FT_META_COMPOSITE filters defer to it.
@@ -730,16 +959,28 @@ static const PresetEntry PRESET_META[] = {
 static const size_t PRESET_META_COUNT = sizeof(PRESET_META) / sizeof(PRESET_META[0]);
 
 // Axon body cameras (Body 3/4, Fleet dash, Taser 7/10).
-// Uses all three signal types: dedicated IEEE OUI 00:25:DF ("Axon
+// Uses all five signal types: dedicated IEEE OUI 00:25:DF ("Axon
 // Enterprise, Inc."), Bluetooth SIG company ID 0x034D ("TASER
-// International, Inc." — Axon's earlier registered name), and service
-// UUID 0xFC81 ("Axon Enterprise, Inc."). All three uniquely attributable.
+// International, Inc." — Axon's earlier registered name), service
+// UUID 0xFC81 ("Axon Enterprise, Inc."), WiFi probe requests, and
+// WiFi beacons. All uniquely attributable.
 static const PresetEntry PRESET_AXON[] = {
     { FT_MAC_PREFIX,      "0025DF", "Axon Enterprise OUI (IEEE)" },
     { FT_COMPANY_ID,      "034D",   "TASER International CID (Axon body cams)" },
     { FT_SERVICE_UUID_16, "FC81",   "Axon Enterprise service UUID" },
+    { FT_WIFI_PROBE,      "0025DF", "Axon body cam (WiFi probe)" },
+    { FT_WIFI_BEACON,     "0025DF", "Axon AP beacon (WiFi)" },
 };
 static const size_t PRESET_AXON_COUNT = sizeof(PRESET_AXON) / sizeof(PRESET_AXON[0]);
+
+// I-PRO body cameras — Bluetooth LE + WiFi domain. Panasonic subsidiary with 
+// dedicated OUI.
+// Preset is for both BLE advertisement MACs and WiFi probe requests.
+static const PresetEntry PRESET_IPRO[] = {
+    { FT_MAC_PREFIX,   "D42DC5", "I-PRO body cam (BLE OUI)" },
+    { FT_WIFI_PROBE,   "D42DC5", "I-PRO body cam (WiFi probe)" },
+};
+static const size_t PRESET_IPRO_COUNT = sizeof(PRESET_IPRO) / sizeof(PRESET_IPRO[0]);
 
 // Returns count added. Skips entries whose (type, identifier) already
 // exists so repeated clicks don't duplicate rows.
@@ -764,17 +1005,18 @@ int applyPreset(const PresetEntry* preset, size_t count, const char* labelPrefix
         targetFilters.push_back(f);
         added++;
     }
-    if (added > 0) saveConfiguration();
+    if (added > 0) {
+        saveConfiguration();
+        rebuildWifiOuiTable();
+    }
     return added;
 }
 
-// Remove the non-MAC signatures a preset installed. MAC prefixes are left
-// alone — those live in the OUI textarea and are the user's to manage.
+// Remove the signatures a preset installed.
 int removePreset(const PresetEntry* preset, size_t count) {
     int removed = 0;
     for (size_t i = 0; i < count; i++) {
         const PresetEntry& p = preset[i];
-        if (p.type == FT_MAC_PREFIX || p.type == FT_FULL_MAC) continue;
         for (size_t j = 0; j < targetFilters.size(); ) {
             if (targetFilters[j].type == p.type &&
                 targetFilters[j].identifier.equalsIgnoreCase(p.identifier)) {
@@ -789,13 +1031,10 @@ int removePreset(const PresetEntry* preset, size_t count) {
     return removed;
 }
 
-// True if any of the preset's non-MAC signatures are currently installed.
-// MAC prefixes are excluded on purpose: those live in the OUI textarea and
-// may have been added manually, so they don't indicate preset state.
+// True if any of the preset's signatures are currently installed.
 bool presetInstalled(const PresetEntry* preset, size_t count) {
     for (size_t i = 0; i < count; i++) {
         const PresetEntry& p = preset[i];
-        if (p.type == FT_MAC_PREFIX || p.type == FT_FULL_MAC) continue;
         for (const TargetFilter& f : targetFilters) {
             if (f.type == p.type && f.identifier.equalsIgnoreCase(p.identifier)) return true;
         }
@@ -811,21 +1050,25 @@ bool presetInstalled(const PresetEntry* preset, size_t count) {
 // mode. Without this, burn-in is a one-way door: the AP never comes back, so
 // there is no way to reach the dashboard and no way to undo it short of
 // erasing flash.
-#define BOOT_BUTTON_PIN 0
-#define BOOT_HOLD_TIME  1500
+#define BOOT_BUTTON_PIN     0
+#define BOOT_HOLD_TIME      1500
 
-static unsigned long bootBtnStart = 0;
-static bool bootBtnActive = false;
+static unsigned long bootBtnStart    = 0;
+static bool bootBtnActive            = false;
 
 static void checkBootButtonLoop() {
+    unsigned long now = millis();
+
     if (digitalRead(BOOT_BUTTON_PIN) == LOW) {
         if (!bootBtnActive) {
             bootBtnActive = true;
-            bootBtnStart = millis();
-        } else if (millis() - bootBtnStart >= BOOT_HOLD_TIME) {
+            bootBtnStart = now;
+        }
+        // Hold for 1.5 s -> clear burn-in lock, reboot to config mode
+        else if (now - bootBtnStart >= BOOT_HOLD_TIME) {
             Serial.println("\n*** BOOT HELD -> clearing lock, returning to config mode ***");
             Serial.flush();
-            for (int i = 0; i < 3; i++) {          // triple beep = acknowledged
+            for (int i = 0; i < 3; i++) {
                 ledcSetup(0, 3000, 8);
                 ledcAttachPin(BUZZER_PIN, 0);
                 ledcWrite(0, 100); delay(80);
@@ -838,8 +1081,348 @@ static void checkBootButtonLoop() {
             ESP.restart();
         }
     } else {
+        // Button released — hold time already handled above while pressed
         bootBtnActive = false;
     }
+}
+
+// ================================
+// WiFi Promiscuous Mode Detection
+// ================================
+
+// Promiscuous callback — runs in driver context. No String, no Serial, no delay.
+// Fast path: frame-control check + 3-byte OUI pre-check against wifiOuiTable.
+// Slow path: full filter match + dedup + enqueue.
+static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi) {
+    // Format MAC as "aa:bb:cc:dd:ee:ff" (lowercase, matches NimBLE toString()
+    // output) so a device seen by both radios dedups under one entry
+    char macStr[18];
+    int pos = 0;
+    for (int i = 0; i < 6; i++) {
+        if (i > 0) macStr[pos++] = ':';
+        char hi = (mac[i] >> 4) & 0x0F;
+        char lo = mac[i] & 0x0F;
+        macStr[pos++] = hi > 9 ? 'a' + hi - 10 : '0' + hi;
+        macStr[pos++] = lo > 9 ? 'a' + lo - 10 : '0' + lo;
+    }
+    macStr[pos] = '\0';
+
+    char desc[64], ident[18];
+    FilterType outType;
+    if (!matchesWifiFilter(mac, subtype, desc, ident, outType)) return;
+
+    // De-dup check: use the devices vector with (MAC, type) as key
+    for (auto& dev : devices) {
+        if (strcmp(dev.macAddress.c_str(), macStr) == 0 && dev.matchedType == outType) {
+            unsigned long now = millis();
+            if (dev.inCooldown && now < dev.cooldownUntil) return;  // still cooling
+            if (dev.inCooldown) {
+                dev.inCooldown = false;
+                // Re-alert after cooldown — use single producer with overflow guard
+                enqueueDetection(macStr, ident, desc, rssi, outType, "RE", true);
+                dev.lastSeen = now;
+                return;
+            }
+            break;
+        }
+    }
+
+    // First detection of this (MAC, type) — use single producer with overflow guard
+    enqueueDetection(macStr, ident, desc, rssi, outType, "NEW", true);
+}
+
+// promiscuous API: the callback is `void (*)(void* buf, wifi_promiscuous_pkt_type_t type)`.
+// buf is a `wifi_promiscuous_pkt_t*` with an `rx_ctrl` control header followed by the
+// actual 802.11 frame in `payload`. Do NOT treat buf as raw frame bytes.
+void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT) return;
+
+    wifi_promiscuous_pkt_t* pkt = (wifi_promiscuous_pkt_t*)buf;
+    if (pkt->rx_ctrl.sig_len < sizeof(wifi_ieee80211_mac_hdr_t)) return;
+
+    wifi_ieee80211_mac_hdr_t* hdr = (wifi_ieee80211_mac_hdr_t*)pkt->payload;
+    int8_t rssi = pkt->rx_ctrl.rssi;
+
+    uint8_t fc0 = hdr->frame_ctrl & 0xFF;
+    uint8_t ftype = (fc0 >> 2) & 0x03;
+    uint8_t subtype = (fc0 >> 4) & 0x0F;
+
+    // 802.11 mgmt subtypes: 0x00=Assoc Req, 0x04=Probe Req, 0x08=Beacon
+    if (ftype != 0) return;  // management only
+    if (subtype != 0x04 && subtype != 0x08) return;  // probe-req(4) / beacon(8) only
+
+    // Source MAC is always in addr2 for probe requests and beacons.
+    // 3-byte OUI pre-check against target table.
+    uint8_t oui[3] = { hdr->addr2[0], hdr->addr2[1], hdr->addr2[2] };
+    if (!wifiOuiInTargets(oui)) return;
+
+    // Rare path: full match, de-dup, enqueue
+    handleWifiMatch(hdr->addr2, subtype, rssi);
+}
+
+// Start WiFi promiscuous sweep. Enables MGMT-only capture.
+static void startWifiSweep() {
+    if (isSerialConnected()) Serial.println("[SWEEP] Starting WiFi sweep...");
+    esp_wifi_set_promiscuous(false);
+    delay(100);
+    wifi_promiscuous_filter_t filt = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+    esp_wifi_set_promiscuous_filter(&filt);
+    esp_wifi_set_promiscuous(true);
+}
+
+// Stop WiFi promiscuous sweep. 50 ms drain delay before disabling.
+static void stopWifiSweep() {
+    delay(50);
+    esp_wifi_set_promiscuous(false);
+    if (isSerialConnected()) Serial.println("[SWEEP] WiFi sweep done");
+}
+
+// Start BLE scan for 2 seconds (matches WiFi sweep duration).
+static void startBleScan() {
+    if (isSerialConnected()) Serial.println("[SWEEP] Starting BLE scan...");
+    pBLEScan->start(2, nullptr, false);
+}
+
+// Stop BLE scan.
+static void stopBleScan() {
+    if (pBLEScan) pBLEScan->stop();
+    if (isSerialConnected()) Serial.println("[SWEEP] BLE scan done");
+}
+
+// Forward declaration for callback class
+class MyAdvertisedDeviceCallbacks;
+
+// BLE Advertised Device Callback Class
+class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
+    void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+        if (currentMode != SCANNING_MODE) return;
+
+        String mac = advertisedDevice->getAddress().toString().c_str();
+        int rssi = advertisedDevice->getRSSI();
+        unsigned long currentMillis = millis();
+
+        String matchedDescription;
+        String matchedIdent;
+        FilterType matchedTypeOut = FT_MAC_PREFIX;
+        bool matchFound = matchesTargetFilter(advertisedDevice, mac,
+                                              matchedDescription, matchedIdent,
+                                              matchedTypeOut);
+
+        // Meta / Ray-Ban composite detection runs inside matchesTargetFilter
+        // when (and only when) the META preset is installed — no filter, no
+        // trigger.
+
+        if (matchFound) {
+            bool known = false;
+            for (auto& dev : devices) {
+                if (dev.macAddress == mac) {
+                    known = true;
+
+                    if (dev.inCooldown && currentMillis < dev.cooldownUntil) {
+                        return;
+                    }
+
+                    if (dev.inCooldown && currentMillis >= dev.cooldownUntil) {
+                        dev.inCooldown = false;
+                    }
+
+                    unsigned long timeSinceLastSeen = currentMillis - dev.lastSeen;
+
+                    if (timeSinceLastSeen >= 30000) {
+                        enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "RE-30s", false);
+                        dev.inCooldown = true;
+                        dev.cooldownUntil = currentMillis + 10000;
+                    } else if (timeSinceLastSeen >= 3000) {
+                        enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "RE-3s", false);
+                        dev.inCooldown = true;
+                        dev.cooldownUntil = currentMillis + 3000;
+                    }
+
+                    dev.lastSeen = currentMillis;
+                    break;
+                }
+            }
+
+            if (!known) {
+                DeviceInfo newDev;
+                newDev.macAddress = mac;
+                newDev.rssi = rssi;
+                newDev.firstSeen = currentMillis;
+                newDev.lastSeen = currentMillis;
+                newDev.inCooldown = false;
+                newDev.cooldownUntil = 0;
+                newDev.matchedFilter = matchedDescription.c_str();
+                newDev.filterDescription = matchedDescription;
+                newDev.matchedIdentifier = matchedIdent;
+                newDev.matchedType = matchedTypeOut;
+                devices.push_back(newDev);
+
+                // LRU-drop oldest so the session cap holds even with a
+                // firehose of unique MACs.
+                while (devices.size() > 200) {
+                    devices.erase(devices.begin());
+                }
+
+                // Store data for main loop to process (beep + flash happen in
+                // loop() drain — calling them here blocks the NimBLE host task)
+                enqueueDetection(mac, matchedIdent, matchedDescription, rssi, matchedTypeOut, "NEW", false);
+
+                auto& dev = devices.back();
+                dev.inCooldown = true;
+                dev.cooldownUntil = currentMillis + 3000;
+            }
+        }
+    }
+};
+
+// ================================
+// Scanning State & Phase Transition Functions
+// ================================
+static bool g_scanInitialized = false;
+enum RadioPhase { PHASE_IDLE, PHASE_WIFI_SWEEP, PHASE_BLE_SCAN };
+static RadioPhase g_radioPhase = PHASE_IDLE;
+static uint8_t g_wifiChannel = 11;
+static unsigned long g_phaseStartTime = 0;
+static unsigned long g_lastHopTime = 0;
+static const unsigned long WIFI_SWEEP_MS = 2200;
+static const unsigned long BLE_SCAN_MS   = 2200;
+static const unsigned long WIFI_HOP_MS   = 200;
+
+// Dual-domain time-slice architecture:
+// BLE and WiFi share the ESP32-S3's single 2.4 GHz antenna; simultaneous promiscuous
+// RX + BLE scan is rated "C1" (unstable) per ESP-IDF. We time-slice to avoid: WiFi sweep
+// (hop ch 11→1 at 200ms) and BLE scan (single 2s active scan) alternate, each ~2.2s.
+// STA association is mutually exclusive with promiscuous RX on this hardware, so STA
+// must be disconnected first. Alerting (beeps, LED) runs in the main loop's ring-buffer
+// drain, not in NimBLE/WiFi callbacks. The promiscuous callback runs in driver context and must reject frames
+// cheaply, so a 3-byte OUI table (wifiOuiTable) is rebuilt when WiFi filters change.
+// One-time scanning init (idempotent). Must run before any scan_to_* call.
+// Sequence: stop config services -> init BLE -> set up WiFi -> idle.
+static bool scan_init() {
+    if (g_scanInitialized) return true;
+
+    // (a) Stop config services
+    dnsServer.stop();
+    server.end();
+    WiFi.softAPdisconnect(true);
+
+    // (c) Compute filter presence
+    bool hasWifiFilters = false;
+    bool hasBleFilters = false;
+    for (const TargetFilter& f : targetFilters) {
+        if (isWifiDomain(f.type)) hasWifiFilters = true;
+        else hasBleFilters = true;
+    }
+
+    // (b) BLE init — MUST happen before WiFi mode is set to STA/promiscuous
+    if (hasBleFilters) {
+        NimBLEDevice::init("");
+        delay(1000);
+        pBLEScan = NimBLEDevice::getScan();
+        if (pBLEScan != nullptr) {
+            pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+            pBLEScan->setActiveScan(true);
+            pBLEScan->setInterval(300);
+            pBLEScan->setWindow(200);
+        }
+    }
+
+    // (d) WiFi setup — always STA if WiFi filters exist, connect only if MQTT enabled
+    bool needsWifi = hasWifiFilters;
+    if (needsWifi) {
+        WiFi.mode(WIFI_STA);
+        if (mqttCfg.enabled && mqttCfg.sta_ssid[0] && mqttCfg.broker[0]) {
+            WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
+            if (isSerialConnected()) Serial.printf("WiFi STA connecting to %s\n", mqttCfg.sta_ssid);
+            unsigned long ws = millis();
+            while (WiFi.status() != WL_CONNECTED && millis() - ws < 10000) delay(250);
+            if (WiFi.status() == WL_CONNECTED) {
+                if (isSerialConnected()) Serial.println("WiFi connected: " + WiFi.localIP().toString());
+                mqtt_connect();
+            } else {
+                if (isSerialConnected()) Serial.println("WiFi STA failed, continuing offline");
+            }
+        }
+    } else {
+        WiFi.mode(WIFI_OFF);
+    }
+
+    // (e) Start idle
+    g_radioPhase = PHASE_IDLE;
+    g_scanInitialized = true;
+    if (isSerialConnected()) Serial.println("[SWEEP] Scanning initialized");
+    return true;
+}
+
+// Transition to WiFi promiscuous sweep phase (idempotent).
+// STA must be disconnected before promiscuous can start.
+static void scan_to_wifi_sweep() {
+    if (g_radioPhase == PHASE_WIFI_SWEEP) return;
+
+    // Stop BLE scan if currently running
+    if (g_radioPhase == PHASE_BLE_SCAN && pBLEScan) {
+        pBLEScan->stop();
+        delay(50);
+    }
+
+    // Ensure STA is disconnected before promiscuous
+    if (WiFi.status() != WL_DISCONNECTED) {
+        WiFi.disconnect();
+        delay(100);
+    }
+
+    // Enable promiscuous mode (MGMT frames only)
+    wifi_promiscuous_filter_t filt = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+    esp_wifi_set_promiscuous_filter(&filt);
+    esp_wifi_set_promiscuous_rx_cb(promiscuousCallback);
+    esp_wifi_set_promiscuous(true);
+
+    g_radioPhase = PHASE_WIFI_SWEEP;
+    g_wifiChannel = 11;
+    esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
+}
+
+// Transition to BLE scan phase (idempotent).
+static void scan_to_ble_scan() {
+    if (g_radioPhase == PHASE_BLE_SCAN) return;
+
+    // Stop WiFi promiscuous if running
+    if (g_radioPhase == PHASE_WIFI_SWEEP) {
+        esp_wifi_set_promiscuous(false);
+        delay(50);
+    }
+
+    // Start BLE scan (2 seconds)
+    if (pBLEScan) {
+        pBLEScan->start(2, nullptr, false);
+    }
+
+    g_radioPhase = PHASE_BLE_SCAN;
+}
+
+// Hop to the next WiFi channel while sweeping (11 -> 10 -> ... -> 1 -> 11).
+static void scan_wifi_hop_channel() {
+    if (g_radioPhase != PHASE_WIFI_SWEEP) return;
+    g_wifiChannel = (g_wifiChannel > 1) ? g_wifiChannel - 1 : 11;
+    esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
+}
+
+// Clean up scanning state and return radio to off (idempotent).
+// Does NOT change currentMode or start config mode.
+static void scan_exit() {
+    if (!g_scanInitialized) return;
+
+    // Stop whatever radio activity is in progress
+    if (g_radioPhase == PHASE_WIFI_SWEEP) {
+        esp_wifi_set_promiscuous(false);
+    } else if (g_radioPhase == PHASE_BLE_SCAN && pBLEScan) {
+        pBLEScan->stop();
+    }
+
+    WiFi.mode(WIFI_OFF);
+    g_scanInitialized = false;
+    g_radioPhase = PHASE_IDLE;
+    if (isSerialConnected()) Serial.println("[SWEEP] Scanning exited");
 }
 
 // ================================
@@ -1008,144 +1591,9 @@ void clearDetectedDevices() {
     preferences.putInt("deviceCount", 0);
     preferences.end();
 
-    // Also drop the rolling session file so the dashboard is genuinely
-    // empty and a reboot doesn't resurrect the just-cleared list.
-    clearCurrentSessionFile();
-
     if (isSerialConnected()) {
-        Serial.println("All detected devices cleared from memory, NVS, and LittleFS");
+        Serial.println("All detected devices cleared from memory and NVS");
     }
-}
-
-// ================================
-// LittleFS Session Persistence
-// ================================
-//
-// Two-file rolling scheme:
-//   /session_curr.json — this boot's rolling detections, rewritten on
-//                        every NEW hit (not on re-hits within cooldown).
-//   /session_prev.json — the previous boot's session, promoted from
-//                        session_curr on startup and read-only until the
-//                        next reboot rotates it out.
-//
-// Cap: SESSION_MAX_ENTRIES per file; LRU-drop happens in the callback
-// when devices[] grows past the cap so the JSON never gets huge.
-
-static const char*  SESSION_CURR_PATH   = "/session_curr.json";
-static const char*  SESSION_PREV_PATH   = "/session_prev.json";
-static const size_t SESSION_MAX_ENTRIES = 200;
-static const size_t SESSION_JSON_BYTES  = 48 * 1024;
-
-static bool sessionFSReady = false;
-volatile bool sessionDirty = false;   // set by BLE callback, drained in loop()
-
-static void ensureSessionFS() {
-    if (sessionFSReady) return;
-    if (LittleFS.begin(true)) {       // format on failure
-        sessionFSReady = true;
-    } else if (isSerialConnected()) {
-        Serial.println("[detector] LittleFS mount failed");
-    }
-}
-
-// Boot-time rotation: promote last boot's live file to the prev slot,
-// then wipe the live slot so this session starts clean. Logs a one-line
-// summary so a serial capture can prove the persistence path is alive.
-static void rotateSessionFiles() {
-    ensureSessionFS();
-    if (!sessionFSReady) return;
-
-    if (LittleFS.exists(SESSION_CURR_PATH)) {
-        if (LittleFS.exists(SESSION_PREV_PATH)) LittleFS.remove(SESSION_PREV_PATH);
-        if (LittleFS.rename(SESSION_CURR_PATH, SESSION_PREV_PATH)) {
-            if (isSerialConnected()) Serial.println("[detector] rotated session_curr -> session_prev");
-        } else if (isSerialConnected()) {
-            Serial.println("[detector] session rotate failed");
-        }
-    }
-
-    if (LittleFS.exists(SESSION_PREV_PATH)) {
-        File f = LittleFS.open(SESSION_PREV_PATH, "r");
-        size_t entries = 0;
-        if (f) {
-            DynamicJsonDocument doc(SESSION_JSON_BYTES);
-            DeserializationError err = deserializeJson(doc, f);
-            f.close();
-            if (!err && doc.is<JsonArray>()) {
-                entries = doc.as<JsonArray>().size();
-            } else if (isSerialConnected()) {
-                Serial.println("[detector] session_prev parse failed, treating as empty");
-            }
-        }
-        if (isSerialConnected()) {
-            Serial.printf("[detector] session_prev loaded (%u entries)\n", (unsigned)entries);
-        }
-    } else if (isSerialConnected()) {
-        Serial.println("[detector] no previous session");
-    }
-}
-
-// Serialise devices[] out as a plain JSON array. Wrap-crashing writes
-// aren't defended against — the load path tolerates a corrupt file and
-// falls back to empty, which is fine for a detector.
-static void writeCurrentSession() {
-    ensureSessionFS();
-    if (!sessionFSReady) return;
-
-    DynamicJsonDocument doc(SESSION_JSON_BYTES);
-    JsonArray arr = doc.to<JsonArray>();
-
-    size_t start = devices.size() > SESSION_MAX_ENTRIES
-                    ? devices.size() - SESSION_MAX_ENTRIES : 0;
-    for (size_t i = start; i < devices.size(); i++) {
-        const DeviceInfo& d = devices[i];
-        JsonObject o = arr.createNestedObject();
-        o["mac"]      = d.macAddress;
-        o["first_ms"] = d.firstSeen;
-        o["last_ms"]  = d.lastSeen;
-        o["rssi"]     = d.rssi;
-        o["type"]     = filterTypeCode(d.matchedType);
-        o["match"]    = d.matchedIdentifier;
-        o["desc"]     = d.filterDescription;
-    }
-
-    File f = LittleFS.open(SESSION_CURR_PATH, "w");
-    if (!f) {
-        if (isSerialConnected()) Serial.println("[detector] session_curr open failed");
-        return;
-    }
-    serializeJson(doc, f);
-    f.close();
-}
-
-static void clearCurrentSessionFile() {
-    ensureSessionFS();
-    if (sessionFSReady && LittleFS.exists(SESSION_CURR_PATH)) {
-        LittleFS.remove(SESSION_CURR_PATH);
-    }
-}
-
-static void clearPreviousSessionFile() {
-    ensureSessionFS();
-    if (sessionFSReady && LittleFS.exists(SESSION_PREV_PATH)) {
-        LittleFS.remove(SESSION_PREV_PATH);
-    }
-}
-
-// Slurp session_prev.json verbatim for the dashboard. Empty array on
-// any error / missing file — the UI hides its panel when the array is
-// empty, so this is the graceful fallback.
-static String readPreviousSessionJson() {
-    ensureSessionFS();
-    if (!sessionFSReady || !LittleFS.exists(SESSION_PREV_PATH)) return "[]";
-    File f = LittleFS.open(SESSION_PREV_PATH, "r");
-    if (!f) return "[]";
-    String out;
-    out.reserve(f.size() + 2);
-    while (f.available()) out += (char)f.read();
-    f.close();
-    if (out.length() == 0) out = "[]";
-    return out;
 }
 
 // ================================
@@ -1505,6 +1953,8 @@ R"html(
         .sig-uuid { color: #81c784; }   /* service UUID       - green  */
         .sig-name { color: #ba9ffb; }   /* name substring     - purple */
         .sig-meta { color: #e94560; }   /* Meta composite     - red-pink (matches META badge) */
+        .sig-probe  { color: #4ecdc4; }   /* WiFi probe     - teal  */
+        .sig-beacon { color: #4ecdc4; }   /* WiFi beacon    - teal  */
         .sig-sep  { color: #6b6b7d; }
         .sig-rm {
             margin-left: auto; background: none; border: none;
@@ -1523,10 +1973,11 @@ R"html(
         <h1>OUI-SPY Detector</h1>
         
         <div class="status">
-            Enter MAC addresses and/or OUI prefixes below. You must provide at least one entry in either field.
+            Add OUI/MAC filters below using the form, or select presets from the OUI Database.
         </div>
 
-        <form id="configForm" method="POST" action="/save">
+        <form id="configForm" method="POST" action="/save" autocomplete="off">
+            <input type="hidden" id="filtersJson" name="filters" value="">
             <div class="section">
                 <h3>OUI Prefixes</h3>
                 <textarea id="ouis" name="ouis" placeholder="Enter OUI prefixes, one per line:
@@ -1539,7 +1990,12 @@ DD:EE:FF
                 </div>
                 <div id="sigLines" class="sig-lines"></div>
             </div>
-            
+
+            <div id="filterList">%FILTER_LIST_ROWS%</div>
+            <div id="emptyFilterMsg" class="empty-state-message">
+                No filters configured. Select a preset from the OUI Database below.
+            </div>
+
             <div class="section">
                 <h3>OUI Database</h3>
                 <div class="help-text" style="margin-bottom: 15px;">
@@ -1550,40 +2006,48 @@ DD:EE:FF
                     <details>
                     <summary><b>RING</b> <code>11 OUIs</code></summary>
                     <div class="oui-entries"><code>18:7F:88</code> <code>24:2B:D6</code> <code>34:3E:A4</code> <code>54:E0:19</code> <code>5C:47:5E</code> <code>64:9A:63</code> <code>90:48:6C</code> <code>9C:76:13</code> <code>AC:9F:C3</code> <code>C4:DB:AD</code> <code>CC:3B:FB</code></div>
-                    <button type="button" class="oui-add-btn" onclick="appendOUIs('18:7F:88,24:2B:D6,34:3E:A4,54:E0:19,5C:47:5E,64:9A:63,90:48:6C,9C:76:13,AC:9F:C3,C4:DB:AD,CC:3B:FB')">+ Add to filter list</button>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('187F88',true,true,'Ring doorbell/camera');addFilterRow('242BD6',true,true,'Ring doorbell/camera');addFilterRow('343EA4',true,true,'Ring doorbell/camera');addFilterRow('54E019',true,true,'Ring doorbell/camera');addFilterRow('5C475E',true,true,'Ring doorbell/camera');addFilterRow('649A63',true,true,'Ring doorbell/camera');addFilterRow('90486C',true,true,'Ring doorbell/camera');addFilterRow('9C7613',true,true,'Ring doorbell/camera');addFilterRow('AC9FC3',true,true,'Ring doorbell/camera');addFilterRow('C4DBAD',true,true,'Ring doorbell/camera');addFilterRow('CC3BFB',true,true,'Ring doorbell/camera')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Doorbell/Security Camera</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> Typical WiFi/BLE range</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Ring Doorbell, Ring Camera, Ring Chime</div>
                     </details>
                     <details>
                     <summary><b>AXON</b> <code>1 OUI</code></summary>
-                    <div class="oui-entries"><code>00:25:DF</code> <code>CID 0x034D</code> <code>UUID 0xFC81</code></div>
-                    <button type="button" class="oui-add-btn" onclick="addVendor('axon','AXON','00:25:DF')">+ Add all signatures</button>
+                    <div class="oui-entries"><code>00:25:DF</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('axon', 'AXON', '00:25:DF')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> Short-range BLE/WiFi</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Axon Body Camera, Axon Fleet</div>
                     </details>
                     <details>
-                    <summary><b>META / RAY-BAN</b> <code>composite</code></summary>
-                    <div class="oui-entries"><code>CID 0x0D53 + UUID 0xFD5F</code> <code>name: Ray-Ban / Wayfarer / Oakley Meta</code></div>
-                    <button type="button" class="oui-add-btn" onclick="addVendor('meta','META / RAY-BAN', null)">+ Add composite signature</button>
-                    <div class="oui-meta"><strong>Category:</strong> Smart Glasses</div>
-                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range (~10-30 m)</div>
-                    <div class="oui-meta"><strong>Common Devices:</strong> Ray-Ban Meta (Wayfarer, Headliner, Skyler), Oakley Meta HSTN</div>
-                    <div class="oui-note">No OUI: the glasses rotate random MACs (RPA per BT spec). The composite requires Luxottica company ID 0x0D53 AND Meta service UUID 0xFD5F in the same advert, or the advertised name — single-signature CID/UUID filters false-positive on phones running Meta apps.</div>
+                    <summary><b>I-PRO</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>D4:2D:C5</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('ipro', 'I-PRO', 'D4:2D:C5')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Law Enforcement</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> Short-range BLE/WiFi</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> I-PRO Body Camera</div>
                     </details>
                     <details>
                     <summary><b>FLOCK SAFETY</b> <code>1 OUI</code></summary>
                     <div class="oui-entries"><code>B4:1E:52</code></div>
-                    <button type="button" class="oui-add-btn" onclick="appendOUIs('B4:1E:52')">+ Add to filter list</button>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('B41E52',true,true,'Flock Safety camera')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Automated License Plate Reader (ALPR) / Security Camera</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/Cellular</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Flock Safety Camera, Falcon Camera, Raven Camera</div>
                     </details>
                     <details>
+                    <summary><b>FLOCK SAFETY (WiFi Promiscuous — @NitekryDPaul research)</b> <code>30 OUIs</code></summary>
+                    <div class="oui-entries"><code>70:C9:4E</code> <code>3C:91:80</code> <code>D8:F3:BC</code> <code>80:30:49</code> <code>B8:35:32</code> <code>14:5A:FC</code> <code>74:4C:A1</code> <code>08:3A:88</code> <code>9C:2F:9D</code> <code>C0:35:32</code> <code>94:08:53</code> <code>E4:AA:EA</code> <code>F4:6A:DD</code> <code>F8:A2:D6</code> <code>24:B2:B9</code> <code>00:F4:8D</code> <code>D0:39:57</code> <code>E8:D0:FC</code> <code>E0:4F:43</code> <code>B8:1E:A4</code> <code>70:08:94</code> <code>58:8E:81</code> <code>EC:1B:BD</code> <code>3C:71:BF</code> <code>58:00:E3</code> <code>90:35:EA</code> <code>5C:93:A2</code> <code>64:6E:69</code> <code>48:27:EA</code> <code>A4:CF:12</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('70C94E',true,true,'Flock Safety infrastructure');addFilterRow('3C9180',true,true,'Flock Safety infrastructure');addFilterRow('D8F3BC',true,true,'Flock Safety infrastructure');addFilterRow('803049',true,true,'Flock Safety infrastructure');addFilterRow('B83532',true,true,'Flock Safety infrastructure');addFilterRow('145AFC',true,true,'Flock Safety infrastructure');addFilterRow('744CA1',true,true,'Flock Safety infrastructure');addFilterRow('083A88',true,true,'Flock Safety infrastructure');addFilterRow('9C2F9D',true,true,'Flock Safety infrastructure');addFilterRow('C03532',true,true,'Flock Safety infrastructure');addFilterRow('940853',true,true,'Flock Safety infrastructure');addFilterRow('E4AAEA',true,true,'Flock Safety infrastructure');addFilterRow('F46ADD',true,true,'Flock Safety infrastructure');addFilterRow('F8A2D6',true,true,'Flock Safety infrastructure');addFilterRow('24B2B9',true,true,'Flock Safety infrastructure');addFilterRow('00F48D',true,true,'Flock Safety infrastructure');addFilterRow('D03957',true,true,'Flock Safety infrastructure');addFilterRow('E8D0FC',true,true,'Flock Safety infrastructure');addFilterRow('E04F43',true,true,'Flock Safety infrastructure');addFilterRow('B81EA4',true,true,'Flock Safety infrastructure');addFilterRow('700894',true,true,'Flock Safety infrastructure');addFilterRow('588E81',true,true,'Flock Safety infrastructure');addFilterRow('EC1BBD',true,true,'Flock Safety infrastructure');addFilterRow('3C71BF',true,true,'Flock Safety infrastructure');addFilterRow('5800E3',true,true,'Flock Safety infrastructure');addFilterRow('9035EA',true,true,'Flock Safety infrastructure');addFilterRow('5C93A2',true,true,'Flock Safety infrastructure');addFilterRow('646E69',true,true,'Flock Safety infrastructure');addFilterRow('4827EA',true,true,'Flock Safety infrastructure');addFilterRow('A4CF12',true,true,'Flock Safety infrastructure')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Automated License Plate Reader (ALPR) / Security Camera</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi 2.4 GHz (promiscuous mode, addr1 + addr2)</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Flock Safety infrastructure (cameras, uplinks, peripherals)</div>
+                    <div class="oui-meta"><strong>Research Credit:</strong> ØяĐöØцяöЪöяцฐ / <strong>@NitekryDPaul</strong> — identified these prefixes through 2.4 GHz promiscuous-mode analysis, including the addr1-receiver detection technique that catches Flock stations during their burst-sleep duty cycle</div>
+                    </details>
+                    <details>
                     <summary><b>DJI</b> <code>8 OUIs</code></summary>
                     <div class="oui-entries"><code>0C:9A:E6</code> <code>8C:58:23</code> <code>04:A8:5A</code> <code>58:B8:58</code> <code>E4:7A:2C</code> <code>60:60:1F</code> <code>48:1C:B9</code> <code>34:D2:62</code></div>
-                    <button type="button" class="oui-add-btn" onclick="appendOUIs('0C:9A:E6,8C:58:23,04:A8:5A,58:B8:58,E4:7A:2C,60:60:1F,48:1C:B9,34:D2:62')">+ Add to filter list</button>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('0C9AE6',true,true,'DJI drone');addFilterRow('8C5823',true,true,'DJI drone');addFilterRow('04A85A',true,true,'DJI drone');addFilterRow('58B858',true,true,'DJI drone');addFilterRow('E47A2C',true,true,'DJI drone');addFilterRow('60601F',true,true,'DJI drone');addFilterRow('481CB9',true,true,'DJI drone');addFilterRow('34D262',true,true,'DJI drone')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Consumer & Commercial Drones</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/OcuSync up to several km</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Mavic, Phantom, Inspire, Mini series</div>
@@ -1591,7 +2055,7 @@ DD:EE:FF
                     <details>
                     <summary><b>PARROT</b> <code>5 OUIs</code></summary>
                     <div class="oui-entries"><code>00:12:1C</code> <code>00:26:7E</code> <code>90:03:B7</code> <code>90:3A:E6</code> <code>A0:14:3D</code></div>
-                    <button type="button" class="oui-add-btn" onclick="appendOUIs('00:12:1C,00:26:7E,90:03:B7,90:3A:E6,A0:14:3D')">+ Add to filter list</button>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('00121C',true,true,'Parrot drone');addFilterRow('00267E',true,true,'Parrot drone');addFilterRow('9003B7',true,true,'Parrot drone');addFilterRow('903AE6',true,true,'Parrot drone');addFilterRow('A0143D',true,true,'Parrot drone')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Consumer & Commercial Drones</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Parrot Anafi, Parrot Bebop, Parrot AR.Drone</div>
@@ -1599,27 +2063,26 @@ DD:EE:FF
                     <details>
                     <summary><b>SKYDIO</b> <code>1 OUI</code></summary>
                     <div class="oui-entries"><code>38:1D:14</code></div>
-                    <button type="button" class="oui-add-btn" onclick="appendOUIs('38:1D:14')">+ Add to filter list</button>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('381D14',true,true,'Skydio drone')">+ Add to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Commercial & Enterprise Drones</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi range</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Skydio 2, Skydio X2, Skydio 3</div>
                     </details>
+                    <details>
+                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
+                    <div class="oui-note"><em>sourced from <a href=\"https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21\" target=\"_blank\" style=\"color:#4ecdc4;\">glass-detect repository</a></em></div>
+                    <div class="oui-note">Last one from Luxottica Group S.P.A. detected by @konradit.</div>
+                    <div class="oui-entries"><code>7C:2A:9E</code> <code>CC:66:0A</code> <code>F4:03:43</code> <code>5C:E9:1E</code> <code>98:59:49</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addFilterRow('7C2A9E',true,true,'Meta/Ray-Ban Smartglasses');addFilterRow('CC660A',true,true,'Meta/Ray-Ban Smartglasses');addFilterRow('F40343',true,true,'Meta/Ray-Ban Smartglasses');addFilterRow('5CE91E',true,true,'Meta/Ray-Ban Smartglasses');addFilterRow('985949',true,true,'Meta/Ray-Ban Smartglasses')">+ Add to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Meta/Ray-Ban Smartglasses</div>
+                    </details>
                     <!-- OUI_DB_END -->
                 </div>
             </div>
-            
-            <div class="section">
-                <h3>MAC Addresses</h3>
-                <textarea id="macs" name="macs" placeholder="Enter full MAC addresses, one per line:
-AA:BB:CC:12:34:56
-DD:EE:FF:ab:cd:ef
-11:22:33:44:55:66">%MAC_VALUES%</textarea>
-                <div class="help-text">
-                    Full MAC addresses match specific devices only.<br>
-                    Format: XX:XX:XX:XX:XX:XX (17 characters with colons)
-                </div>
-            </div>
-            
+
+
             <div class="section">
                 <h3>Audio & Visual Settings</h3>
                 <div class="toggle-container">
@@ -1644,12 +2107,12 @@ DD:EE:FF:ab:cd:ef
                 </div>
                 <div style="margin-bottom: 15px;">
                     <label for="ap_ssid" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Network Name (SSID)</label>
-                    <input type="text" id="ap_ssid" name="ap_ssid" value="%AP_SSID%" maxlength="32" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <input type="text" id="ap_ssid" name="ap_ssid" value="%AP_SSID%" maxlength="32" autocomplete="off" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
                     <div class="help-text" style="margin-top: 5px;">1-32 characters</div>
                 </div>
                 <div>
                     <label for="ap_password" style="display: block; margin-bottom: 8px; font-weight: 500; color: #ffffff;">Password</label>
-                    <input type="text" id="ap_password" name="ap_password" value="%AP_PASSWORD%" minlength="8" maxlength="63" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
+                    <input type="text" id="ap_password" name="ap_password" value="%AP_PASSWORD%" minlength="8" maxlength="63" autocomplete="new-password" style="width: 100%%; padding: 12px; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 8px; background: rgba(255, 255, 255, 0.02); color: #ffffff; font-size: 14px;">
                     <div class="help-text" style="margin-top: 5px;">8-63 characters (leave empty for open network)</div>
                 </div>
             </div>
@@ -1663,16 +2126,6 @@ DD:EE:FF:ab:cd:ef
                 </div>
                 <div id="clearDeviceBtn" style="margin-bottom: 10px; text-align: right; display: none;">
                     <button type="button" onclick="clearDeviceHistory()" style="background: #8b0000; padding: 8px 16px; font-size: 13px; margin: 0;">Clear Device History</button>
-                </div>
-                <div id="previousSessionPanel" style="display: none; margin-bottom: 15px; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; overflow: hidden; background: rgba(255,255,255,0.015);">
-                    <div style="display:flex; align-items:center; justify-content:space-between; padding: 10px 14px; background: rgba(255,255,255,0.04); cursor: pointer;" onclick="togglePrevSession()">
-                        <span id="previousSessionTitle" style="font-family:'Courier New',monospace; font-size:12px; letter-spacing:1px; color:#4ecdc4;">PREVIOUS SESSION (0)</span>
-                        <span style="display:flex; align-items:center; gap:10px;">
-                            <button type="button" onclick="event.stopPropagation(); clearPreviousSession();" style="background:#4a0000; padding:4px 10px; font-size:11px; margin:0;">Clear</button>
-                            <span id="previousSessionCaret" style="color:#888; font-size:11px;">[-]</span>
-                        </span>
-                    </div>
-                    <div id="previousSessionList" class="device-list" style="opacity: 0.65; padding: 10px 12px; max-height: 300px;"></div>
                 </div>
                 <div id="deviceList" class="device-list">
                     <div style="text-align: center; padding: 30px; color: #888888;">
@@ -1693,9 +2146,9 @@ DD:EE:FF:ab:cd:ef
                 <input type="text" name="mq_id" value="%MQ_ID%" maxlength="32" placeholder="ouispy" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <div class="help-text" style="margin-bottom:12px">Unique name for this device (e.g. ouispy-front, ouispy-garage). Used as MQTT client ID and auto-generates topic.</div>
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi SSID</label>
-                <input type="text" name="mq_ss" value="%MQ_SS%" maxlength="32" placeholder="Home WiFi" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <input type="text" name="mq_ss" value="%MQ_SS%" maxlength="32" placeholder="Home WiFi" autocomplete="off" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">WiFi Password</label>
-                <input type="password" name="mq_sp" value="%MQ_SP%" maxlength="63" placeholder="Password" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <input type="password" name="mq_sp" value="%MQ_SP%" maxlength="63" placeholder="Password" autocomplete="new-password" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Broker IP</label>
                 <input type="text" name="mq_bk" value="%MQ_BK%" maxlength="64" placeholder="192.168.1.100" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Port</label>
@@ -1703,7 +2156,7 @@ DD:EE:FF:ab:cd:ef
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Username (optional)</label>
                 <input type="text" name="mq_us" value="%MQ_US%" maxlength="64" placeholder="Leave blank if none" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Password (optional)</label>
-                <input type="password" name="mq_pw" value="%MQ_PW%" maxlength="64" placeholder="Leave blank if none" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
+                <input type="password" name="mq_pw" value="%MQ_PW%" maxlength="64" placeholder="Leave blank if none" autocomplete="new-password" style="width:100%%;padding:10px;margin-bottom:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Topic</label>
                 <input type="text" name="mq_tp" value="%MQ_TP%" maxlength="128" placeholder="ouispy/detection" style="width:100%%;padding:10px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(255,255,255,0.02);color:#fff;font-size:14px">
             </div>
@@ -1853,6 +2306,39 @@ DD:EE:FF:ab:cd:ef
                 .match-badge.type-SVC  { color: #a3ff2e; }
                 .match-badge.type-NAME { color: #ff6b9d; }
                 .match-badge.type-META { color: #e94560; }
+                .match-badge.type-PROBE  { background: rgba(78,205,196,0.15); color: #4ecdc4; border-color: rgba(78,205,196,0.3); }
+                .match-badge.type-BEACON { background: rgba(78,205,196,0.15); color: #4ecdc4; border-color: rgba(78,205,196,0.3); }
+                .match-badge.type-BLE { color: #00d4ff; }
+                .match-badge.type-WiFi { color: #4ecdc4; }
+
+                /* Filter row styles */
+                .filter-row {
+                    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+                    padding: 10px 12px; margin-bottom: 6px;
+                    border: 1px solid rgba(255,255,255,0.10);
+                    border-bottom: 1px solid rgba(255,255,255,0.10);
+                    border-radius: 8px; background: rgba(255,255,255,0.02);
+                    font-size: 13px;
+                }
+                .filter-domains {
+                    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+                }
+                .filter-domains .match-badge {
+                    cursor: pointer; min-height: 44px; display: inline-flex; align-items: center;
+                }
+                .filter-domains .match-badge:hover { opacity: 0.7; }
+                .match-badge.disabled { color: #555555; border-color: #555555; opacity: 0.5; }
+                .remove-filter-btn {
+                    background: #8b0000; color: #ffffff; border: none;
+                    border-radius: 6px; padding: 6px 12px; cursor: pointer;
+                    font-size: 14px; line-height: 1; min-height: 44px; min-width: 44px;
+                    display: inline-flex; align-items: center; justify-content: center;
+                }
+                .remove-filter-btn:hover { background: #a00000; }
+                .preset-only { opacity: 0.55; }
+                .empty-state-message {
+                    text-align: center; padding: 30px; color: #888888; font-size: 14px;
+                }
                 .prev-tag {
                     display: inline-block;
                     margin-left: 6px;
@@ -1871,7 +2357,6 @@ DD:EE:FF:ab:cd:ef
             // Load detected devices on page load
             window.addEventListener('DOMContentLoaded', function() {
                 loadDetectedDevices();
-                loadPreviousSession();
                 
                 // Ensure form submits on first click (mobile fix)
                 const configForm = document.getElementById('configForm');
@@ -1993,7 +2478,7 @@ DD:EE:FF:ab:cd:ef
             
             function makeMatchBadge(type, description, matchIdent) {
                 var badge = document.createElement('span');
-                var allowed = ['OUI','MAC','CID','SVC','NAME','META'];
+                var allowed = ['OUI','MAC','CID','SVC','NAME','META','PROBE','BEACON'];
                 var t = (allowed.indexOf(type) >= 0) ? type : 'OUI';
                 badge.className = 'match-badge type-' + t;
                 badge.textContent = t;
@@ -2002,83 +2487,6 @@ DD:EE:FF:ab:cd:ef
                 if (description) titleParts.push(description);
                 badge.title = titleParts.join(' - ');
                 return badge;
-            }
-
-            function togglePrevSession() {
-                var list = document.getElementById('previousSessionList');
-                var caret = document.getElementById('previousSessionCaret');
-                if (!list) return;
-                if (list.style.display === 'none') {
-                    list.style.display = '';
-                    caret.textContent = '[-]';
-                } else {
-                    list.style.display = 'none';
-                    caret.textContent = '[+]';
-                }
-            }
-
-            function loadPreviousSession() {
-                fetch('/api/session/previous')
-                    .then(function(r) { return r.json(); })
-                    .then(function(arr) {
-                        var panel = document.getElementById('previousSessionPanel');
-                        var list  = document.getElementById('previousSessionList');
-                        var title = document.getElementById('previousSessionTitle');
-                        if (!Array.isArray(arr) || arr.length === 0) {
-                            if (panel) panel.style.display = 'none';
-                            return;
-                        }
-                        panel.style.display = '';
-                        title.textContent = 'PREVIOUS SESSION (' + arr.length + ')';
-                        list.innerHTML = '';
-                        arr.forEach(function(entry) {
-                            var item = document.createElement('div');
-                            item.className = 'device-item';
-                            var row = document.createElement('div');
-                            row.className = 'device-info-row';
-
-                            var macSpan = document.createElement('span');
-                            macSpan.className = 'device-mac';
-                            macSpan.textContent = entry.mac || '?';
-                            row.appendChild(macSpan);
-
-                            row.appendChild(makeMatchBadge(entry.type, entry.desc, entry.match));
-
-                            if (typeof entry.rssi === 'number') {
-                                var rssi = document.createElement('span');
-                                rssi.className = 'device-rssi';
-                                rssi.textContent = entry.rssi + ' dBm';
-                                row.appendChild(rssi);
-                            }
-
-                            var prevTag = document.createElement('span');
-                            prevTag.className = 'prev-tag';
-                            prevTag.textContent = 'PREV';
-                            row.appendChild(prevTag);
-
-                            if (entry.desc) {
-                                var descSpan = document.createElement('span');
-                                descSpan.className = 'device-filter';
-                                descSpan.textContent = entry.desc;
-                                descSpan.title = entry.desc;
-                                row.appendChild(descSpan);
-                            }
-                            item.appendChild(row);
-                            list.appendChild(item);
-                        });
-                    })
-                    .catch(function(err) {
-                        console.error('prev session load failed', err);
-                    });
-            }
-
-            function clearPreviousSession() {
-                fetch('/api/session/clear_previous', { method: 'POST' })
-                    .then(function() {
-                        var panel = document.getElementById('previousSessionPanel');
-                        if (panel) panel.style.display = 'none';
-                    })
-                    .catch(function(err) { console.error(err); });
             }
 
             function saveAlias(mac, alias, button) {
@@ -2166,8 +2574,10 @@ DD:EE:FF:ab:cd:ef
 
             function clearConfig() {
                 if (confirm('Are you sure you want to clear all filters? This action cannot be undone.')) {
-                    document.getElementById('ouis').value = '';
-                    document.getElementById('macs').value = '';
+                    document.getElementById('filterList').innerHTML = '';
+                    document.getElementById('filtersJson').value = '';
+                    dirtyState = false;
+                    showEmptyState();
                     fetch('/clear', { method: 'POST' })
                         .then(response => response.text())
                         .then(data => {
@@ -2200,36 +2610,36 @@ DD:EE:FF:ab:cd:ef
                 }
             }
             
-            // Signature sets that cannot be expressed in the OUI textarea.
-            // MAC prefixes still flow through appendOUIs() so they stay
-            // visible and hand-editable in the box like they always were.
+            // Signature sets that cannot be expressed via manual input.
             var VENDOR_OUIS = {
-                axon:   '00:25:DF'
+                axon:   '00:25:DF',
+                ipro:   'D4:2D:C5',
+                meta:   '7C:2A:9E,CC:66:0A,F4:03:43,5C:E9:1E,98:59:49'
             };
-            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN' };
+            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN', ipro: 'I-PRO' };
 
             // Repopulate the signature lines on page load. Without this the
             // filters stay installed in NVS but the UI looks empty after a
-            // refresh, which reads as "my presets vanished".
+            // refresh.
             function loadSigLines() {
                 fetch('/api/presets/status')
                     .then(function(r){ return r.json(); })
                     .then(function(d){
                         Object.keys(VENDOR_LABELS).forEach(function(k){
-                            if (d && d[k]) renderSigLine(k, VENDOR_LABELS[k], VENDOR_OUIS[k], null);
+                            if (d && d[k]) {
+                                renderSigLine(k, VENDOR_LABELS[k], VENDOR_OUIS[k], null);
+                            }
                         });
                     })
                     .catch(function(){ /* device offline: leave lines empty */ });
             }
 
-            var VENDOR_SIGS = {
-                axon:   [ {t:'cid',  v:'0x034D', l:'CID'},
-                          {t:'uuid', v:'0xFC81', l:'UUID'} ],
-                meta:   [ {t:'meta', v:'0x0D53+0xFD5F', l:'COMPOSITE'} ]
-            };
+            
 
             function addVendor(preset, label, ouiStr) {
-                if (ouiStr) appendOUIs(ouiStr);          // manual box still authoritative for MACs
+                if (ouiStr) {
+                    addFilterRow(ouiStr.replace(':','').toUpperCase(), true, true, label);
+                }
                 fetch('/api/presets/apply', {
                     method: 'POST',
                     headers: {'Content-Type':'application/x-www-form-urlencoded'},
@@ -2252,9 +2662,7 @@ DD:EE:FF:ab:cd:ef
                 (ouiStr ? ouiStr.split(',') : []).forEach(function(o){
                     parts.push('<span class="sig-mac">' + o.trim() + '</span>');
                 });
-                (VENDOR_SIGS[preset] || []).forEach(function(sig){
-                    parts.push('<span class="sig-' + sig.t + '">' + sig.l + ' ' + sig.v + '</span>');
-                });
+
 
                 var row = document.createElement('div');
                 row.className = 'sig-line';
@@ -2280,43 +2688,30 @@ DD:EE:FF:ab:cd:ef
             }
 
             function appendOUIs(ouiStr) {
-                var ta = document.getElementById('ouis');
-                var current = ta.value.trim();
-                var existing = current ? current.split('\n').map(function(s){return s.trim();}).filter(Boolean) : [];
-                var toAdd = ouiStr.split(',').map(function(s){return s.trim();}).filter(Boolean);
-                var added = 0;
-                toAdd.forEach(function(oui) {
-                    if (existing.indexOf(oui) === -1) { existing.push(oui); added++; }
+                // Deprecated — kept for backwards compat, delegates to addFilterRow
+                var ouis = ouiStr.split(',').map(function(s){return s.trim();}).filter(Boolean);
+                ouis.forEach(function(oui){
+                    addFilterRow(oui.replace(':','').toUpperCase(), true, true, 'OUI: ' + oui);
                 });
-                ta.value = existing.join('\n');
-                ta.style.borderColor = '#10b981';
-                ta.style.boxShadow = '0 0 0 3px rgba(16,185,129,0.3)';
-                setTimeout(function(){ ta.style.borderColor = ''; ta.style.boxShadow = ''; }, 1500);
-                ta.scrollIntoView({behavior:'smooth',block:'center'});
             }
             
             function burnInConfig() {
-                if (!confirm('PERMANENT CONFIGURATION LOCK\n\nThis will PERMANENTLY lock all settings (OUI/MAC filters, aliases, buzzer/LED preferences).\n\nAfter activation:\n- WiFi AP and config window disabled on boot\n- Device boots directly to scanning mode\n- Unlock: hold BOOT during power-on (or erase flash + reflash)\n\nClick OK to proceed with permanent lock.')) {
+                if (!confirm('PERMANENT CONFIGURATION LOCK\n\nThis will PERMANENTLY lock all settings (filters, aliases, buzzer/LED preferences).\n\nAfter activation:\n- WiFi AP and config window disabled on boot\n- Device boots directly to scanning mode\n- Unlock: hold BOOT during power-on (or erase flash + reflash)\n\nClick OK to proceed with permanent lock.')) {
                     return;
                 }
-                
+
+                // Build filter JSON from DOM
+                buildFilterList();
+
                 // Collect current form values
                 const formData = new URLSearchParams();
-                const ouisElement = document.getElementById('ouis');
-                const macsElement = document.getElementById('macs');
-                const ouis = ouisElement ? ouisElement.value.trim() : '';
-                const macs = macsElement ? macsElement.value.trim() : '';
+                const filtersJson = document.getElementById('filtersJson') ? document.getElementById('filtersJson').value : '[]';
                 const buzzerEnabled = document.getElementById('buzzerEnabled') ? document.getElementById('buzzerEnabled').checked : true;
                 const ledEnabled = document.getElementById('ledEnabled') ? document.getElementById('ledEnabled').checked : true;
                 const apSSID = document.getElementById('ap_ssid') ? document.getElementById('ap_ssid').value : '';
                 const apPassword = document.getElementById('ap_password') ? document.getElementById('ap_password').value : '';
-                
-                // Debug logging
-                console.log('Burn-in: OUI values:', ouis);
-                console.log('Burn-in: MAC values:', macs);
-                
-                formData.append('ouis', ouis);
-                formData.append('macs', macs);
+
+                formData.append('filters', filtersJson);
                 if (buzzerEnabled) formData.append('buzzerEnabled', 'on');
                 if (ledEnabled) formData.append('ledEnabled', 'on');
                 formData.append('ap_ssid', apSSID);
@@ -2343,6 +2738,221 @@ DD:EE:FF:ab:cd:ef
                     });
             }
             
+            // === Filter List Management ===
+
+            var dirtyState = false;
+
+            function setDirty() { dirtyState = true; }
+            function clearDirty() { dirtyState = false; }
+
+            function checkDirtyBeforePreset() {
+                if (dirtyState) {
+                    return confirm('You have unsaved changes. Apply preset anyway? (unsaved changes will be lost)');
+                }
+                return true;
+            }
+
+            function formatMac(hexStr) {
+                // Format hex string with colons: AA:BB:CC or AA:BB:CC:DD:EE:FF
+                var s = hexStr.replace(/:/g, '').toUpperCase();
+                if (s.length <= 6) {
+                    return s.padStart(6, '0').replace(/(..)(..)(..)/, '$1:$2:$3');
+                }
+                return s.padStart(12, '0').replace(/(..)(..)(..)(..)(..)(..)/, '$1:$2:$3:$4:$5:$6');
+            }
+
+            function validateHexString(raw) {
+                // Accept formats: AA:BB:CC, AABBCC, AA:BB:CC:DD:EE:FF, AABBCCDDEEFF
+                var clean = raw.replace(/[:\s]/g, '').toUpperCase();
+                if (!/^[0-9A-F]+$/.test(clean)) return null;
+                if (clean.length !== 6 && clean.length !== 12) return null;
+                return clean;
+            }
+
+            function addFilterRow(oui, ble, wifi, desc) {
+                if (!checkDirtyBeforePreset()) return;
+
+                var clean = oui.replace(/[:\s]/g, '').toUpperCase();
+                if (!/^[0-9A-F]+$/.test(clean)) {
+                    alert('Invalid hex value. Use XX:XX:XX or XX:XX:XX:XX:XX:XX format.');
+                    return;
+                }
+                if (clean.length !== 6 && clean.length !== 12) {
+                    alert('OUI must be 3 or 6 hex octets (6 or 12 hex chars).');
+                    return;
+                }
+                if (!ble && !wifi) return;
+
+                // Check for duplicate — same OUI with overlapping domains
+                var list = document.getElementById('filterList');
+                var rows = list.querySelectorAll('.filter-row');
+                var existingIdx = -1;
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i];
+                    if (r.getAttribute('data-preset') === 'true') continue;
+                    if (r.getAttribute('data-oui') === clean) {
+                        existingIdx = i;
+                        break;
+                    }
+                }
+                if (existingIdx >= 0) {
+                    var exRow = rows[existingIdx];
+                    var exBle = exRow.getAttribute('data-ble') === 'true';
+                    var exWifi = exRow.getAttribute('data-wifi') === 'true';
+                    if (ble && exBle && wifi && exWifi) {
+                        alert(formatMac(clean) + ' is already in the list with the same domains.');
+                        return;
+                    }
+                    // Merge: enable the new domains on the existing row
+                    if (ble) exRow.setAttribute('data-ble', 'true');
+                    if (wifi) exRow.setAttribute('data-wifi', 'true');
+                    renderDomains(exRow);
+                    setDirty();
+                    return;
+                }
+
+                if (!desc) {
+                    desc = clean.length === 6 ? 'OUI: ' + formatMac(clean) : 'Full MAC: ' + formatMac(clean);
+                }
+
+                var row = document.createElement('div');
+                row.className = 'filter-row';
+                row.setAttribute('data-oui', clean);
+                row.setAttribute('data-ble', ble ? 'true' : 'false');
+                row.setAttribute('data-wifi', wifi ? 'true' : 'false');
+                row.setAttribute('data-desc', desc);
+
+                row.innerHTML =
+                    '<span class="device-mac">' + formatMac(clean) + '</span>' +
+                    '<span class="filter-domains">' +
+                        (ble ? '<span class="match-badge type-BLE" onclick="toggleBadge(this)">BLE</span>' : '') +
+                        (wifi ? '<span class="match-badge type-WiFi" onclick="toggleBadge(this)">WiFi</span>' : '') +
+                    '</span>' +
+                    '<span class="device-filter">' + desc + '</span>' +
+                    '<button type="button" class="remove-filter-btn" onclick="removeFilterRow(this)">&times;</button>';
+
+                list.appendChild(row);
+                setDirty();
+                updateEmptyState();
+            }
+
+            function renderDomains(row) {
+                var domains = row.querySelector('.filter-domains');
+                if (!domains) return;
+                var ble = row.getAttribute('data-ble') === 'true';
+                var wifi = row.getAttribute('data-wifi') === 'true';
+                domains.innerHTML =
+                    '<span class="match-badge type-BLE' + (ble ? '' : ' disabled') + '" onclick="toggleBadge(this)">BLE</span>' +
+                    '<span class="match-badge type-WiFi' + (wifi ? '' : ' disabled') + '" onclick="toggleBadge(this)">WiFi</span>';
+            }
+
+            function removeFilterRow(buttonEl) {
+                var row = buttonEl.closest('.filter-row');
+                if (!row) return;
+                if (row.getAttribute('data-preset') === 'true') return;
+                row.remove();
+                setDirty();
+                updateEmptyState();
+            }
+
+            function toggleBadge(badgeEl) {
+                var row = badgeEl.closest('.filter-row');
+                if (!row) return;
+                if (row.getAttribute('data-preset') === 'true') return;
+
+                var text = badgeEl.textContent.trim();
+                if (text === 'BLE') {
+                    var current = row.getAttribute('data-ble') === 'true';
+                    row.setAttribute('data-ble', current ? 'false' : 'true');
+                    badgeEl.classList.toggle('disabled', !current);
+                } else if (text === 'WiFi') {
+                    var current = row.getAttribute('data-wifi') === 'true';
+                    row.setAttribute('data-wifi', current ? 'false' : 'true');
+                    badgeEl.classList.toggle('disabled', !current);
+                }
+
+                setDirty();
+            }
+
+            function addFilterFromInput() {
+                var input = document.getElementById('filterInput');
+                var raw = input.value.trim();
+                if (!raw) {
+                    alert('Please enter an OUI or MAC address.');
+                    return;
+                }
+                var clean = validateHexString(raw);
+                if (!clean) {
+                    alert('Invalid format. Use XX:XX:XX (OUI) or XX:XX:XX:XX:XX:XX (full MAC).');
+                    return;
+                }
+                addFilterRow(clean, true, true, '');
+                input.value = '';
+                input.focus();
+            }
+
+            function buildFilterList() {
+                var list = document.getElementById('filterList');
+                var rows = list.querySelectorAll('.filter-row');
+                var filters = [];
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i];
+                    if (r.getAttribute('data-preset') === 'true') continue;
+                    filters.push({
+                        oui: r.getAttribute('data-oui'),
+                        ble: r.getAttribute('data-ble') === 'true',
+                        wifi: r.getAttribute('data-wifi') === 'true',
+                        desc: r.getAttribute('data-desc') || ''
+                    });
+                }
+                var hidden = document.getElementById('filtersJson');
+                if (hidden) hidden.value = JSON.stringify(filters);
+                return filters;
+            }
+
+            function renderFilterList(htmlString) {
+                var list = document.getElementById('filterList');
+                if (list) {
+                    list.innerHTML = htmlString;
+                    updateEmptyState();
+                }
+            }
+
+            function showEmptyState() {
+                var el = document.getElementById('emptyFilterMsg');
+                if (el) el.style.display = 'block';
+            }
+
+            function hideEmptyState() {
+                var el = document.getElementById('emptyFilterMsg');
+                if (el) el.style.display = 'none';
+            }
+
+            function updateEmptyState() {
+                var list = document.getElementById('filterList');
+                if (!list) return;
+                var rows = list.querySelectorAll('.filter-row');
+                if (rows.length === 0) {
+                    showEmptyState();
+                } else {
+                    hideEmptyState();
+                }
+            }
+
+            // Form submit handler: serialize filter list before submit
+            (function() {
+                var form = document.getElementById('configForm');
+                if (form) {
+                    form.addEventListener('submit', function() {
+                        buildFilterList();
+                    });
+                }
+            })();
+
+            // On page load: ensure empty state matches initial filter list
+            window.addEventListener('DOMContentLoaded', function() {
+                updateEmptyState();
+            });
             // populate preset signature lines on load
             loadSigLines();
         </script>
@@ -2376,17 +2986,142 @@ String generateRandomMAC() {
     return mac;
 }
 
+// Escape HTML special characters for safe embedding in template output.
+static String escapeHtmlAttr(const String& s) {
+    String out = s;
+    out.replace("&", "&amp;");
+    out.replace("\"", "&quot;");
+    out.replace("<", "&lt;");
+    out.replace(">", "&gt;");
+    out.replace("%", "%%");
+    return out;
+}
+
+// Format a bare hex string (6-char OUI or 12-char MAC) with colons, uppercase.
+static String formatHexString(const String& hex) {
+    String out = "";
+    for (int i = 0; i < hex.length() && i < 12; i += 2) {
+        if (i > 0) out += ":";
+        out += hex.substring(i, i + 2);
+    }
+    out.toUpperCase();
+    return out;
+}
+
 String configProcessor(const String& var) {
-    if (var == "OUI_VALUES") {
-        String v;
-        for (const TargetFilter& f : targetFilters) { if (!f.isFullMAC) { if (v.length()) v += "\n"; v += f.identifier; } }
-        return v;
+    // NEW: unified filter list rows — replaces %OUI_VALUES% and %MAC_VALUES%
+    if (var == "FILTER_LIST_ROWS") {
+        String rows;
+
+        // Group FT_MAC_PREFIX, FT_WIFI_PROBE, FT_WIFI_BEACON, FT_FULL_MAC by identifier.
+        // For OUI types, first 6 chars of identifier (the OUI) is the grouping key.
+        // Collect unique keys in order of first appearance.
+        typedef struct { String key; String display; bool ble; bool wifi; bool fullMac; String desc; } OuiGroup;
+        std::vector<OuiGroup> groups;
+
+        for (const TargetFilter& f : targetFilters) {
+            if (f.type == FT_MAC_PREFIX || f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON) {
+                // Group key = first 6 chars of identifier (the OUI)
+                String key = f.identifier.substring(0, 6);
+                key.toUpperCase();
+
+                // Find or create group
+                bool found = false;
+                for (auto& g : groups) {
+                    if (g.key == key) {
+                        found = true;
+                        if (f.type == FT_MAC_PREFIX) g.ble = true;
+                        if (f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON) g.wifi = true;
+                        // Keep the longest/most descriptive description
+                        if (f.description.length() > g.desc.length()) g.desc = f.description;
+                        break;
+                    }
+                }
+                if (!found) {
+                    OuiGroup g;
+                    g.key = key;
+                    g.display = formatHexString(key);
+                    g.ble = (f.type == FT_MAC_PREFIX);
+                    g.wifi = (f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON);
+                    g.fullMac = false;
+                    g.desc = f.description;
+                    groups.push_back(g);
+                }
+            } else if (f.type == FT_FULL_MAC) {
+                // Full MAC — each is its own row, grouped by full 12-char identifier
+                String key = f.identifier.substring(0, 12);
+                key.toUpperCase();
+                // Check for duplicate
+                bool found = false;
+                for (const auto& g : groups) {
+                    if (g.key == key) { found = true; break; }
+                }
+                if (!found) {
+                    OuiGroup g;
+                    g.key = key;
+                    g.display = formatHexString(key);
+                    g.ble = true; // Full MAC shown as BLE by default
+                    g.wifi = false;
+                    g.fullMac = true;
+                    g.desc = f.description;
+                    groups.push_back(g);
+                }
+            }
+            // Non-OUI types (CID, SVC, NAME, META) handled below
+        }
+
+        // Build HTML rows for grouped OUI/MAC entries
+        for (const auto& g : groups) {
+            String escapedDesc = escapeHtmlAttr(g.desc);
+            String escapedOui = escapeHtmlAttr(g.key);
+            String escapedDisplay = escapeHtmlAttr(g.display);
+            String bleAttr = g.ble ? "true" : "false";
+            String wifiAttr = g.wifi ? "true" : "false";
+
+            rows += "<div class=\"filter-row\" data-oui=\"" + escapedOui + "\" data-ble=\"" + bleAttr + "\" data-wifi=\"" + wifiAttr + "\" data-desc=\"" + escapedDesc + "\">";
+            rows += "<span class=\"device-mac\">" + escapedDisplay + "</span>";
+            rows += "<span class=\"filter-domains\">";
+            String bleClass = g.ble ? "" : " disabled";
+            rows += "<span class=\"match-badge type-BLE" + bleClass + "\" onclick=\"toggleBadge(this)\">BLE</span>";
+            String wifiClass = g.wifi ? "" : " disabled";
+            rows += "<span class=\"match-badge type-WiFi" + wifiClass + "\" onclick=\"toggleBadge(this)\">WiFi</span>";
+            rows += "</span>";
+            if (!g.fullMac) {
+                rows += "<button type=\"button\" class=\"remove-filter-btn\" onclick=\"removeFilterRow(this)\">&times;</button>";
+            }
+            rows += "</div>";
+        }
+
+        // Preset-only rows: FT_COMPANY_ID, FT_SERVICE_UUID_16, FT_NAME_SUBSTRING, FT_META_COMPOSITE
+        for (const TargetFilter& f : targetFilters) {
+            if (f.type != FT_COMPANY_ID && f.type != FT_SERVICE_UUID_16 &&
+                f.type != FT_NAME_SUBSTRING && f.type != FT_META_COMPOSITE) continue;
+
+            String badgeType = String(filterTypeCode(f.type));
+            String escapedDesc = escapeHtmlAttr(f.description);
+            String escapedId = escapeHtmlAttr(f.identifier);
+            // Format identifier for display — short hex values as colon-separated
+            String displayId = f.identifier;
+            if (displayId.length() == 4) {
+                displayId = displayId.substring(0,2) + ":" + displayId.substring(2,4);
+            }
+            displayId.toUpperCase();
+            String escapedDisplay = escapeHtmlAttr(displayId);
+
+            rows += "<div class=\"filter-row preset-only\" data-preset=\"true\" data-oui=\"" + escapedId + "\">";
+            rows += "<span class=\"device-mac\">" + escapedDisplay + "</span>";
+            rows += "<span class=\"filter-domains\"><span class=\"match-badge type-" + badgeType + "\">" + badgeType + "</span></span>";
+            rows += "<span class=\"device-filter\">" + escapedDesc + "</span>";
+            rows += "</div>";
+        }
+
+        return rows;
     }
-    if (var == "MAC_VALUES") {
-        String v;
-        for (const TargetFilter& f : targetFilters) { if (f.isFullMAC) { if (v.length()) v += "\n"; v += f.identifier; } }
-        return v;
-    }
+
+    // Legacy placeholders — kept for backward compat but render empty
+    if (var == "OUI_VALUES") return "";
+    if (var == "MAC_VALUES") return "";
+
     if (var == "BUZZER_CHECKED") return buzzerEnabled ? "checked" : "";
     if (var == "LED_CHECKED") return ledEnabled ? "checked" : "";
     if (var == "AP_SSID") return AP_SSID;
@@ -2404,6 +3139,96 @@ String configProcessor(const String& var) {
     return String();
 }
 
+// Shared: parse the 'filters' JSON form field and rebuild targetFilters.
+// Clears user-managed filter types (FT_MAC_PREFIX, FT_FULL_MAC,
+// FT_WIFI_PROBE, FT_WIFI_BEACON) first; preserves preset-only types.
+// Returns the number of new filter entries added.
+static int parseFiltersFromJSON(AsyncWebServerRequest *request) {
+    // Clear user-managed filter types
+    targetFilters.erase(
+        std::remove_if(targetFilters.begin(), targetFilters.end(),
+            [](const TargetFilter& f) {
+                return f.type == FT_MAC_PREFIX || f.type == FT_FULL_MAC ||
+                       f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON;
+            }),
+        targetFilters.end());
+
+    if (!request->hasParam("filters", true)) {
+        return 0;
+    }
+    String filtersJson = request->getParam("filters", true)->value();
+    filtersJson.trim();
+    if (filtersJson.length() == 0) return 0;
+
+    StaticJsonDocument<2048> doc;
+    DeserializationError err = deserializeJson(doc, filtersJson);
+    if (err.code() != DeserializationError::Ok) {
+        if (isSerialConnected()) Serial.print("filters JSON parse error: ");
+        if (isSerialConnected()) Serial.println(err.c_str());
+        return 0;
+    }
+
+    int added = 0;
+    if (!doc.is<JsonArray>()) return 0;
+    for (JsonObject entry : doc.as<JsonArray>()) {
+        const char* ouiRaw = entry["oui"];
+        if (ouiRaw == NULL || strlen(ouiRaw) == 0) continue;
+
+        // Normalize OUI to uppercase bare hex (6 or 12 chars), strip colons
+        String ouiStr(ouiRaw);
+        ouiStr.toUpperCase();
+        ouiStr.replace(":", "");
+        ouiStr.replace("-", "");
+
+        bool ble = entry["ble"] | false;
+        bool wifi = entry["wifi"] | false;
+        const char* descRaw = entry["desc"];
+        String desc = descRaw ? String(descRaw) : "";
+
+        // Detect full MAC (12 hex chars) vs OUI (6 hex chars)
+        bool isFullMac = (ouiStr.length() == 12);
+
+        if (isFullMac) {
+            // Full MAC entry — treat as FT_FULL_MAC, BLE by default
+            TargetFilter f;
+            f.identifier = ouiStr;
+            f.description = desc.isEmpty() ? "MAC: " + ouiStr : desc;
+            f.isFullMAC = true;
+            f.type = FT_FULL_MAC;
+            targetFilters.push_back(f);
+            added++;
+        } else {
+            // OUI entry — expand based on ble/wifi flags
+            String normalizedOUI = ouiStr;
+            normalizedOUI.toUpperCase();
+
+            if (ble) {
+                TargetFilter f;
+                f.identifier = normalizedOUI;
+                // Format with colons for description
+                String formatted = normalizedOUI.substring(0,2) + ":" + normalizedOUI.substring(2,4) + ":" + normalizedOUI.substring(4,6);
+                f.description = desc.isEmpty() ? "OUI: " + formatted : desc;
+                f.isFullMAC = false;
+                f.type = FT_MAC_PREFIX;
+                targetFilters.push_back(f);
+                added++;
+            }
+            if (wifi) {
+                TargetFilter f;
+                f.identifier = normalizedOUI;
+                String formatted = normalizedOUI.substring(0,2) + ":" + normalizedOUI.substring(2,4) + ":" + normalizedOUI.substring(4,6);
+                f.description = desc.isEmpty() ? "OUI: " + formatted + " (WiFi)" : desc;
+                f.isFullMAC = false;
+                f.type = FT_WIFI_PROBE;
+                targetFilters.push_back(f);
+                added++;
+            }
+        }
+    }
+    rebuildWifiOuiTable();
+    return added;
+}
+
 // Android captive portal detection (expects 204 response, we send redirect instead)
 void handleGenerate204(AsyncWebServerRequest *request) {
     request->redirect("http://192.168.4.1/");
@@ -2418,7 +3243,6 @@ void handleCaptiveDetect(AsyncWebServerRequest *request) {
 // ================================
 void startConfigMode() {
     currentMode = CONFIG_MODE;
-    // configStartTime will be set AFTER AP is fully ready
     
     Serial.println("\n=== STARTING CONFIG MODE ===");
     Serial.println("SSID: " + AP_SSID);
@@ -2455,108 +3279,29 @@ void startConfigMode() {
     Serial.println("DNS server started (captive portal active)");
     Serial.println("==============================\n");
     
-    // NOW start the countdown - AP is fully ready and visible
-    configStartTime = millis();
-    lastConfigActivity = millis();
-    
     // Setup web server routes
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         request->send_P(200, "text/html", CONFIG_HTML, configProcessor);
     });
     
     server.on("/save", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
 
         if (isSerialConnected()) {
             Serial.println("\n=== WEB CONFIG SUBMISSION ===");
         }
 
-        // The textareas only speak MAC/OUI. Preserve any preset-installed
-        // filters (company IDs, service UUIDs, name substrings) so the
-        // /save round-trip doesn't nuke them.
-        targetFilters.erase(
-            std::remove_if(targetFilters.begin(), targetFilters.end(),
-                [](const TargetFilter& f) {
-                    return f.type == FT_MAC_PREFIX || f.type == FT_FULL_MAC;
-                }),
-            targetFilters.end());
+        // Parse filters from JSON array (new filter UI format)
+        int filterCount = parseFiltersFromJSON(request);
 
-        // Process OUI entries
-        if (request->hasParam("ouis", true)) {
-            String ouiData = request->getParam("ouis", true)->value();
-            ouiData.trim();
-            
-            if (ouiData.length() > 0) {
-                // Split by newlines and process each OUI
-                int start = 0;
-                int end = ouiData.indexOf('\n');
-                
-                while (start < ouiData.length()) {
-                    String oui;
-                    if (end == -1) {
-                        oui = ouiData.substring(start);
-                        start = ouiData.length();
-                    } else {
-                        oui = ouiData.substring(start, end);
-                        start = end + 1;
-                        end = ouiData.indexOf('\n', start);
-                    }
-                    
-                    oui.trim();
-                    oui.replace("\r", ""); // Remove carriage returns
-                    
-                    if (oui.length() > 0 && isValidMAC(oui)) {
-                        TargetFilter filter;
-                        filter.identifier = oui;
-                        filter.description = "OUI: " + oui;
-                        filter.isFullMAC = false;
-                        filter.type = FT_MAC_PREFIX;
-                        targetFilters.push_back(filter);
-                    }
-                }
-            }
-        }
-        
-        // Process MAC address entries
-        if (request->hasParam("macs", true)) {
-            String macData = request->getParam("macs", true)->value();
-            macData.trim();
-            
-            if (macData.length() > 0) {
-                // Split by newlines and process each MAC
-                int start = 0;
-                int end = macData.indexOf('\n');
-                
-                while (start < macData.length()) {
-                    String mac;
-                    if (end == -1) {
-                        mac = macData.substring(start);
-                        start = macData.length();
-                    } else {
-                        mac = macData.substring(start, end);
-                        start = end + 1;
-                        end = macData.indexOf('\n', start);
-                    }
-                    
-                    mac.trim();
-                    mac.replace("\r", ""); // Remove carriage returns
-                    
-                    if (mac.length() > 0 && isValidMAC(mac)) {
-                        TargetFilter filter;
-                        filter.identifier = mac;
-                        filter.description = "MAC: " + mac;
-                        filter.isFullMAC = true;
-                        filter.type = FT_FULL_MAC;
-                        targetFilters.push_back(filter);
-                    }
-                }
-            }
-        }
-        
         // Process buzzer and LED toggles
-        buzzerEnabled = request->hasParam("buzzerEnabled", true);
-        ledEnabled = request->hasParam("ledEnabled", true);
+        // (only set to true if explicitly provided — otherwise leave at saved state)
+        if (request->hasParam("buzzerEnabled", true)) {
+            buzzerEnabled = true;
+        }
+        if (request->hasParam("ledEnabled", true)) {
+            ledEnabled = true;
+        }
         
         // Process WiFi credentials
         if (request->hasParam("ap_ssid", true)) {
@@ -2688,7 +3433,7 @@ void startConfigMode() {
     });
     
     server.on("/clear", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         
         // Clear all filters
         targetFilters.clear();
@@ -2703,7 +3448,7 @@ void startConfigMode() {
     
     // Device reset - completely wipe saved config and restart
     server.on("/device-reset", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         
         if (isSerialConnected()) {
             Serial.println("DEVICE RESET - Request received, scheduling reset...");
@@ -2722,7 +3467,7 @@ void startConfigMode() {
     
     // API endpoint to get detected devices
     server.on("/api/devices", HTTP_GET, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         
         String json = "{\"devices\":[";
         
@@ -2762,7 +3507,7 @@ void startConfigMode() {
     
     // API endpoint to save device alias
     server.on("/api/alias", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         
         if (request->hasParam("mac", true) && request->hasParam("alias", true)) {
             String mac = request->getParam("mac", true)->value();
@@ -2785,24 +3530,9 @@ void startConfigMode() {
         }
     });
     
-    // Previous-session panel data source. Serves /session_prev.json
-    // straight from LittleFS; the UI does its own rendering.
-    server.on("/api/session/previous", HTTP_GET, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
-        request->send(200, "application/json", readPreviousSessionJson());
-    });
-
-    // Clear the previous-session file so the panel disappears on the
-    // next dashboard refresh. Does not touch the current session.
-    server.on("/api/session/clear_previous", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
-        clearPreviousSessionFile();
-        request->send(200, "application/json", "{\"success\":true}");
-    });
-
     // API endpoint to clear device history
     server.on("/api/clear-devices", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         
         clearDetectedDevices();
         
@@ -2815,113 +3545,26 @@ void startConfigMode() {
     
     // API endpoint to lock/burn-in configuration
     server.on("/api/lock-config", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
-        
+
         if (isSerialConnected()) {
             Serial.println("======================================");
             Serial.println("CONFIGURATION LOCK REQUESTED");
             Serial.println("Saving current form values before locking...");
             Serial.println("======================================");
         }
-        
-        // Process and save current form values (same logic as /save endpoint).
-        // Only drop the MAC/OUI-backed filters — those are the ones the
-        // textareas own. Preset-installed filters (company ID, service UUID,
-        // name substring) have no textarea representation, so clearing the
-        // whole vector here would silently delete them on burn-in.
-        targetFilters.erase(
-            std::remove_if(targetFilters.begin(), targetFilters.end(),
-                [](const TargetFilter& f) {
-                    return f.type == FT_MAC_PREFIX || f.type == FT_FULL_MAC;
-                }),
-            targetFilters.end());
-        
-        // Process OUI entries
-        if (request->hasParam("ouis", true)) {
-            String ouiData = request->getParam("ouis", true)->value();
-            ouiData.trim();
-            
-            if (isSerialConnected()) {
-                Serial.println("Received OUI data length: " + String(ouiData.length()));
-                Serial.println("OUI data: [" + ouiData + "]");
-            }
-            
-            if (ouiData.length() > 0) {
-                // Split by newlines and process each OUI
-                int start = 0;
-                int end = ouiData.indexOf('\n');
-                
-                while (start < ouiData.length()) {
-                    String oui;
-                    if (end == -1) {
-                        oui = ouiData.substring(start);
-                        start = ouiData.length();
-                    } else {
-                        oui = ouiData.substring(start, end);
-                        start = end + 1;
-                        end = ouiData.indexOf('\n', start);
-                    }
-                    
-                    oui.trim();
-                    oui.replace("\r", ""); // Remove carriage returns
-                    
-                    if (oui.length() > 0 && isValidMAC(oui)) {
-                        TargetFilter filter;
-                        filter.identifier = oui;
-                        filter.description = "OUI: " + oui;
-                        filter.isFullMAC = false;
-                        filter.type = FT_MAC_PREFIX;
-                        targetFilters.push_back(filter);
-                    }
-                }
-            }
-        }
-        
-        // Process MAC address entries
-        if (request->hasParam("macs", true)) {
-            String macData = request->getParam("macs", true)->value();
-            macData.trim();
-            
-            if (isSerialConnected()) {
-                Serial.println("Received MAC data length: " + String(macData.length()));
-                Serial.println("MAC data: [" + macData + "]");
-            }
-            
-            if (macData.length() > 0) {
-                // Split by newlines and process each MAC
-                int start = 0;
-                int end = macData.indexOf('\n');
-                
-                while (start < macData.length()) {
-                    String mac;
-                    if (end == -1) {
-                        mac = macData.substring(start);
-                        start = macData.length();
-                    } else {
-                        mac = macData.substring(start, end);
-                        start = end + 1;
-                        end = macData.indexOf('\n', start);
-                    }
-                    
-                    mac.trim();
-                    mac.replace("\r", ""); // Remove carriage returns
-                    
-                    if (mac.length() > 0 && isValidMAC(mac)) {
-                        TargetFilter filter;
-                        filter.identifier = mac;
-                        filter.description = "MAC: " + mac;
-                        filter.isFullMAC = true;
-                        filter.type = FT_FULL_MAC;
-                        targetFilters.push_back(filter);
-                    }
-                }
-            }
-        }
-        
+
+        // Parse filters from JSON array (same shared logic as /save)
+        parseFiltersFromJSON(request);
+
         // Process buzzer and LED toggles
-        buzzerEnabled = request->hasParam("buzzerEnabled", true);
-        ledEnabled = request->hasParam("ledEnabled", true);
-        
+        // (only set to true if explicitly provided — otherwise leave at saved state)
+        if (request->hasParam("buzzerEnabled", true)) {
+            buzzerEnabled = true;
+        }
+        if (request->hasParam("ledEnabled", true)) {
+            ledEnabled = true;
+        }
+
         // Process WiFi credentials
         if (request->hasParam("ap_ssid", true)) {
             String newSSID = request->getParam("ap_ssid", true)->value();
@@ -2930,7 +3573,7 @@ void startConfigMode() {
                 AP_SSID = newSSID;
             }
         }
-        
+
         if (request->hasParam("ap_password", true)) {
             String newPassword = request->getParam("ap_password", true)->value();
             newPassword.trim();
@@ -3085,7 +3728,7 @@ void startConfigMode() {
     // One-click add all known signatures for a device family.
     // POST body/query: name=axon | meta
     server.on("/api/presets/apply", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
 
         String presetName;
         if (request->hasParam("name", true))       presetName = request->getParam("name", true)->value();
@@ -3100,11 +3743,17 @@ void startConfigMode() {
         } else if (presetName == "meta") {
             label = "Meta glasses";
             added = applyPreset(PRESET_META, PRESET_META_COUNT, "Meta glasses");
+        } else if (presetName == "ipro") {
+            label = "I-PRO";
+            added = applyPreset(PRESET_IPRO, PRESET_IPRO_COUNT, "I-PRO");
         } else {
             request->send(400, "application/json",
                 "{\"ok\":false,\"error\":\"unknown preset\"}");
             return;
         }
+
+        // Filter set changed — refresh the promiscuous fast-path OUI table.
+        rebuildWifiOuiTable();
 
         String body = "{\"ok\":true,\"preset\":\"" + presetName + "\",\"label\":\"" + label +
                       "\",\"added\":" + String(added) +
@@ -3118,7 +3767,7 @@ void startConfigMode() {
     });
 
     server.on("/api/presets/remove", HTTP_POST, [](AsyncWebServerRequest *request) {
-        lastConfigActivity = millis();
+
         String n;
         if (request->hasParam("name", true))       n = request->getParam("name", true)->value();
         else if (request->hasParam("name", false)) n = request->getParam("name", false)->value();
@@ -3127,7 +3776,11 @@ void startConfigMode() {
         int removed = 0;
         if (n == "axon")           removed = removePreset(PRESET_AXON, PRESET_AXON_COUNT);
         else if (n == "meta")      removed = removePreset(PRESET_META, PRESET_META_COUNT);
+        else if (n == "ipro")      removed = removePreset(PRESET_IPRO, PRESET_IPRO_COUNT);
         else { request->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown preset\"}"); return; }
+
+        // Filter set changed — refresh the promiscuous fast-path OUI table.
+        rebuildWifiOuiTable();
 
         request->send(200, "application/json",
             "{\"ok\":true,\"removed\":" + String(removed) +
@@ -3139,6 +3792,8 @@ void startConfigMode() {
         body += presetInstalled(PRESET_AXON, PRESET_AXON_COUNT) ? "true" : "false";
         body += ",\"meta\":";
         body += presetInstalled(PRESET_META, PRESET_META_COUNT) ? "true" : "false";
+        body += ",\"ipro\":";
+        body += presetInstalled(PRESET_IPRO, PRESET_IPRO_COUNT) ? "true" : "false";
         body += "}";
         request->send(200, "application/json", body);
     });
@@ -3161,172 +3816,44 @@ void startConfigMode() {
 }
 
 // ================================
-// BLE Advertised Device Callback Class
-// ================================
-class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
-    void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
-        if (currentMode != SCANNING_MODE) return;
-        
-        String mac = advertisedDevice->getAddress().toString().c_str();
-        int rssi = advertisedDevice->getRSSI();
-        unsigned long currentMillis = millis();
-
-        String matchedDescription;
-        String matchedIdent;
-        FilterType matchedTypeOut = FT_MAC_PREFIX;
-        bool matchFound = matchesTargetFilter(advertisedDevice, mac,
-                                              matchedDescription, matchedIdent,
-                                              matchedTypeOut);
-
-        // Meta / Ray-Ban composite detection runs inside matchesTargetFilter
-        // when (and only when) the META preset is installed — no filter, no
-        // trigger.
-
-        if (matchFound) {
-            bool known = false;
-            for (auto& dev : devices) {
-                if (dev.macAddress == mac) {
-                    known = true;
-
-                    if (dev.inCooldown && currentMillis < dev.cooldownUntil) {
-                        return;
-                    }
-
-                    if (dev.inCooldown && currentMillis >= dev.cooldownUntil) {
-                        dev.inCooldown = false;
-                    }
-
-                    unsigned long timeSinceLastSeen = currentMillis - dev.lastSeen;
-
-                    if (timeSinceLastSeen >= 30000) {
-                        // Store data for main loop to process
-                        detectedMAC = mac;
-                        detectedRSSI = rssi;
-                        matchedFilter = matchedDescription;
-                        matchType = "RE-30s";
-                        newMatchFound = true;
-                        
-                        threeBeeps();
-                        dev.inCooldown = true;
-                        dev.cooldownUntil = currentMillis + 10000;
-                    } else if (timeSinceLastSeen >= 3000) {
-                        // Store data for main loop to process
-                        detectedMAC = mac;
-                        detectedRSSI = rssi;
-                        matchedFilter = matchedDescription;
-                        matchType = "RE-3s";
-                        newMatchFound = true;
-                        
-                        twoBeeps();
-                        dev.inCooldown = true;
-                        dev.cooldownUntil = currentMillis + 3000;
-                    }
-
-                    dev.lastSeen = currentMillis;
-                    break;
-                }
-            }
-
-            if (!known) {
-                DeviceInfo newDev;
-                newDev.macAddress = mac;
-                newDev.rssi = rssi;
-                newDev.firstSeen = currentMillis;
-                newDev.lastSeen = currentMillis;
-                newDev.inCooldown = false;
-                newDev.cooldownUntil = 0;
-                newDev.matchedFilter = matchedDescription.c_str();
-                newDev.filterDescription = matchedDescription;
-                newDev.matchedIdentifier = matchedIdent;
-                newDev.matchedType = matchedTypeOut;
-                devices.push_back(newDev);
-
-                // LRU-drop oldest so the session cap holds even with a
-                // firehose of unique MACs.
-                while (devices.size() > 200) {
-                    devices.erase(devices.begin());
-                }
-
-                // Store data for main loop to process
-                detectedMAC = mac;
-                detectedRSSI = rssi;
-                matchedFilter = matchedDescription;
-                matchType = "NEW";
-                newMatchFound = true;
-                sessionDirty  = true;  // main loop will flush to LittleFS
-
-                threeBeeps();
-
-                auto& dev = devices.back();
-                dev.inCooldown = true;
-                dev.cooldownUntil = currentMillis + 3000;
-            }
-        }
-    }
-};
-
 void startScanningMode() {
     currentMode = SCANNING_MODE;
-    
-    // Stop DNS server, web server, and AP
-    dnsServer.stop();
-    server.end();
-    WiFi.softAPdisconnect(true);
 
-    if (mqttCfg.enabled && mqttCfg.sta_ssid[0] && mqttCfg.broker[0]) {
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
-        Serial.printf("WiFi STA connecting to %s\n", mqttCfg.sta_ssid);
-        unsigned long ws = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - ws < 10000) delay(250);
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("WiFi connected: " + WiFi.localIP().toString());
-            mqtt_connect();
-        } else {
-            Serial.println("WiFi STA failed, continuing offline");
-            WiFi.mode(WIFI_OFF);
-        }
-    } else {
-        WiFi.mode(WIFI_OFF);
+    // One-time radio/BLE/WiFi initialization (idempotent)
+    scan_init();
+
+    // Determine which domains are needed
+    bool hasWifiFilters = false;
+    bool hasBleFilters = false;
+    for (const TargetFilter& f : targetFilters) {
+        if (isWifiDomain(f.type)) hasWifiFilters = true;
+        else hasBleFilters = true;
     }
-    
+
     if (isSerialConnected()) {
         Serial.println("\n=== STARTING SCANNING MODE ===");
         Serial.println("Configured Filters:");
         for (const TargetFilter& filter : targetFilters) {
-            String type = filter.isFullMAC ? "Full MAC" : "OUI";
+            String type = String(filterTypeCode(filter.type));
             Serial.println("- " + filter.identifier + " (" + type + "): " + filter.description);
         }
         Serial.println("==============================\n");
     }
-    
-    // Initialize BLE (but don't start scanning yet)
-    NimBLEDevice::init("");
-    delay(1000);
-    
-    // Setup BLE scanning (but don't start)
-    pBLEScan = NimBLEDevice::getScan();
-    if (pBLEScan != nullptr) {
-        pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-        pBLEScan->setActiveScan(true);
-        pBLEScan->setInterval(300);
-        pBLEScan->setWindow(200);
-    }
-    
+
     // Ready to scan - ascending beeps (no interference possible)
     delay(500);
     ascendingBeeps();
-    
+
     // 2-second pause after ready signal
     delay(2000);
-    
-    // NOW start BLE scanning - after ready signal is complete
-    if (pBLEScan != nullptr) {
-        pBLEScan->start(3, nullptr, false);
-        
-        if (isSerialConnected()) {
-            Serial.println("BLE scanning started!");
-        }
+
+    // Transition to the appropriate initial phase
+    g_phaseStartTime = millis();
+    g_lastHopTime = millis();
+    if (hasWifiFilters) {
+        scan_to_wifi_sweep();
+    } else if (hasBleFilters) {
+        scan_to_ble_scan();
     }
 }
 
@@ -3402,9 +3929,10 @@ void setup() {
     
     initializeBuzzer();
     
-    // Test buzzer
-    singleBeep();
+    // The boot melody replaces the old single test beep
     delay(500);
+    playBoot();
+    if (isSerialConnected()) Serial.println("[BOOT] Boot melody done");
     
     initializeNeoPixel();
     
@@ -3436,15 +3964,11 @@ void setup() {
     } else {
         // Load configuration from NVS
         loadConfiguration();
+        rebuildWifiOuiTable();
         loadWiFiCredentials();
         mqtt_loadConfig();
         loadDeviceAliases();
     }
-
-    // Detections now live in LittleFS as a rolling session, promoted to
-    // /session_prev.json on each boot. devices[] starts empty; the
-    // dashboard's PREVIOUS SESSION panel reads the prev file directly.
-    rotateSessionFiles();
     
     // Check if configuration is locked/burned in
     preferences.begin("ouispy", true);
@@ -3554,33 +4078,7 @@ void loop() {
             return;
         }
         
-        // Check for config timeout 
-        if (targetFilters.size() == 0) {
-            // No saved filters - stay in config mode indefinitely
-            if (currentMillis - configStartTime > CONFIG_TIMEOUT && lastConfigActivity == configStartTime) {
-                if (isSerialConnected()) {
-                    Serial.println("No one connected and no saved filters - staying in config mode");
-                    Serial.println("Connect to '" + AP_SSID + "' AP to configure your first filters!");
-                }
-            }
-        } else if (targetFilters.size() > 0) {
-            // Have saved filters - timeout only if no one connected
-            if (currentMillis - configStartTime > CONFIG_TIMEOUT && lastConfigActivity == configStartTime) {
-                if (isSerialConnected()) {
-                    Serial.println("No one connected within 20s - using saved filters, switching to scanning mode");
-                }
-                startScanningMode();
-            } else if (lastConfigActivity > configStartTime) {
-                // Someone connected - wait for them to submit (no timeout)
-                if (isSerialConnected() && currentMillis - configStartTime > CONFIG_TIMEOUT) {
-                    static unsigned long lastConnectedMsg = 0;
-                    if (currentMillis - lastConnectedMsg > 30000) { // Print every 30s
-                        Serial.println("Web interface connected - waiting for configuration submission...");
-                        lastConnectedMsg = currentMillis;
-                    }
-                }
-            }
-        }
+        // Stay in config mode until the web UI submits a config
         
         // Process DNS requests for captive portal
         dnsServer.processNextRequest();
@@ -3590,45 +4088,76 @@ void loop() {
         return;
     }
     
-    // Scanning mode loop
+    // Scanning mode loop — time-sliced WiFi/BLE with ring-buffer drain
     if (currentMode == SCANNING_MODE) {
-        // Handle match detection messages (JSON output for API)
-        if (newMatchFound) {
-            String alias = getDeviceAlias(detectedMAC);
-            char json[256];
-            snprintf(json, sizeof(json),
-                "{\"mac\":\"%s\",\"alias\":\"%s\",\"rssi\":%d}",
-                detectedMAC.c_str(), alias.c_str(), detectedRSSI);
-            if (isSerialConnected()) Serial.println(json);
+        while (true) {
+            unsigned long currentMillis = millis();
+            bool hasWifiFilters = false;
+        bool hasBleFilters = false;
+        for (const TargetFilter& f : targetFilters) {
+            if (isWifiDomain(f.type)) hasWifiFilters = true;
+            else hasBleFilters = true;
+        }
+
+        if (!hasWifiFilters && !hasBleFilters) {
+            scan_exit();
+            delay(100);
+            return;
+        }
+
+        unsigned long phaseDur = (g_radioPhase == PHASE_WIFI_SWEEP) ? WIFI_SWEEP_MS : BLE_SCAN_MS;
+
+        // Phase transition on timeout
+        if (currentMillis - g_phaseStartTime >= phaseDur) {
+            if (hasWifiFilters && hasBleFilters) {
+                if (g_radioPhase == PHASE_WIFI_SWEEP) {
+                    scan_to_ble_scan();
+                } else {
+                    scan_to_wifi_sweep();
+                }
+            }
+            g_phaseStartTime = currentMillis;
+        }
+
+        // Channel hop while in WiFi sweep phase
+        if (g_radioPhase == PHASE_WIFI_SWEEP && hasWifiFilters) {
+            if (currentMillis - g_lastHopTime >= WIFI_HOP_MS) {
+                scan_wifi_hop_channel();
+                g_lastHopTime = currentMillis;
+            }
+        }
+
+        // Drain the ring buffer — replaces old newMatchFound polling
+        if (detQueueCount > 0) {
+            uint8_t tail = detQueueTail;
+            DetectionEntry* e = &detQueue[tail];
+            String alias = getDeviceAlias(String(e->mac));
+            String payload = "{\"mac\":\"" + String(e->mac) + "\",\"alias\":\"" + alias +
+                             "\",\"rssi\":" + String(e->rssi) + ",\"type\":\"" +
+                             filterTypeCode(e->matchedType) + "\",\"match\":\"" +
+                             e->identifier + "\",\"desc\":\"" + e->description + "\"}";
+            if (isSerialConnected()) Serial.println(payload);
             if (mqttConnected) {
-                mqtt_publish(mqttCfg.topic, json);
+                mqtt_publish(mqttCfg.topic, payload.c_str());
                 lastDetectionTime = currentMillis;
                 detectionActive = true;
             }
-            newMatchFound = false;
-        }
-        
-        // Restart BLE scan every 3 seconds
-        if (currentMillis - lastScanTime >= 3000) {
-            pBLEScan->stop();
-            delay(10);
-            pBLEScan->start(2, nullptr, false);
-            lastScanTime = currentMillis;
-        }
+            detQueueTail = (detQueueTail + 1) % DET_QUEUE_SIZE;
+            detQueueCount--;
 
-        // Flush session file whenever a NEW detection landed. Doing the
-        // I/O here (not in the BLE callback) keeps NimBLE off the flash
-        // driver's toes.
-        if (sessionDirty) {
-            sessionDirty = false;
-            writeCurrentSession();
-        }
-
-        // Belt-and-suspenders periodic flush in case last_ms on existing
-        // rows drifted and we want it durable across a crash.
-        if (currentMillis - lastCleanupTime >= 30000) {
-            lastCleanupTime = currentMillis;
-            if (!devices.empty()) writeCurrentSession();
+            // Alert the user. Do it here in the main loop, not in the NimBLE
+            // host callback or the WiFi driver ISR — blocking those tasks
+            // with multi-hundred-ms delays destabilizes the stacks.
+            startDetectionFlash();
+            if (e->matchType[0] == 'N') {           // "NEW"
+                threeBeeps();
+            } else if (strncmp(e->matchType, "RE-30s", 6) == 0 ||
+                       strncmp(e->matchType, "RE", 2) == 0) {
+                threeBeeps();
+            } else {                                // "RE-3s"
+                twoBeeps();
+            }
+            continue;  // drain all before continuing
         }
 
         // Status report disabled - using JSON output only
@@ -3637,8 +4166,17 @@ void loop() {
         }
 
         mqtt_loop(currentMillis);
+        delay(1);
+        
+        // Periodic heartbeat to confirm loop is alive
+        static unsigned long lastHeartbeat = 0;
+        if (currentMillis - lastHeartbeat >= 5000) {
+            lastHeartbeat = currentMillis;
+            if (isSerialConnected()) Serial.printf("[HEARTBEAT] phase=%d ch=%d dev=%zu\n", g_radioPhase, g_wifiChannel, devices.size());
+        }
+        }
     }
-    
+
     // Update NeoPixel animation
     updateNeoPixelAnimation();
     

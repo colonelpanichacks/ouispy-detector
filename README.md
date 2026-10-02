@@ -1,8 +1,8 @@
-# OUI-SPY - Detector
+# OUI-SPY - Detector (Dual Domain Edition)
 
 ![OUI-SPY](ouispy.png)
 
-Professional BLE scanning system that detects specific devices by MAC address or OUI with audio feedback.
+Professional dual-domain (BLE + WiFi) scanning system that detects specific devices by MAC address or OUI with audio feedback. BLE advertisements and 802.11 management frames (probe requests / beacons) are detected on the shared 2.4 GHz radio via time-sliced scanning.
 
 ## Hardware
 
@@ -22,7 +22,7 @@ Professional BLE scanning system that detects specific devices by MAC address or
 
 1. **Power on device** - Creates WiFi AP `snoopuntothem` (password: `astheysnoopuntous`)
 2. **Connect and configure** - Navigate to `http://192.168.4.1`
-3. **Add targets** - Enter OUI prefixes (`AA:BB:CC`) or full MAC addresses
+3. **Add targets** - Enter OUI prefixes (`AA:BB:CC`), full MAC addresses, or click vendor presets in the OUI Database
 4. **Save configuration** - Device automatically switches to scanning mode
 
 ## Features
@@ -31,72 +31,127 @@ Professional BLE scanning system that detects specific devices by MAC address or
 - Publishes detections to any MQTT broker (Mosquitto, etc.)
 - Auto-discovery: OUI Spy appears as a device in Home Assistant automatically
 - Detection blips: sensor shows MAC on detection, returns to "idle" after 10 seconds of silence
-- WiFi STA auto-reconnect if connection drops
+- WiFi STA connection if alert is detected.
 - Configurable broker, port, credentials, and topic from the web UI
 - No external libraries required (raw MQTT over TCP)
+- Clean socket teardown: MQTT disconnect packet sent before STA is dropped, so the broker sees an orderly disconnect rather than a timed-out session
 
 ### Detection System
-- **One-click vendor signatures:** Add every known signal for Axon from the OUI Database — OUIs, company IDs, service UUIDs
-- OUI filtering for device manufacturers
+- **Dual-domain time-slicing:** The 2.4 GHz radio alternates between WiFi promiscuous sweeps (channels 11→1, 200 ms dwell, ~2.2 s) and BLE active scans (~2.2 s). Each domain runs only if at least one filter of that type is configured; with no filters at all the device idles.
+- **WiFi promiscuous detection:** Matches the source OUI of 802.11 management frames — probe requests (subtype 0x04) and beacons (subtype 0x08) — with per-(MAC, frame type) 30 s de-duplication.
+- **Fast-path OUI pre-check:** A small lookup table of target OUIs is maintained in RAM and rebuilt whenever WiFi filters change. The promiscuous callback drops non-matching frames before doing the full filter comparison, keeping the ISR path lightweight.
+- **Ring-buffer detection queue:** Both the WiFi promiscuous ISR and the BLE callback enqueue detections into a fixed ring. The main loop drains it, handles audio/visual alerts, publishes to MQTT, and writes session data. This prevents back-to-back hits from different devices from overwriting each other.
+- **One-click vendor signatures:** Add every known signal for a device family from the OUI Database — OUIs, company IDs, service UUIDs, and WiFi probe/beacon signatures in a single click.
+- OUI filtering for device manufacturers (BLE and WiFi)
 - Full MAC address matching
-- Persistent configuration storage
-- Automatic timeout handling
+- Persistent configuration storage in NVS (survives reboots)
 
 ### Audio & Visual Feedback
-- **Audio:** 2 ascending beeps (ready), 3 beeps (detection), 2 beeps (re-detection)
-- **Visual:** Pink breathing LED during scanning, blue-pink-purple flash on detection
-- **Synchronized:** LED flashes match beep timing perfectly
+- **Audio:** 2 ascending beeps (ready), 3 beeps (new detection or 30 s re-alert), 2 beeps (3 s re-alert)
+- **Visual:** Pink breathing LED during scanning, blue → pink → purple flash on detection
+- **Synchronized:** LED flashes match beep timing
 - Smart cooldown prevents spam
+- All alerts are driven from the main loop, not from ISR context, so the radio stacks stay stable
 
 ### Privacy
-- MAC address randomization on boot
+- MAC address randomization on boot — both the WiFi MAC and the BLE-origin MAC (the BT DMAC is derived from the same base MAC, so one `esp_wifi_set_mac()` call randomizes both). Disabled when MQTT is enabled so the DHCP lease stays stable.
 - Stealth mode operation
 - No traceable hardware fingerprints
 
 ### Device Management
-- **Device Aliasing:** Assign custom names to detected devices
+- **Device Aliasing:** Assign custom names to detected devices via the web portal
 - **Persistent History:** All detected devices saved to NVS (up to 100 devices)
 - **Automatic Sync:** Device list updates across reboots
 - **Clear History:** Remove all stored device records
-
 ### Burn In Settings
 - **Permanent Lock:** Lock configuration and bypass setup on boot
 - **Instant Scanning:** Device boots directly into scanning mode
 - **Protected Settings:** All filters, aliases, and preferences preserved
-- **Reversible:** Hold the BOOT button 1.5s to clear the lock and return to config mode
+- **Reversible:** Hold the BOOT button 1.5 seconds to clear the lock and reboot into config mode
+
 
 ## Installation
 
-### PlatformIO
+### Prerequisites
+
+Install PlatformIO in a Python virtual environment using the pinned requirements:
+
 ```bash
-cd ouibuzzer-main/ouibuzzer
-python3 -m platformio run --target upload
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
+This gives you `pio` (PlatformIO CLI) with a known-good version of the toolchain.
+
+### Build and Flash
+
+From the repository root:
+
+```bash
+source .venv/bin/activate
+pio run -e seeed_xiao_esp32s3 -t upload
+```
+
+### Open Serial Monitor
+
+```bash
+pio device monitor -b 115200
+```
+
+The firmware expects the XIAO ESP32-S3's USB-CDC serial port to enumerate as a `/dev/ttyACM*` device on Linux. If it doesn't appear, hold the BOOT button while plugging in to force download mode, then flash again.
+
 ### Dependencies
-- NimBLE-Arduino ^1.4.0
-- ESP Async WebServer ^3.0.6
-- Preferences ^2.0.0
-- Adafruit NeoPixel ^1.12.0 (for LED functionality)
+
+Defined in `platformio.ini`; fetched automatically by PlatformIO on first build:
+
+- NimBLE-Arduino ^1.4.0 (BLE scanning)
+- ESP Async WebServer ^3.0.6 (config portal)
+- Adafruit NeoPixel ^1.12.0 (LED)
+- ArduinoJson ^6.21.0 (session persistence)
+- Arduino core 3.3.12 / ESP-IDF v5.5.5 (pinned in `platform_packages` for promiscuous-mode buffer support)
 
 ## Configuration
 
 ### Web Portal
-Access via `http://192.168.4.1` after connecting to `snoopuntothem` AP:
 
-**OUI Prefixes:** `AA:BB:CC` (matches specific manufacturers)
-**MAC Addresses:** `AA:BB:CC:12:34:56` (specific devices)
+Access via `http://192.168.4.1` after connecting to the `snoopuntothem` AP.
 
-Multiple entries supported (one per line).
+**Filter entry:** Type an OUI prefix (`AA:BB:CC`) or full MAC (`AA:BB:CC:12:34:56`) into the filter input, toggle the BLE and/or WiFi badges to select domains, and press **Add Filter**. The row appears with domain badges that can be toggled by clicking them; saving writes the list to NVS.
 
-## NeoPixel Wiring (Optional Enhancement)
+**Vendor presets:** Below the filter list is the OUI Database — a browsable set of known surveillance-hardware vendors. Each card shows the vendor's BLE signatures (OUI prefixes, and where applicable company IDs / service UUIDs / name patterns) plus WiFi probe/beacon signatures. Click **+ Add** to install all signatures for that vendor in one go. Presets merge into the same unified filter list as manual entries — the row shows the vendor label and the domain badges indicate which radios the signature listens on.
 
-### Hardware Requirements
-- Adafruit NeoPixel (WS2812B) or compatible LED
-- ESP32-S3 board (Seeed Xiao ESP32-S3 recommended)
-- **Same firmware works with or without NeoPixel**
+Saved filters persist across reboots. After a reboot into config mode the filter list renders exactly as it was saved, including domain badges.
 
-### Wiring Diagram
+### Filter Types
+
+Eight signature classes across two domains, all rendered as rows in the unified filter list:
+
+| Type | Domain | Matches on | Example |
+|---|---|---|---|
+| **OUI** | BLE | First 3 bytes of the advertising MAC | `00:25:DF` |
+| **MAC** | BLE | Complete 6-byte address | `00:25:DF:12:34:56` |
+| **CID** | BLE | BT SIG manufacturer company ID in advert payload | `0x034D` |
+| **SVC** | BLE | 16-bit BLE service UUID | `0xFC81` |
+| **NAME** | BLE | Case-insensitive substring of the device name | `Ray-Ban` |
+| **META** | BLE | Composite: CID `0x0D53` + svc `0xFD5F` in same advert, or name `Ray-Ban`/`Wayfarer`/`Oakley Meta` | META / RAY-BAN preset |
+| **PROBE** | WiFi | Probe request from a target OUI | `00:25:DF` |
+| **BEACON** | WiFi | Beacon frame from a target OUI | `00:25:DF` |
+
+### OUI Database
+
+The database is maintained in two source files: [`BLEOUIs.md`](BLEOUIs.md) (BLE signatures) and [`WiFiOUIs.md`](WiFiOUIs.md) (WiFi probe/beacon signatures). The sync scripts [`sync-oui-list.py`](sync-oui-list.py) and [`sync-wifi-oui-list.py`](sync-wifi-oui-list.py) regenerate the OUI Database section of the HTML between the `OUI_DB_START`/`OUI_DB_END` markers in `src/main.cpp`.
+
+Run from the repo root after editing either `.md` file:
+
+```bash
+source .venv/bin/activate
+python sync-oui-list.py
+python sync-wifi-oui-list.py
+```
+
+### NeoPixel Wiring (Optional Enhancement)
+
 ```
 ESP32-S3 Xiao    →    NeoPixel
 ─────────────────────────────────
@@ -105,180 +160,41 @@ GPIO4 (D3)       →    Data Input (DIN)
 GND              →    GND (Ground)
 ```
 
-### LED Behavior
-- **Normal Scanning:** Pink breathing animation (smooth brightness fade)
-- **Detection:** Blue → Pink → Purple → Blue flash sequence
-- **Synchronization:** LED flashes perfectly match buzzer beep timing
-- **Brightness:** Normal (50/255), Detection (200/255)
-
-### Filter Types
-
-Six signature classes. The first two are typed into the OUI/MAC boxes; the
-rest are installed from the OUI Database and cannot be expressed as text.
-
-| Type | Matches on | Example |
-|---|---|---|
-| **OUI** | First 3 bytes of the MAC | `00:25:DF` |
-| **MAC** | Complete 6-byte address | `00:25:DF:12:34:56` |
-| **Company ID** | BT SIG manufacturer ID in the advertisement | `0x034D` |
-| **Service UUID** | 16-bit BLE service UUID | `0xFC81` |
-| **Name** | Case-insensitive substring of the device name | `Ray-Ban` |
-| **Meta composite** | CID `0x0D53` + UUID `0xFD5F` in the same advert, or name `Ray-Ban`/`Wayfarer`/`Oakley Meta` | META / RAY-BAN preset |
-
-Format for OUI/MAC supports colons, hyphens, or spaces.
-
-### OUI Database
-
-Below the OUI box is a browsable database of known surveillance hardware —
-RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META / RAY-BAN — each with
-its prefixes, category, and typical devices. Click **+ Add** to append a
-vendor's OUIs to your filter list.
-
-**AXON** carries more than OUIs, so its button reads **+ Add all signatures**:
-
-| Vendor | Signatures installed |
-|---|---|
-| **AXON** | OUI `00:25:DF`, company ID `0x034D` (TASER International), service UUID `0xFC81` |
-
-OUIs alone are the weakest signal — Axon hardware may never expose its OUI
-in a BLE advertisement, so the company ID and service UUID do most of the
-work.
-
-Each added vendor shows one colour-coded line under the OUI box — cyan for
-MAC prefixes, amber for company IDs, green for service UUIDs, purple for name
-patterns, red-pink for the Meta composite — with an `x` to remove. Removing
-drops only the non-MAC signatures; OUIs stay in the textbox for you to
-manage.
-
-### Meta / Ray-Ban detection
-
-**META / RAY-BAN** has its own OUI-Database card whose button reads **+ Add
-composite signature**. The glasses use RPA (rotating random MAC per BT
-spec), so OUI-based matching is pure noise, and CID-only or svc-UUID-only
-filters are false-positive magnets (`0xFD5F` is advertised by phones running
-Meta apps). The preset therefore installs a single composite filter that
-fires only when either: mfr company ID `0x0D53` (Luxottica) AND service
-UUID `0xFD5F` (Meta) are present in the same advert, or the complete local
-name contains `Ray-Ban`, `Wayfarer`, or `Oakley Meta`. Hits render with a
-red-pink `META` badge. Not installed = no Meta detection — it behaves like
-any other filter: remove it with the `x` on its signature line, or wipe it
-via **Clear All Filters**.
-
-Manually adding `0x0D53`, `0xFD5F`, or a Luxottica MAC via the target
-config UI still triggers via the normal single-signature filter path, with
-its normal badge.
-
-Signatures are cross-verified against the Bluetooth SIG assigned-numbers
-registry, the IEEE OUI registry, and the community
-[lnxgod/friendorfoe](https://github.com/lnxgod/friendorfoe) project.
-
-### Device Alias Management
-Assign custom names to detected devices via the web portal:
-
-1. **Access Portal:** Connect to device AP and navigate to `http://192.168.4.1`
-2. **View Devices:** Detected devices appear in "Device Alias Management" section
-3. **Set Alias:** Enter custom name next to any device and click "Set Alias"
-4. **Remove Alias:** Clear the name field and click "Set Alias" to remove
-5. **Clear History:** Use "Clear Device History" button to remove all stored devices
-
-**Storage:** Up to 100 devices stored in NVS, persists across reboots and power cycles.
-
-### Burn In Configuration
-Permanently lock settings for deployment scenarios:
-
-#### What Gets Locked
-- All OUI/MAC filters and descriptions
-- Device aliases and detection history
-- Buzzer and LED preferences
-- Configuration window disabled
-- WiFi AP disabled
-
-#### How to Lock
-1. Configure all desired filters and aliases
-2. Navigate to "Burn In Settings" section
-3. Read warnings carefully
-4. Click "Lock Configuration Permanently"
-5. Confirm three separate prompts
-6. Device restarts in 3 seconds into scanning mode
-
-#### How to Unlock
-
-**Hold the BOOT button (GPIO0) for 1.5 seconds.** You get a triple beep,
-the lock clears, and the device reboots into config mode. This works two ways:
-
-- **While running** — hold BOOT at any time, even mid-scan. No power-cycle,
-  no cable.
-- **At power-on** — hold BOOT while plugging in or resetting. Beeps every
-  300ms while counting; releasing early aborts.
-
-The same hold works when the device is *not* locked, so it doubles as a way
-to break out of scanning back into config mode.
-
-Erasing flash also works, but it wipes everything — filters, aliases, AP
-credentials, MQTT config:
-
-```bash
-pio run -e seeed_xiao_esp32s3 --target erase
-pio run -e seeed_xiao_esp32s3 --target upload
-```
-
-**Note:** Reflashing *without* erasing does NOT unlock the device. NVS
-survives a reflash. Earlier firmware told you otherwise — that was wrong,
-and is why the BOOT escape hatch exists.
+- **Normal scanning:** pink breathing animation
+- **Detection:** blue → pink → purple flash, matched to the beep timing
+- **Brightness:** 50/255 breathing, 200/255 detection flash
 
 ## MQTT Setup (Home Assistant)
 
-### 1. Configure the Detector
-On the config portal at `http://192.168.4.1`, scroll to the **MQTT** section:
-- **Enable MQTT** checkbox
-- **WiFi SSID / Password** - your home network (not the detector AP)
-- **Broker IP** - your Mosquitto/MQTT broker address
-- **Port** - default `1883`
-- **Username / Password** - broker credentials (optional if broker allows anonymous)
-- **Topic** - default `ouispy/detection`
+1. On the config portal, scroll to **MQTT** and fill in your home WiFi SSID/password, broker IP/port, optional credentials, and topic.
+2. Save. The detector connects to your home WiFi only in config mode; in scanning mode STA is off and the radio is dedicated to detection.
+3. On detection (when MQTT is enabled), the device briefly drops STA mode to publish, then returns to the time-sliced scan. Expected blind window per detection: ~2–12 s.
+4. Home Assistant auto-registers an OUI Spy device via MQTT discovery — no `configuration.yaml` edits needed.
+5. Payload example:
 
-Save configuration. The detector connects to your home WiFi as a station and publishes detections.
-
-### 2. Home Assistant Auto-Discovery
-Once connected, OUI Spy automatically registers as a device in Home Assistant via MQTT discovery. No `configuration.yaml` edits needed.
-
-- **Device:** OUI Spy (manufacturer: Colonel Panic, model: OUI Spy Detector)
-- **Sensor:** Detection - shows the detected MAC address
-- Assign it to a room under **Settings > Devices > OUI Spy > Edit**
-
-### 3. Detection Payload
 ```json
-{"mac":"AA:BB:CC:DD:EE:FF","alias":"my-device","rssi":-65}
+{"mac":"aa:bb:cc:dd:ee:ff","alias":"my-device","rssi":-65,"type":"PROBE","match":"0025DF","desc":"AXON (WiFi)"}
 ```
-
-The sensor state shows the detected MAC, then returns to `idle` after 10 seconds of no detections. This creates distinct blips in HA history rather than a flat line.
-
-### 4. Subscribe Manually (Optional)
-```bash
-mosquitto_sub -h <broker_ip> -u <user> -P <pass> -t ouispy/detection
-```
-
-### Notes
-- MAC randomization is disabled when MQTT is enabled (stable DHCP lease required)
-- WiFi auto-reconnects if the connection drops (BLE scanning shares the radio)
-- MQTT keepalive is 120 seconds for BLE+WiFi coexistence tolerance
-- All MQTT settings persist in NVS across reboots
 
 ## Operation
 
 ### Startup Sequence
-1. MAC randomization (stealth mode)
-2. Load saved configuration, aliases, and device history
-3. Configuration mode (20-second timeout) *OR* direct to scanning if burned in
-4. BLE scanning activation
-5. Target detection and audio alerts
-6. Auto-save device history every 60 seconds
+
+1. Load MQTT config; randomize MAC unless MQTT is enabled
+2. Load saved filters, aliases, and device history from NVS
+3. If burned in, boot straight to scanning mode
+4. Otherwise start config mode (AP + web portal) and stay there until the user saves
+5. If both WiFi and BLE filters exist, alternate radio phases; if only one domain has filters, run just that domain; if none, idle
 
 ### Detection Logic
-- Continuous BLE scanning
-- Real-time MAC/OUI matching
-- Cooldown system prevents duplicate alerts
-- Memory management for device tracking
+
+- **Time-sliced dual-domain scanning:** the shared 2.4 GHz radio alternates between a WiFi promiscuous sweep (channels 11→1, 200 ms dwell, ~2.2 s) and a BLE active scan (2 s), WiFi first.
+- **Domain skip logic:** no BLE filters → BLE phases skipped; no WiFi filters → WiFi phases skipped; neither → idle.
+- **WiFi matching:** the promiscuous callback drops every non-management frame and every management frame whose source OUI is not in the fast-path table, before spending any cycles on the full filter match.
+- **BLE matching:** real-time OUI/MAC/CID/UUID/name matching against advertisements in the NimBLE callback.
+- **Ring-buffer handoff:** both producer callbacks push a fixed-size `DetectionEntry` into a ring; the main loop drains it and drives the buzzer, LED, and MQTT publish. Beeps and flash are *not* called from the ISR context.
+- **De-duplication:** per (MAC, frame type) 30 s cooldown suppresses beacon-flood re-alerts; 3 s re-alert timer for repeat sightings.
+- **STA report:** on each detection (when MQTT is enabled) the time-slice pauses, STA mode comes up long enough to publish, an MQTT DISCONNECT packet is sent, and scanning resumes.
 
 ## Serial Output
 
@@ -289,43 +205,36 @@ Randomized MAC: a2:f3:91:7e:8c:45
 
 Loading configuration...
 Device aliases loaded from NVS (3 aliases)
-Detected devices loaded from NVS (15 devices)
 
 === STARTING SCANNING MODE ===
 Configured Filters:
-- AA:BB:CC (OUI) - "DJI Drones"
-- AA:BB:CC:12:34:56 (MAC) - "Test Device"
+- D42DC5 (OUI): I-PRO body cam (BLE OUI)
+- D42DC5 (PROBE): I-PRO body cam (WiFi probe)
 
 >> Match found! <<
-Device: AA:BB:CC:ab:cd:ef (My Drone) | RSSI: -45
-Filter matched: DJI Drones (OUI)
-
-Device aliases saved to NVS (3 aliases)
-Detected devices saved to NVS (16 devices)
+{"mac":"d4:2d:c5:ab:cd:ef","alias":"","rssi":-65,"type":"PROBE","match":"D42DC5","desc":"I-PRO body cam (WiFi probe)"}
 ```
 
 ## Troubleshooting
 
-**No WiFi AP:** Wait 30 seconds after power-on, or device may be burned in (requires flash erase)
-**No web portal:** Ensure connected to `snoopuntothem`, disable mobile data
-**No audio:** Check buzzer connection (GPIO3)
-**No LED:** Check NeoPixel wiring (GPIO4, 3.3V, GND)
-**No detection:** Verify target device is advertising BLE
-**Aliases not saving:** Check NVS storage space, maximum 100 devices/aliases
-**Device history empty:** Devices only appear after detection during a scanning session
-**Can't unlock burned config:** Must erase flash first, then reflash firmware
+- **No WiFi AP:** Wait a few seconds after power-on; if the device is burned in it skips config mode entirely (hold BOOT 1.5 s to unlock)
+- **No web portal:** Ensure connected to `snoopuntothem`; disable mobile data if the phone keeps roaming off the AP
+- **No audio:** Check `buzzerEnabled` was not previously cleared by an early firmware version — re-save the config to restore
+- **No LED:** Check NeoPixel wiring (GPIO4, 3.3V, GND)
+- **WiFi detections not firing:** Verify the source OUI is installed as a `PROBE` or `BEACON` filter; the WiFi fast-path table is built from those, so a bare BLE `OUI` filter does not enable WiFi matching
+- **Can't unlock burned config:** Hold BOOT 1.5 s during power-on or while running; erase flash as a last resort (`pio run -e seeed_xiao_esp32s3 -t erase`)
 
 ## Technical Specifications
 
-- **Platform:** ESP32-S3
-- **Scan interval:** 3 seconds
-- **Range:** 10-30 meters (typical)
-- **Storage:** NVS flash memory (filters, aliases, device history)
-- **Device history:** Up to 100 devices with persistent storage
-- **Processing:** Dual-core optimization
-- **Audio:** GPIO3 buzzer with PWM control
-- **Visual:** GPIO4 NeoPixel with synchronized animations
-- **Auto-save:** Device data saved every 60 seconds during scanning
+- **Platform:** ESP32-S3 (XIAO ESP32-S3 reference board)
+- **Radio:** Shared 2.4 GHz radio, software coexistence enabled
+- **Scan cycle:** ~4.2 s time-slice (2.2 s WiFi sweep + 2.0 s BLE scan)
+- **WiFi sweep:** channels 11→1, 200 ms dwell per channel, management frames only
+- **Range:** 10–30 m typical.
+- **Storage:** NVS for filters/aliases/history
+- **Device history:** Up to 100 devices persisted in NVS
+- **Audio:** GPIO3 buzzer with LEDC PWM + bit-banged fallback
+- **Visual:** GPIO4 NeoPixel
 
 ## OUI-SPY Firmware Ecosystem
 
@@ -334,7 +243,7 @@ OUI-SPY Detector is part of the OUI-SPY firmware family:
 | Firmware | Description | Board |
 |----------|-------------|-------|
 | **[OUI-SPY Unified](https://github.com/colonelpanichacks/oui-spy-unified-blue)** | Multi-mode BLE + WiFi detector | ESP32-S3 / ESP32-C5 |
-| **[OUI-SPY Detector](https://github.com/colonelpanichacks/ouispy-detector)** | Targeted BLE scanner with OUI filtering (this project) | ESP32-S3 |
+| **[OUI-SPY Detector](https://github.com/colonelpanichacks/ouispy-detector)** | Targeted dual-domain scanner with OUI filtering (this project) | ESP32-S3 |
 | **[OUI-SPY Foxhunter](https://github.com/colonelpanichacks/ouispy-foxhunter)** | RSSI-based proximity tracker | ESP32-S3 |
 | **[Flock You](https://github.com/colonelpanichacks/flock-you)** | Flock Safety / Raven surveillance detection | ESP32-S3 |
 | **[Sky-Spy](https://github.com/colonelpanichacks/Sky-Spy)** | Drone Remote ID detection | ESP32-S3 / ESP32-C5 |

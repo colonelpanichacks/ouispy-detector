@@ -208,6 +208,22 @@ void mqtt_publish_retained(const char* topic, const char* payload) {
     publish_core(topic, payload, true);
 }
 
+// Orderly teardown of the MQTT TCP session. Sends a DISCONNECT control packet
+// (0xE0) if we're connected, then stops the socket. Called from doStaReport()
+// right after a publish, before the device drops STA mode — this lets the
+// broker register a clean disconnect instead of a dropped connection.
+void mqtt_disconnect() {
+    if (mqttTcp && mqttTcp->connected()) {
+        wr8(0xE0);  // DISCONNECT
+        mqttTcp->flush();
+        delay(50);  // give the packet a moment to leave
+    }
+    if (mqttTcp) {
+        mqttTcp->stop();
+    }
+    mqttConnected = false;
+}
+
 static void mqtt_ping() {
     if (!mqttConnected || !mqttTcp || !mqttTcp->connected()) { mqttConnected = false; return; }
     wr8(0xC0); wr8(0x00); mqttTcp->flush();
@@ -227,6 +243,18 @@ static void hardResetWifi() {
 
 void mqtt_loop(unsigned long now) {
     if (!mqttCfg.enabled) return;
+
+    // In scanning mode, the main loop manages WiFi state directly
+    // (promiscuous on/off). Don't call WiFi.reconnect() here — it
+    // blocks indefinitely when WiFi is in promiscuous teardown state
+    // with no configured SSID.
+    if (currentMode == SCANNING_MODE) {
+        // Still check MQTT TCP health if we were connected
+        if (mqttConnected && mqttTcp && !mqttTcp->connected()) {
+            mqttConnected = false;
+        }
+        return;
+    }
 
     // WiFi supervision: soft reconnect first, hard-reset backstop after N.
     if (WiFi.status() != WL_CONNECTED) {

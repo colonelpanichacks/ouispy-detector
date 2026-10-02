@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# sync the OUI list from ouis.md into the OUI-SPY firmware config page.
+# sync the BLE OUI list from BLEOUIs.md into the OUI-SPY firmware config page.
 
 import re
 import sys
@@ -7,7 +7,7 @@ import os
 
 # Constants:
 
-OUI_LIST_SOURCE = "./ouis.md"
+OUI_LIST_SOURCE = "./BLEOUIs.md"
 MAIN_CPP = "src/main.cpp"
 
 START_MARKER = "<!-- OUI_DB_START -->"
