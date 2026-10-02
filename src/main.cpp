@@ -769,11 +769,17 @@ static bool matchesWifiFilter(const uint8_t mac[6], uint8_t subtype,
         if (subtypeMatch) {
             const char* fid = f.identifier.c_str();
             size_t flen = strlen(fid);
-            bool ouiMatch = (flen <= 6);
-            for (size_t k = 0; k < flen && ouiMatch; k++) {
+            // WiFi identifiers are bare 6-hex OUIs. Reject anything longer
+            // (or empty) BEFORE indexing oui[] — a malformed value that
+            // somehow lands in NVS must not be able to overread the 7-byte
+            // stack buffer, and an empty identifier must not wildcard-match
+            // every frame of the subtype.
+            if (flen == 0 || flen > 6) continue;
+            bool ouiMatch = true;
+            for (size_t k = 0; k < flen; k++) {
                 char fc = fid[k];
                 char fcUp = (fc >= 'a' && fc <= 'f') ? (fc - 'a' + 'A') : fc;
-                if (fcUp != oui[k]) ouiMatch = false;
+                if (fcUp != oui[k]) { ouiMatch = false; break; }
             }
             if (ouiMatch) {
                 strncpy(desc, f.description.c_str(), 63);
@@ -3214,6 +3220,9 @@ DD:EE:FF
                         oui: r.getAttribute('data-oui'),
                         ble: r.getAttribute('data-ble') === 'true',
                         wifi: r.getAttribute('data-wifi') === 'true',
+                        // WiFi subtype carried through the save so beacon
+                        // filters aren't degraded to probe (server default).
+                        wtype: r.getAttribute('data-wtype') || '',
                         desc: r.getAttribute('data-desc') || ''
                     });
                 }
@@ -3327,8 +3336,11 @@ String configProcessor(const String& var) {
 
         // Group FT_MAC_PREFIX, FT_WIFI_PROBE, FT_WIFI_BEACON, FT_FULL_MAC by identifier.
         // For OUI types, first 6 chars of identifier (the OUI) is the grouping key.
+        // WiFi probe and beacon filters never share a group: each gets its own
+        // row carrying data-wtype, so a save→parse round-trip preserves both
+        // (a merged row would degrade the beacon filter to probe on save).
         // Collect unique keys in order of first appearance.
-        typedef struct { String key; String display; bool ble; bool wifi; bool fullMac; String desc; } OuiGroup;
+        typedef struct { String key; String display; bool ble; bool wifi; String wtype; bool fullMac; String desc; } OuiGroup;
         std::vector<OuiGroup> groups;
 
         for (const TargetFilter& f : targetFilters) {
@@ -3336,11 +3348,13 @@ String configProcessor(const String& var) {
                 // Group key = first 6 chars of identifier (the OUI)
                 String key = f.identifier.substring(0, 6);
                 key.toUpperCase();
+                String wt = (f.type == FT_WIFI_PROBE)  ? "probe" :
+                            (f.type == FT_WIFI_BEACON) ? "beacon" : "";
 
                 // Find or create group
                 bool found = false;
                 for (auto& g : groups) {
-                    if (g.key == key) {
+                    if (g.key == key && g.wtype == wt) {
                         found = true;
                         if (f.type == FT_MAC_PREFIX) g.ble = true;
                         if (f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON) g.wifi = true;
@@ -3355,6 +3369,7 @@ String configProcessor(const String& var) {
                     g.display = formatHexString(key);
                     g.ble = (f.type == FT_MAC_PREFIX);
                     g.wifi = (f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON);
+                    g.wtype = wt;
                     g.fullMac = false;
                     g.desc = f.description;
                     groups.push_back(g);
@@ -3374,6 +3389,7 @@ String configProcessor(const String& var) {
                     g.display = formatHexString(key);
                     g.ble = true; // Full MAC shown as BLE by default
                     g.wifi = false;
+                    g.wtype = "";
                     g.fullMac = true;
                     g.desc = f.description;
                     groups.push_back(g);
@@ -3390,7 +3406,7 @@ String configProcessor(const String& var) {
             String bleAttr = g.ble ? "true" : "false";
             String wifiAttr = g.wifi ? "true" : "false";
 
-            rows += "<div class=\"filter-row\" data-oui=\"" + escapedOui + "\" data-ble=\"" + bleAttr + "\" data-wifi=\"" + wifiAttr + "\" data-desc=\"" + escapedDesc + "\">";
+            rows += "<div class=\"filter-row\" data-oui=\"" + escapedOui + "\" data-ble=\"" + bleAttr + "\" data-wifi=\"" + wifiAttr + "\" data-wtype=\"" + g.wtype + "\" data-desc=\"" + escapedDesc + "\">";
             rows += "<span class=\"device-mac\">" + escapedDisplay + "</span>";
             rows += "<span class=\"filter-domains\">";
             String bleClass = g.ble ? "" : " disabled";
@@ -3531,7 +3547,10 @@ static int parseFiltersFromJSON(AsyncWebServerRequest *request) {
                 String formatted = normalizedOUI.substring(0,2) + ":" + normalizedOUI.substring(2,4) + ":" + normalizedOUI.substring(4,6);
                 f.description = desc.isEmpty() ? "OUI: " + formatted + " (WiFi)" : desc;
                 f.isFullMAC = false;
-                f.type = FT_WIFI_PROBE;
+                // Filter subtype round-trips from the form ("probe" default,
+                // "beacon" preserved) so a save without changes is a no-op.
+                const char* wtype = entry["wtype"] | "probe";
+                f.type = (strcmp(wtype, "beacon") == 0) ? FT_WIFI_BEACON : FT_WIFI_PROBE;
                 targetFilters.push_back(f);
                 added++;
             }
