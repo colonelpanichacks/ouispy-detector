@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OUI-SPY Detector // Web Flasher</title>
+<meta name="description" content="OUI-SPY Detector firmware installer — plug in your XIAO ESP32-S3, click Flash, done.">
+<style>
+  :root {
+    --bg:        #030805;
+    --bg-grid:   #0a2015;
+    --panel:     rgba(6, 14, 10, 0.82);
+    --cyan:      #00e5ff;
+    --cyan-dim:  #0a5566;
+    --magenta:   #ff2bd6;
+    --green:     #00ff66;
+    --green-dim: #0a3a20;
+    --lime:      #a8ff3e;
+    --text:      #cfe8d8;
+    --muted:     #6a8878;
+    --white:     #ffffff;
+
+    --amber:     #ffb000;
+    --amber-bg:  #0a0600;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', 'JetBrains Mono', 'Courier New', ui-monospace, monospace;
+    font-size: 15px;
+    line-height: 1.55;
+    min-height: 100vh;
+    text-align: center;
+  }
+  body {
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(0,255,102,0.04), transparent 60%),
+      linear-gradient(var(--bg-grid) 1px, transparent 1px) 0 0 / 44px 44px,
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px) 0 0 / 44px 44px,
+      var(--bg);
+    padding: 0 16px 48px;
+  }
+  main { max-width: 780px; margin: 0 auto; }
+  a { color: var(--green); text-decoration: none; border-bottom: 1px dotted rgba(0,255,102,0.4); }
+  a:hover { color: var(--white); border-bottom-color: var(--white); }
+  b { color: var(--white); font-weight: normal; }
+
+  /* ─── TERMINAL HEADER ─── */
+  .terminal {
+    background: var(--amber-bg);
+    color: var(--amber);
+    padding: 28px 16px 22px;
+    margin: 0 -16px 32px;
+    border-bottom: 1px solid var(--amber);
+    text-shadow: 0 0 4px rgba(255,176,0,0.4);
+    position: relative;
+    overflow: hidden;
+  }
+  .terminal::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at center, rgba(255,176,0,0.06), transparent 60%),
+      repeating-linear-gradient(0deg,
+        transparent 0 2px,
+        rgba(0,0,0,0.4) 3px 3px);
+    pointer-events: none;
+  }
+  .banner {
+    color: #00e7ff;
+    text-shadow: 0 0 8px #00e7ff;
+    font-size: 10px;
+    line-height: 1.05;
+    white-space: pre;
+    margin: 0 auto;
+    display: inline-block;
+    text-align: left;
+    position: relative;
+  }
+  .subtitle {
+    color: #fff4d0;
+    letter-spacing: 5px;
+    font-size: 12px;
+    margin: 12px 0 0;
+    text-shadow: 0 0 6px rgba(255,176,0,0.6);
+    position: relative;
+  }
+  .subtitle .blue {
+    color: var(--magenta);
+    text-shadow: 0 0 8px var(--magenta);
+  }
+  .subtitle .sep { color: var(--amber); margin: 0 10px; opacity: 0.6; }
+
+  /* ─── CYBER SECTIONS ─── */
+  .panel {
+    border: 1px solid rgba(0,255,102,0.22);
+    background: var(--panel);
+    margin: 24px auto;
+    max-width: 720px;
+  }
+  .panel > header {
+    padding: 10px 20px;
+    background: rgba(0,255,102,0.06);
+    border-bottom: 1px solid rgba(0,255,102,0.22);
+    color: var(--green);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 700;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .panel > header .right { color: var(--muted); font-size: 10px; letter-spacing: 2px; }
+  .panel > .body { padding: 24px 22px; }
+
+  /* ─── STEPS ─── */
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 18px 0;
+    border-bottom: 1px dashed rgba(0,255,102,0.12);
+  }
+  .step:last-child { border-bottom: none; }
+  .step .n {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px; height: 40px;
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-size: 18px;
+    font-weight: 700;
+    background: rgba(0,255,102,0.04);
+    border-radius: 50%;
+  }
+  .step h3 {
+    margin: 4px 0 0;
+    color: var(--white);
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .step p {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+    max-width: 520px;
+  }
+
+  /* ─── FLASH BUTTON ─── */
+  .dev-warn b { color: var(--amber); }
+  esp-web-install-button { display: inline-block; margin-top: 10px; }
+  esp-web-install-button::part(button) {
+    background: #050f08;
+    color: var(--green);
+    border: 1px solid var(--green);
+    padding: 12px 26px;
+    font-family: inherit;
+    font-weight: 500;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  esp-web-install-button::part(button):hover {
+    background: var(--green);
+    color: #050f08;
+  }
+  .unsupported, .not-allowed {
+    color: var(--magenta);
+    padding: 10px 14px;
+    border: 1px dashed var(--magenta);
+    display: inline-block;
+    font-size: 13px;
+    max-width: 520px;
+  }
+
+  /* ─── MODES ─── */
+  .mode {
+    padding: 22px 0;
+    border-bottom: 1px dashed rgba(0,255,102,0.12);
+  }
+  .mode:last-child { border-bottom: none; }
+  .mode .tag {
+    display: inline-block;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 2px;
+    padding: 2px 12px;
+    border: 1px solid var(--green);
+    background: rgba(0,255,102,0.04);
+    margin-bottom: 10px;
+  }
+  .mode h3 {
+    margin: 6px 0 4px;
+    color: var(--white);
+    font-size: 16px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .mode p {
+    margin: 0 auto 12px;
+    max-width: 560px;
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .creds {
+    display: inline-grid;
+    grid-template-columns: auto auto;
+    gap: 4px 18px;
+    text-align: left;
+    padding: 10px 16px;
+    background: rgba(0,255,102,0.03);
+    border: 1px solid rgba(0,255,102,0.18);
+    font-size: 13px;
+    margin: 4px auto 0;
+  }
+  .creds dt {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 11px;
+    align-self: center;
+  }
+  .creds dd { margin: 0; color: var(--green); }
+  .creds dd.url { color: var(--text); }
+  .creds dd.none { color: var(--magenta); }
+
+  .kbd {
+    display: inline-block;
+    padding: 1px 8px;
+    border: 1px solid var(--green);
+    color: var(--white);
+    background: rgba(0,255,102,0.05);
+    font-size: 12px;
+    letter-spacing: 1px;
+  }
+
+  /* ─── TROUBLE ─── */
+  .trouble .n {
+    border-color: var(--magenta);
+    color: var(--magenta);
+    background: rgba(255,43,214,0.05);
+  }
+
+  footer {
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: 3px;
+    margin-top: 32px;
+    padding-top: 20px;
+    border-top: 1px dashed rgba(0,255,102,0.12);
+  }
+
+  @media (max-width: 520px) {
+    .banner { font-size: 7px; }
+    .subtitle { letter-spacing: 3px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="terminal">
+  <pre class="banner"> .oooooo.   ooooo     ooo ooooo             .oooooo..o ooooooooo.   oooooo   oooo
+d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
+888      888 888       8   888   ______    Y88bo.       888   .d88'   `888. .8'
+888      888 888       8   888  |______|    `"Y8888o.   888ooo88P'     `888.8'
+888      888 888       8   888                  `"Y88b  888              `888'
+`88b    d88' `88.    .8'   888             oo     .d8P  888               888
+ `Y8bood8P'    `YbodP'    o888o            8""88888P'  o888o             o888o</pre>
+  <div class="subtitle">DETECTOR<span class="sep">//</span>WEB FLASHER<span class="sep">//</span>XIAO ESP32-S3</div>
+</header>
+
+<main>
+
+<section class="panel">
+  <header><span>Install</span><span class="right">3 steps</span></header>
+  <div class="body">
+
+    <div class="step">
+      <div class="n">1</div>
+      <h3>Plug the board in</h3>
+      <p>Use a real USB-C <b>data</b> cable — charge-only cables won't show up as a serial port. If it's your first flash, hold the <span class="kbd">BOOT</span> button while plugging in.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">2</div>
+      <h3>Click Flash</h3>
+      <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The install takes about 30 seconds and wipes the board clean before installing.</p>
+
+      <esp-web-install-button id="flashBtn" manifest="./manifest.json">
+        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
+        <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
+        <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
+      </esp-web-install-button>
+    </div>
+
+    <div class="step">
+      <div class="n">3</div>
+      <h3>Listen for the boot melody</h3>
+      <p>The board reboots on its own and plays the Detector's melodic boot tune. Two ascending beeps mean it's ready — join the Wi-Fi below, open the portal, and add your targets.</p>
+      <dl class="creds">
+        <dt>Wi-Fi</dt><dd>snoopuntothem</dd>
+        <dt>Password</dt><dd>astheysnoopuntous</dd>
+        <dt>Open</dt><dd class="url">http://192.168.4.1</dd>
+      </dl>
+    </div>
+
+  </div>
+</section>
+
+<section class="panel">
+  <header><span>The Detector</span><span class="right">Dual Domain Edition</span></header>
+  <div class="body">
+
+    <div class="mode">
+      <span class="tag">[ BLE ]</span>
+      <h3>Bluetooth domain</h3>
+      <p>Passive BLE scanning with six signature classes: OUI prefix, full MAC, BT SIG company ID, 16-bit service UUID, name substring, and composite filters. Catches Axon body cams and Meta/Ray-Ban glasses even with rotating MACs.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ WiFi ]</span>
+      <h3>WiFi domain</h3>
+      <p>Promiscuous management-frame scanning for wildcard probe requests and beacons. Time-sliced with BLE — one radio, both domains. Research &amp; I-PRO body-worn camera signatures by <b>DeFlock Joplin</b>.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ DB ]</span>
+      <h3>OUI Database</h3>
+      <p>One-click vendor signatures in the web portal: RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META / RAY-BAN, and I-PRO body cameras.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ MQTT ]</span>
+      <h3>Home Assistant</h3>
+      <p>Publishes detections to any MQTT broker with auto-discovery — the Detector shows up as a device in Home Assistant, blips on detection, returns to idle after 10 seconds.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ LOCK ]</span>
+      <h3>Burn-in mode</h3>
+      <p>Lock the configuration and boot straight into scanning for fixed deployments. Hold <span class="kbd">BOOT</span> 1.5s to clear the lock and return to config mode.</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="panel">
+  <header><span>Troubleshooting</span><span class="right">common snags</span></header>
+  <div class="body trouble">
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>Nothing shows up in the port picker</h3>
+      <p>Try a different USB-C cable (charge-only won't work), install CH340 or CP210x drivers if your OS doesn't auto-detect, or hold <span class="kbd">BOOT</span> while plugging in to force download mode.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>Flash finished but I hear nothing</h3>
+      <p>The buzzer may be muted in saved settings. The board is fine — join the <b>snoopuntothem</b> Wi-Fi and confirm the portal loads at <a href="http://192.168.4.1">192.168.4.1</a>.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>192.168.4.1 won't load on my phone</h3>
+      <p>Android deprioritises networks with no internet and routes browser traffic over mobile data. Turn mobile data off, or accept the "stay connected" prompt, then reload.</p>
+    </div>
+
+    <div class="step">
+      <div class="n">?</div>
+      <h3>Detector AP disappeared after locking config</h3>
+      <p>That's intentional — locking is a one-way seal. Hold <span class="kbd">BOOT</span> during power-on to clear the lock and restore the config AP. Reflashing does <b>not</b> unlock it; NVS survives a reflash.</p>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  Source &middot; <a href="https://github.com/colonelpanichacks/ouispy-detector">github.com/colonelpanichacks/ouispy-detector</a>
+</footer>
+
+</main>
+
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</body>
+</html>

@@ -4,6 +4,14 @@
 
 Professional dual-domain (BLE + WiFi) scanning system that detects specific devices by MAC address or OUI with audio feedback. BLE advertisements and 802.11 management frames (probe requests / beacons) are detected on the shared 2.4 GHz radio via time-sliced scanning.
 
+## Flash from your browser
+
+No Python, no PlatformIO, no drivers to install:
+
+**https://colonelpanichacks.github.io/ouispy-detector/**
+
+Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data cable, click **Connect & Flash**, pick the serial port. Always ships the latest committed `src/detector.bin`.
+
 ## Hardware
 
 **OUI-SPY Board** - Available on [colonelpanic.tech](https://colonelpanic.tech)
