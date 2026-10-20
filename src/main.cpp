@@ -1006,6 +1006,17 @@ static const PresetEntry PRESET_IPRO[] = {
 };
 static const size_t PRESET_IPRO_COUNT = sizeof(PRESET_IPRO) / sizeof(PRESET_IPRO[0]);
 
+// Verkada cloud security cameras (CD/CM/CF series). Dedicated IEEE OUI
+// E0:A7:00 registered to "Verkada Inc" (MA-L, registered 2016-09-22).
+// Cameras are WiFi/Ethernet stations — no BLE advertising — so the preset
+// is WiFi domain only: probe requests while disassociated, beacons from
+// the setup/provisioning AP.
+static const PresetEntry PRESET_VERKADA[] = {
+    { FT_WIFI_PROBE,  "E0A700", "Verkada camera (WiFi probe)" },
+    { FT_WIFI_BEACON, "E0A700", "Verkada camera (WiFi beacon / setup AP)" },
+};
+static const size_t PRESET_VERKADA_COUNT = sizeof(PRESET_VERKADA) / sizeof(PRESET_VERKADA[0]);
+
 // Returns count added. Skips entries whose (type, identifier) already
 // exists so repeated clicks don't duplicate rows.
 int applyPreset(const PresetEntry* preset, size_t count, const char* labelPrefix) {
@@ -2296,6 +2307,14 @@ DD:EE:FF
                     <div class="oui-meta"><strong>Frame Types:</strong> Probe Request</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> I-PRO Body Camera</div>
                     </details>
+                    <details>
+                    <summary><b>Verkada</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code>E0:A7:00</code></div>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('verkada','Verkada','E0:A7:00')">+ Add WiFi signatures</button>
+                    <div class="oui-meta"><strong>Category:</strong> Security Cameras / Surveillance</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Verkada security cameras (CD/CM/CF series, WiFi models)</div>
+                    </details>
                     <!-- WIFI_OUI_DB_END -->
                 </div>
             </div>
@@ -2932,9 +2951,10 @@ DD:EE:FF
             var VENDOR_OUIS = {
                 axon:   '00:25:DF',
                 ipro:   'D4:2D:C5',
+                verkada:'E0:A7:00',
                 meta:   '7C:2A:9E,CC:66:0A,F4:03:43,5C:E9:1E,98:59:49'
             };
-            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN', ipro: 'I-PRO' };
+            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN', ipro: 'I-PRO', verkada: 'VERKADA' };
 
             // Repopulate the signature lines on page load. Without this the
             // filters stay installed in NVS but the UI looks empty after a
@@ -4092,7 +4112,7 @@ void startConfigMode() {
     });
 
     // One-click add all known signatures for a device family.
-    // POST body/query: name=axon | meta
+    // POST body/query: name=axon | meta | ipro | verkada
     server.on("/api/presets/apply", HTTP_POST, [](AsyncWebServerRequest *request) {
 
 
@@ -4112,6 +4132,9 @@ void startConfigMode() {
         } else if (presetName == "ipro") {
             label = "I-PRO";
             added = applyPreset(PRESET_IPRO, PRESET_IPRO_COUNT, "I-PRO");
+        } else if (presetName == "verkada") {
+            label = "Verkada";
+            added = applyPreset(PRESET_VERKADA, PRESET_VERKADA_COUNT, "Verkada");
         } else {
             request->send(400, "application/json",
                 "{\"ok\":false,\"error\":\"unknown preset\"}");
@@ -4143,6 +4166,7 @@ void startConfigMode() {
         if (n == "axon")           removed = removePreset(PRESET_AXON, PRESET_AXON_COUNT);
         else if (n == "meta")      removed = removePreset(PRESET_META, PRESET_META_COUNT);
         else if (n == "ipro")      removed = removePreset(PRESET_IPRO, PRESET_IPRO_COUNT);
+        else if (n == "verkada")   removed = removePreset(PRESET_VERKADA, PRESET_VERKADA_COUNT);
         else { request->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown preset\"}"); return; }
 
         // Filter set changed — refresh the promiscuous fast-path OUI table.
@@ -4160,6 +4184,8 @@ void startConfigMode() {
         body += presetInstalled(PRESET_META, PRESET_META_COUNT) ? "true" : "false";
         body += ",\"ipro\":";
         body += presetInstalled(PRESET_IPRO, PRESET_IPRO_COUNT) ? "true" : "false";
+        body += ",\"verkada\":";
+        body += presetInstalled(PRESET_VERKADA, PRESET_VERKADA_COUNT) ? "true" : "false";
         body += "}";
         request->send(200, "application/json", body);
     });

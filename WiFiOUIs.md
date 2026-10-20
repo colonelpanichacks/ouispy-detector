@@ -40,6 +40,24 @@ D4:2D:C5
 
 </details>
 
+<details>
+
+<summary><b>Verkada</b> <code>1 OUI</code></summary>
+
+- `E0:A7:00`
+
+**Copy OUIs:**
+
+```
+E0:A7:00
+```
+
+> **Category:** Security Cameras / Surveillance  
+> **Frame Types:** Probe Request, Beacon  
+> **Common Devices:** Verkada security cameras (CD/CM/CF series, WiFi models)
+
+</details>
+
 ---
 
 ## Copy All WiFi OUIs for OUI-SPY
@@ -47,6 +65,7 @@ D4:2D:C5
 ```
 00:25:DF
 D4:2D:C5
+E0:A7:00
 ```
 
 <div align="center">
@@ -73,7 +92,7 @@ Found a new WiFi OUI? Help build the database!
 
 <div align="center">
 
-**Total WiFi OUIs:** `2` | **Last Updated:** Auto-generated from categorized lists
+**Total WiFi OUIs:** `3` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 

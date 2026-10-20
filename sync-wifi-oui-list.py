@@ -22,18 +22,19 @@ END_MARKER = "<!-- WIFI_OUI_DB_END -->"
 INDENT = "                    "
 
 # Map a vendor's <summary> display name to the firmware preset key the
-# /api/presets/apply endpoint accepts (axon | meta | ipro). Vendors WITHOUT a
-# preset endpoint fall back to plain WiFi-domain filter rows via addFilterRow
-# — see flush_card().
+# /api/presets/apply endpoint accepts (axon | meta | ipro | verkada). Vendors
+# WITHOUT a preset endpoint fall back to plain WiFi-domain filter rows via
+# addFilterRow — see flush_card().
 VENDOR_PRESET_KEYS = {
     "AXON (WiFi)": "axon",
     "AXON": "axon",
     "I-PRO": "ipro",
+    "Verkada": "verkada",
 }
 
 # Preset keys the firmware actually understands; anything else falls back to
 # addFilterRow so a typo here can't emit a button that 400s at runtime.
-VALID_PRESETS = {"axon", "meta", "ipro"}
+VALID_PRESETS = {"axon", "meta", "ipro", "verkada"}
 
 
 def slugify(name):
