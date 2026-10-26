@@ -190,9 +190,6 @@
   .warn-panel.small > header { font-size: 12px; }
   .warn-panel.small .body { padding-top: 10px; padding-bottom: 10px; }
   .warn-panel li b { color: var(--amber); }
-  .ack { display: flex; gap: 10px; align-items: flex-start; justify-content: center; margin: 6px auto 0; max-width: 520px; text-align: left; font-size: 13px; color: var(--white); cursor: pointer; }
-  .ack input { margin-top: 3px; accent-color: #ff2b9e; width: 16px; height: 16px; flex: none; }
-  #flashBtn button[disabled] { opacity: 0.35; cursor: not-allowed; }
 
   /* ─── MODES ─── */
   .mode {
@@ -275,7 +272,7 @@
   }
 
   @media (max-width: 520px) {
-    .banner { font-size: 7px; }
+    .banner { font-size: 5.5px; }
     .subtitle { letter-spacing: 3px; font-size: 11px; }
   }
 </style>
@@ -283,13 +280,21 @@
 <body>
 
 <header class="terminal">
-  <pre class="banner"> .oooooo.   ooooo     ooo ooooo             .oooooo..o ooooooooo.   oooooo   oooo
-d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
-888      888 888       8   888   ______    Y88bo.       888   .d88'   `888. .8'
-888      888 888       8   888  |______|    `"Y8888o.   888ooo88P'     `888.8'
-888      888 888       8   888                  `"Y88b  888              `888'
-`88b    d88' `88.    .8'   888             oo     .d8P  888               888
- `Y8bood8P'    `YbodP'    o888o            8""88888P'  o888o             o888o</pre>
+  <pre class="banner">             .oooooo.   ooooo     ooo ooooo             .oooooo..o ooooooooo.   oooooo   oooo
+            d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
+            888      888 888       8   888   ______    Y88bo.       888   .d88'   `888. .8'
+            888      888 888       8   888  |______|    `"Y8888o.   888ooo88P'     `888.8'
+            888      888 888       8   888                  `"Y88b  888              `888'
+            `88b    d88' `88.    .8'   888             oo     .d8P  888               888
+             `Y8bood8P'    `YbodP'    o888o            8""88888P'  o888o             o888o
+
+oooooooooo.   oooooooooooo ooooooooooooo oooooooooooo   .oooooo.   ooooooooooooo   .oooooo.   ooooooooo.
+`888'   `Y8b  `888'     `8 8'   888   `8 `888'     `8  d8P'  `Y8b  8'   888   `8  d8P'  `Y8b  `888   `Y88.
+ 888      888  888              888       888         888               888      888      888  888   .d88'
+ 888      888  888oooo8         888       888oooo8    888               888      888      888  888ooo88P'
+ 888      888  888    "         888       888    "    888               888      888      888  888`88b.
+ 888     d88'  888       o      888       888       o `88b    ooo       888      `88b    d88'  888  `88b.
+o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o      `Y8bood8P'  o888o  o888o</pre>
   <div class="subtitle">DUAL DOMAIN<span class="sep">//</span>WEB FLASHER<span class="sep">//</span>XIAO ESP32-S3</div>
 </header>
 
@@ -310,10 +315,9 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
       <h3>Click Flash</h3>
       <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The flasher writes the complete image (bootloader, partition table, boot selector and app), so even a blank board comes up. It asks whether to <b>erase</b>: erase for a fresh install, or keep your saved filters, Wi-Fi, MQTT and mesh settings when updating. About 30 seconds.</p>
       <p><b>Mesh fleets:</b> this release talks ESP-NOW at the long-range 250 kbps rate. Flash every node in a mesh with the same release.</p>
-      <label class="ack"><input type="checkbox" id="ackBox"> <span>I have read the <a href="#disclaimer">disclaimer</a> at the bottom of this page. I will use this only where it is legal, only on gear I own or am authorized to test, and never to track people.</span></label>
 
       <esp-web-install-button id="flashBtn" manifest="./manifest.json">
-        <button slot="activate" id="flashGo" disabled>&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
+        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
         <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
         <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
       </esp-web-install-button>
@@ -440,13 +444,6 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
 
 </main>
 
-<script>
-  (function () {
-    var box = document.getElementById('ackBox'), go = document.getElementById('flashGo');
-    function sync() { go.disabled = !box.checked; }
-    box.addEventListener('change', sync); sync();
-  })();
-</script>
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </body>
 </html>
