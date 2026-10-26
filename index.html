@@ -183,13 +183,7 @@
   }
 
   /* ─── DISCLAIMER ─── */
-  .warn-panel { border-color: var(--amber); }
-  .warn-panel > header { color: var(--amber); }
-  .warn-panel ul { margin: 0; padding-left: 20px; text-align: left; }
-  .warn-panel li { margin: 0 0 6px; color: var(--text); font-size: 12px; line-height: 1.45; }
-  .warn-panel.small > header { font-size: 12px; }
-  .warn-panel.small .body { padding-top: 10px; padding-bottom: 10px; }
-  .warn-panel li b { color: var(--amber); }
+  .fineprint { margin: 28px auto 0; max-width: 560px; text-align: center; font-size: 11px; color: var(--text); opacity: 0.6; }
 
   /* ─── MODES ─── */
   .mode {
@@ -423,20 +417,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
   </div>
 </section>
 
-<section class="panel warn-panel small" id="disclaimer">
-  <header><span>Read first</span><span class="right">disclaimer</span></header>
-  <div class="body">
-    <ul>
-      <li><b>Research and educational use only.</b> This firmware passively listens to Bluetooth and Wi-Fi traffic. It is not a safety product, a security system, or a law-enforcement or forensic tool.</li>
-      <li><b>The law is your responsibility.</b> Rules on receiving radio transmissions and on tracking people or their devices differ by country, state and city. You alone must know and follow them. If you are not sure it is legal where you are, do not use it.</li>
-      <li><b>Never use it against people.</b> Not to stalk, follow, track, locate, harass, intimidate or identify anyone.</li>
-      <li><b>Passive, and only your own gear.</b> Do not use it to transmit at, jam, deauthenticate or connect to anything you do not own or are not authorized to test.</li>
-      <li><b>Detections are not proof.</b> MACs get randomized, one vendor prefix covers many products, signatures age. Expect false positives and misses; never rely on it for safety, security, legal or evidentiary decisions.</li>
-      <li><b>What it records can be personal data</b> (MACs, names, locations, times). Keep as little as you need, keep it private, delete it when done. Set a mesh fleet key and never expose the dashboard or MQTT broker to the internet.</li>
-      <li><b>AS IS, no warranty, no liability.</b> The authors, contributors and sellers accept no liability for any damage, data loss, legal consequence or misuse arising from this project.</li>
-    </ul>
-  </div>
-</section>
+<p class="fineprint" id="disclaimer">For research purposes only. Use at your own risk: you assume all responsibility for how you use it, and the authors accept no liability. Provided as is, with no warranty. Follow your local laws, and don't do anything illegal or stupid.</p>
 
 <footer>
   Source &middot; <a href="https://github.com/colonelpanichacks/ouispy-detector">github.com/colonelpanichacks/ouispy-detector</a>

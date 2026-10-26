@@ -4422,8 +4422,8 @@ R"html(
             loadSigLines();
         </script>
         </form>
-        <p style="margin:18px 4px 6px;padding:10px 12px;border:1px solid rgba(251,191,36,0.45);border-radius:10px;font-size:11px;line-height:1.5;color:#fbbf24;">
-            <b>Research and educational use only.</b> Use it only where it is legal, only on devices and networks you own or are authorized to test, and never to stalk, track or identify people. Detections are not proof. Provided AS IS with no warranty; the authors accept no liability for any use or misuse.
+        <p style="margin:18px 4px 6px;font-size:10px;line-height:1.5;opacity:0.55;text-align:center;">
+            For research purposes only. Use at your own risk: you assume all responsibility for how you use it, and the authors accept no liability. Provided as is, with no warranty. Follow your local laws, and don't do anything illegal or stupid.
         </p>
     </div>
 </body>

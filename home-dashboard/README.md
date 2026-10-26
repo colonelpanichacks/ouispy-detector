@@ -1,7 +1,5 @@
 # OUI-SPY Mesh
 
-> **WARNING - research and educational use only.** The dashboard stores and maps MAC addresses, device names, locations and times, which can be personal data. Use it only where it is legal, only with gear you own or are authorized to test, and never to stalk, track or identify people. Keep it on your own network; never expose it to the internet. Detections are not proof. Provided **AS IS, with no warranty**; the authors accept **no liability** for any use or misuse. See the full [Disclaimer](../README.md#disclaimer).
-
 A local web dashboard for the OUI-SPY Detector **home node**. It shows the whole
 mesh fleet live, puts the nodes on a map, and keeps a searchable history of every
 detection. It runs entirely on your machine: no cloud, no accounts, no telemetry.
@@ -250,3 +248,7 @@ feature, pointed at port 5077.
 - Map tiles are the one thing that goes online. By default they come from
   OpenStreetMap, which tells the tile server roughly where you are looking. To
   keep that private, choose a local tile server or the offline grid in Settings.
+
+## Disclaimer
+
+For research purposes only. Use at your own risk: you assume all responsibility for how you use it, and the authors accept no liability. Provided as is, with no warranty. Follow your local laws, and don't do anything illegal or stupid.
