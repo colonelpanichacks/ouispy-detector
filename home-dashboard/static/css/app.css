@@ -557,3 +557,10 @@ input[type="checkbox"]:checked::after {
 .modal-card .qr svg { width: 100%; height: auto; display: block; }
 .modal-card .field, .modal-card .ctl-row { margin: 0 16px; width: calc(100% - 32px); }
 .field.mono { font-family: var(--mono); font-size: 12px; }
+
+/* marker label placement (declutterLabels) */
+.nmark.lab-l .label { left: auto; right: 16px; }
+.nmark.lab-t .label { left: 0; top: -44px; transform: translateX(-50%); }
+.nmark.lab-b .label { left: 0; top: 16px; transform: translateX(-50%); }
+.nmark.home.lab-t .label { top: -48px; }
+.nmark.home.lab-b .label { top: 18px; }

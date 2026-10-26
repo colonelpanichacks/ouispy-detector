@@ -344,6 +344,7 @@ function renderMap() {
         if (!seen.has(id)) { map.removeLayer(S.markers[id]); delete S.markers[id]; }
     }
     renderLinks();
+    setTimeout(declutterLabels, 0);
     const unplaced = S.fleet.nodes.filter((n) => n.lat == null);
     $("unplaced").innerHTML = unplaced.length
         ? `<span>Not on map:</span>` + unplaced.map((n) => `<button data-id="${esc(n.id)}">${esc(n.alias || n.id)}</button>`).join("")
@@ -358,6 +359,7 @@ function renderMap() {
 function renderLinks() {
     if (!S.links) S.links = L.layerGroup().addTo(map);
     S.links.clearLayers();
+    if (!map._loaded) return;   // no view yet (first render): moveend redraws
     if (S.settings.links === false) return;
     const home = S.fleet.nodes.find((n) => n.is_home && n.lat != null);
     if (!home) return;
@@ -370,15 +372,49 @@ function renderLinks() {
             color, weight: 2, opacity: st === "stale" ? 0.35 : 0.75,
             dashArray: st === "stale" ? "4 6" : "6 4",
         });
-        // Label only the selected node's link permanently; others on hover,
-        // so a busy fleet doesn't bury the map in text.
-        const pinned = S.selected === n.id || S.selected === home.id;
+        // Label only the selected node's link permanently, and only when the
+        // line is long enough on screen to hold it without covering the
+        // markers; otherwise the label appears on hover/tap.
+        const px = map.latLngToContainerPoint([home.lat, home.lon])
+            .distanceTo(map.latLngToContainerPoint([n.lat, n.lon]));
+        const pinned = (S.selected === n.id || S.selected === home.id) && px > 160;
         line.bindTooltip(`<b>${r ? r + " dBm" : "no rssi"}</b> | ${fmtDist(metres(home, n))}`, {
             permanent: pinned, sticky: !pinned, direction: "center", className: "link-label",
         });
         S.links.addLayer(line);
     }
 }
+// Marker labels: each picks the side (right, left, above, below) that
+// doesn't overlap a label already placed or another marker, so nodes a few
+// metres apart stay readable. Re-run after every render, zoom and pan.
+const LABEL_SIDES = ["lab-r", "lab-l", "lab-t", "lab-b"];
+function declutterLabels() {
+    if (!map._loaded) return;
+    const marks = Object.values(S.markers).map((m) => m.getElement() && m.getElement().querySelector(".nmark"))
+        .filter(Boolean);
+    const placed = [];
+    const cores = marks.map((el) => el.querySelector(".core").getBoundingClientRect());
+    const hit = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    // selected node first, so it gets the best spot
+    marks.sort((a, b) => (b.classList.contains("sel") ? 1 : 0) - (a.classList.contains("sel") ? 1 : 0));
+    for (const el of marks) {
+        const lab = el.querySelector(".label");
+        if (!lab) continue;
+        let best = LABEL_SIDES[0];
+        for (const side of LABEL_SIDES) {
+            el.classList.remove(...LABEL_SIDES);
+            el.classList.add(side);
+            const r = lab.getBoundingClientRect();
+            const box = { left: r.left - 3, right: r.right + 3, top: r.top - 3, bottom: r.bottom + 3 };
+            if (!placed.some((p) => hit(box, p)) && !cores.some((c) => hit(box, c))) { best = side; break; }
+        }
+        el.classList.remove(...LABEL_SIDES);
+        el.classList.add(best);
+        placed.push(lab.getBoundingClientRect());
+    }
+}
+map.on("zoomend moveend", () => { renderLinks(); declutterLabels(); });
+
 async function setNodePos(id, lat, lon) {
     const n = nodeById(id);
     if (n) { n.lat = lat; n.lon = lon; }
