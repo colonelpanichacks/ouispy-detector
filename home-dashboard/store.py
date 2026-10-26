@@ -71,6 +71,16 @@ CREATE TABLE IF NOT EXISTS commands (
 );
 CREATE INDEX IF NOT EXISTS cmd_ts ON commands(ts);
 
+CREATE TABLE IF NOT EXISTS tracks (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts    REAL NOT NULL,
+    node  TEXT NOT NULL,
+    lat   REAL NOT NULL,
+    lon   REAL NOT NULL,
+    acc   REAL
+);
+CREATE INDEX IF NOT EXISTS trk_node_ts ON tracks(node, ts);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -285,6 +295,7 @@ class Store:
         with self.lock:
             n = self.db.execute("DELETE FROM detections WHERE ts < ?", (cutoff,)).rowcount
             n += self.db.execute("DELETE FROM sightings WHERE ts < ?", (cutoff,)).rowcount
+            n += self.db.execute("DELETE FROM tracks WHERE ts < ?", (cutoff,)).rowcount
             self.db.commit()
         return n
 
@@ -318,6 +329,27 @@ class Store:
             d["auto"] = bool(d["auto"])
             out.append(d)
         return out
+
+    # ---------- GPS tracks (a node carried with a phone) ----------
+    def add_track(self, node, lat, lon, acc, ts=None):
+        with self.lock:
+            self.db.execute("INSERT INTO tracks(ts,node,lat,lon,acc) VALUES(?,?,?,?,?)",
+                            (ts or time.time(), node, lat, lon, acc))
+            self.db.commit()
+
+    def tracks(self, since):
+        with self.lock:
+            rows = self.db.execute("SELECT node, ts, lat, lon, acc FROM tracks WHERE ts >= ? ORDER BY ts",
+                                   (since,)).fetchall()
+        out = {}
+        for r in rows:
+            out.setdefault(r["node"], []).append([round(r["ts"], 1), r["lat"], r["lon"], r["acc"]])
+        return out
+
+    def clear_track(self, node):
+        with self.lock:
+            self.db.execute("DELETE FROM tracks WHERE node=?", (node,))
+            self.db.commit()
 
     def clear_detections(self):
         with self.lock:

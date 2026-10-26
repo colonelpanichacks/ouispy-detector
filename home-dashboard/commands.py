@@ -28,6 +28,7 @@ LABELS = {
     "status": "Read status", "audio": "Set buzzer/LED", "identify": "Identify",
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
     "filters_set": "Push filters", "rechan": "Re-channel fleet", "meshpush": "Push home filters",
+    "setkey": "Set fleet key",
 }
 
 
@@ -87,6 +88,14 @@ def plan(op, target, args, home_id):
         return [(f"meshrechan {ch}", "OK")], "local", f"Re-channel fleet to {ch}"
     if op == "meshpush":
         return [("meshpush", "CMD")], "ack", label
+    if op == "setkey":
+        # USB console of the home ONLY: a key never crosses the radio.
+        if not local:
+            raise PlanError("the fleet key is only ever set over USB (or the node's setup portal), never over the mesh")
+        k = str(args.get("key", ""))
+        if not 8 <= len(k) <= 63 or " " in k:
+            raise PlanError("invalid fleet key")
+        return [(f"meshkey {k}", "OK")], "local", "Set fleet key on home"
     raise PlanError(f"unknown op {op!r}")
 
 
@@ -118,7 +127,8 @@ class Commander(threading.Thread):
         job = {"id": next(self.ids), "op": op, "target": target, "label": label,
                "expect": expect, "lines": [l for l, _ in lines], "kinds": [k for _, k in lines],
                "state": "queued", "cmd_id": None, "replies": {}, "error": "",
-               "created": time.time(), "finished": None, "auto": auto, "args": args or {}}
+               "created": time.time(), "finished": None, "auto": auto,
+               "args": {} if op == "setkey" else (args or {})}   # a key is never kept in a job
         self._remember(job)
         with self.cv:
             self.queue.append(job)
@@ -139,7 +149,7 @@ class Commander(threading.Thread):
     @staticmethod
     def public(job):
         return {k: v for k, v in job.items() if k not in ("lines", "kinds")} | \
-               {"steps": len(job["lines"])}
+               {"steps": len(job["lines"])}   # lines may hold a key (setkey): never published
 
     def feed_line(self, line):
         """Every console line from the home; called by Fleet."""
@@ -298,7 +308,7 @@ class Commander(threading.Thread):
         """Re-read settings a change touched, so the drawer shows the result."""
         op, tgt = job["op"], job["target"]
         rebooting = op in ("reboot", "preset", "filters_set", "rechan", "meshpush")
-        if op == "audio":
+        if op in ("audio", "setkey"):
             self.join_polls[tgt] = time.time() + 1.5
         elif rebooting and tgt == self.fleet.home_id:
             self.join_polls[tgt] = time.time() + 12   # home is back on USB by then

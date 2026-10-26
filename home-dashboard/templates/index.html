@@ -221,8 +221,12 @@
                 <div class="set-block">
                     <h4>Fleet key</h4>
                     <div class="help-text" id="fkStatus">Checking...</div>
-                    <button class="btn ghost" id="fkShow">Show key as QR</button>
-                    <div class="help-text">For setting up a node from your phone: scan this, then paste it into the node's setup portal (Mesh section, Fleet key). Anyone with the key can read and command your fleet, so keep it like a password.</div>
+                    <div class="ctl-row" style="margin-top:8px">
+                        <button class="btn ghost" id="fkShow">Show key as QR</button>
+                        <button class="btn ghost" id="fkCreate">Create fleet key</button>
+                        <button class="btn ghost" id="fkHome" title="Sends the key from this computer to the home over USB only">Set on home (USB)</button>
+                    </div>
+                    <div class="help-text">Every node needs the same key. Give it to a node over USB or through its setup portal: scan the QR on your phone, then paste it into the portal (Mesh section, Fleet key). It never goes over the radio. Anyone with the key can read and command your fleet, so keep it like a password.</div>
                 </div>
                 <div class="set-block">
                     <h4>Data</h4>
@@ -292,6 +296,10 @@
 
         <h4>Link RSSI (24 h)</h4>
         <div class="spark" id="dSpark"></div>
+        <div class="gpsbox">
+            <button class="btn ghost" id="dGps" title="Use this phone's GPS as the node's position while you carry it">Carry with this phone</button>
+            <span class="cfg-age" id="dGpsInfo"></span>
+        </div>
         <div class="drawer-actions">
             <button class="btn ghost" id="dPlace">Place on map</button>
             <button class="btn ghost" id="dUnplace">Remove from map</button>
@@ -336,7 +344,7 @@
 <div class="modal" id="fkModal">
     <div class="modal-card">
         <div class="drawer-head">
-            <div><div class="drawer-title">Fleet key</div><div class="drawer-sub">Hides itself in 60 s</div></div>
+            <div><div class="drawer-title">Fleet key</div><div class="drawer-sub" id="fkSub">Hides itself in 60 s</div></div>
             <button class="icon-btn" id="fkClose" title="Hide"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
         </div>
         <div class="qr" id="fkQr"></div>

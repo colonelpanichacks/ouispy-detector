@@ -194,15 +194,41 @@ against the demo console simulator.
 
 ## Fleet key
 
-With a fleet key set, the whole mesh is sealed (AES-256-GCM). Each node gets the
-key over its USB console (`meshkey <key>`) or through its setup portal (Mesh
-section, Fleet key). It never goes over the air. The dashboard reads the key from
-`~/.config/ouispy/fleet_key` on the computer running it, outside the repo.
+With a fleet key set, the whole mesh is sealed (AES-256-GCM). The key lives
+in `~/.config/ouispy/fleet_key` on the computer running OUI-SPY Mesh,
+outside the repo. It never goes over the radio: a node gets it over USB or
+through its setup portal.
 
-**Settings, Fleet key, Show key as QR** displays it as a QR code, which hides
-itself after 60 s. Scan it on your phone, then paste it into a new node's portal.
-The key is only shown on that computer and your Tailscale devices, never to the plain
-LAN.
+In Settings, under Fleet key:
+
+- **Fingerprint:** a short one-way hash of the key (e.g. `6D89-2646`). Each
+  node reports the fingerprint of its own key, so every node shows **KEY OK**,
+  **DIFFERS** (it holds another key and can't talk to the fleet) or **NO KEY**,
+  without anyone revealing the key. Nodes on firmware older than this show
+  **SET** (they have a key, but can't prove it matches yet).
+- **Show key as QR:** two taps. Shows the key as a QR code plus text in
+  groups of four (Copy gives it without spaces), with its fingerprint. It hides
+  itself after 60 s, when you close it, or when you switch away from the page.
+  Scan it on your phone and paste it into a node's portal (Mesh section,
+  Fleet key).
+- **Create fleet key:** only when there isn't one yet. It never replaces a key,
+  because that would cut off every node still holding the old one.
+- **Set on home (USB):** sends the key from this computer's file straight down
+  the home's USB console. It isn't offered for remotes: a key is never sent
+  over the mesh.
+
+Who can see the key: this computer and your Tailscale devices, including
+through `tailscale serve`, where the real client is taken from the proxy.
+Never a plain-LAN device, and never anything that arrives through Tailscale
+Funnel. The reveal endpoint is POST-only and never cached.
+
+## Carry a node with your phone (GPS)
+
+Off by default. Open a node and tap **Carry with this phone**: while the page
+stays open, the phone's GPS becomes that node's position. The marker moves
+live on every screen and leaves a 30-minute trail. **Stop carrying** ends it.
+Phones only share location with HTTPS pages, so open the dashboard through an
+`https://` address, e.g. Tailscale's `tailscale serve`.
 
 ## Privacy notes
 

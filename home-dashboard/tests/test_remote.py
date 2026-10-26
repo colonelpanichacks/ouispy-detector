@@ -97,6 +97,16 @@ class PlanTest(unittest.TestCase):
             "filters_set", "A1B2C3", {"filters": [{"t": "OUI", "id": "0025DF"}]}, "A1B2C3")
         self.assertEqual((lines[0][0], lines[-1][1], expect), ("mfbegin self", "OK", "local"))
 
+    def test_key_never_over_the_mesh(self):
+        with self.assertRaises(commands.PlanError):
+            commands.plan("setkey", "D4E5F6", {"key": "k" * 32}, "A1B2C3")
+        with self.assertRaises(commands.PlanError):
+            commands.plan("setkey", "all", {"key": "k" * 32}, "A1B2C3")
+        lines, expect, _ = commands.plan("setkey", "A1B2C3", {"key": "k" * 32}, "A1B2C3")
+        self.assertEqual(expect, "local")
+        with self.assertRaises(commands.PlanError):
+            commands.plan("setkey", "A1B2C3", {"key": "short"}, "A1B2C3")
+
     def test_guards(self):
         with self.assertRaises(commands.PlanError):
             commands.plan("rechan", "all", {"ch": 13}, "A1B2C3")

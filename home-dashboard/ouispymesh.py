@@ -101,8 +101,28 @@ ACCESS_TOKEN = _load_token()
 COOKIE = "ouispy_token"
 
 
+LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _is_funnel():
+    """Tailscale Funnel (public internet) marks proxied requests with this."""
+    return bool(request.headers.get("Tailscale-Funnel-Request"))
+
+
+def _client_ip():
+    """Who is really asking. Behind `tailscale serve` (or another local
+    reverse proxy) the direct peer is loopback; the real client is in
+    X-Forwarded-For, which is only trusted when the peer IS loopback."""
+    peer = request.remote_addr or ""
+    if peer in LOOPBACK:
+        fwd = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if fwd:
+            return fwd
+    return peer
+
+
 def _is_local():
-    return request.remote_addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+    return not _is_funnel() and _client_ip() in LOOPBACK
 
 
 # Tailscale (CGNAT 100.64/10 and its IPv6 range) is already authenticated
@@ -113,8 +133,10 @@ TRUSTED_NETS = [ipaddress.ip_network(n) for n in
 
 
 def _is_trusted_net():
+    if _is_funnel():
+        return False          # public internet via Funnel: never trusted
     try:
-        ip = ipaddress.ip_address(request.remote_addr or "")
+        ip = ipaddress.ip_address(_client_ip())
     except ValueError:
         return False
     if getattr(ip, "ipv4_mapped", None):
@@ -130,10 +152,12 @@ KEY_VIEW_NETS = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a
 
 
 def _key_viewer_ok():
+    if _is_funnel():
+        return False
     if _is_local():
         return True
     try:
-        ip = ipaddress.ip_address(request.remote_addr or "")
+        ip = ipaddress.ip_address(_client_ip())
     except ValueError:
         return False
     if getattr(ip, "ipv4_mapped", None):
@@ -147,6 +171,13 @@ def _fleet_key():
             return f.read().strip() or None
     except OSError:
         return None
+
+
+def key_fingerprint(key):
+    """Same as the firmware's: SHA-256("OUISPY-KEY-FP" | key)[0:4], hex.
+    One-way and short: tells whether nodes hold the same key, can't recover it."""
+    import hashlib
+    return hashlib.sha256(b"OUISPY-KEY-FP" + key.encode()).hexdigest()[:8].upper() if key else None
 
 
 def _authorized():
@@ -449,6 +480,46 @@ def api_node_update(nid):
     return jsonify({"ok": True})
 
 
+# GPS from a phone carrying the node: moves the node live and keeps a trail.
+GPS_STATE = {}          # node -> {"ts", "acc", "by"} of the latest fix
+TRAIL_SECONDS = 1800    # trail shown on the map: last 30 min
+
+
+@app.route("/api/nodes/<nid>/gps", methods=["POST"])
+def api_node_gps(nid):
+    nid = nid.upper()
+    d = request.get_json(silent=True) or {}
+    try:
+        lat, lon = float(d["lat"]), float(d["lon"])
+        acc = float(d.get("acc") or 0) or None
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "lat/lon required"}), 400
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({"ok": False, "error": "bad coordinates"}), 400
+    now = time.time()
+    store.update_node(nid, lat=lat, lon=lon)
+    store.add_track(nid, lat, lon, acc, now)
+    GPS_STATE[nid] = {"ts": now, "acc": acc}
+    emit("gps", {"node": nid, "lat": lat, "lon": lon, "acc": acc, "ts": now})
+    return jsonify({"ok": True})
+
+
+@app.route("/api/nodes/<nid>/gps", methods=["DELETE"])
+def api_node_gps_stop(nid):
+    nid = nid.upper()
+    GPS_STATE.pop(nid, None)
+    if request.args.get("clear") == "1":
+        store.clear_track(nid)
+    emit("gps_stop", {"node": nid, "cleared": request.args.get("clear") == "1"})
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tracks")
+def api_tracks():
+    return jsonify({"tracks": store.tracks(time.time() - TRAIL_SECONDS),
+                    "live": {k: v for k, v in GPS_STATE.items() if time.time() - v["ts"] < 60}})
+
+
 @app.route("/api/nodes/<nid>", methods=["DELETE"])
 def api_node_forget(nid):
     nid = nid.upper()
@@ -515,19 +586,68 @@ def api_fleet_cmd():
 
 @app.route("/api/fleetkey/status")
 def api_fleetkey_status():
-    return jsonify({"present": _fleet_key() is not None, "viewable": _key_viewer_ok()})
+    k = _fleet_key()
+    return jsonify({"present": k is not None, "viewable": _key_viewer_ok(), "fp": key_fingerprint(k)})
 
 
-@app.route("/api/fleetkey")
-def api_fleetkey():
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
+
+
+@app.route("/api/fleetkey/reveal", methods=["POST"])
+def api_fleetkey_reveal():
+    """The key itself: POST only (never prefetched or cached), this computer
+    and Tailscale devices only, never via Funnel."""
     if not _key_viewer_ok():
-        return jsonify({"ok": False, "error": "the fleet key is only shown on the computer running OUI-SPY Mesh or your Tailscale devices"}), 403
+        return _no_store(jsonify({"ok": False, "error": "the fleet key is only shown on the computer running OUI-SPY Mesh or your Tailscale devices"})), 403
     k = _fleet_key()
     if not k:
-        return jsonify({"ok": False, "error": "no fleet key saved on this computer (~/.config/ouispy/fleet_key)"}), 404
-    resp = jsonify({"ok": True, "key": k})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        return _no_store(jsonify({"ok": False, "error": "no fleet key saved on this computer yet"})), 404
+    return _no_store(jsonify({"ok": True, "key": k, "fp": key_fingerprint(k)}))
+
+
+@app.route("/api/fleetkey/create", methods=["POST"])
+def api_fleetkey_create():
+    """Generate the fleet key if none exists. Never replaces one: a new key
+    would cut off every node still holding the old one."""
+    if not _key_viewer_ok():
+        return jsonify({"ok": False, "error": "only from this computer or your Tailscale devices"}), 403
+    if _fleet_key():
+        return jsonify({"ok": False, "error": "a fleet key already exists"}), 409
+    import string
+    alphabet = string.ascii_letters + string.digits
+    k = "".join(secrets.choice(alphabet) for _ in range(32))
+    os.makedirs(os.path.dirname(FLEET_KEY_FILE), exist_ok=True)
+    try:
+        os.chmod(os.path.dirname(FLEET_KEY_FILE), 0o700)
+    except OSError:
+        pass
+    fd = os.open(FLEET_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(k + "\n")
+    return jsonify({"ok": True, "fp": key_fingerprint(k)})
+
+
+@app.route("/api/fleetkey/provision_home", methods=["POST"])
+def api_fleetkey_provision_home():
+    """Set the fleet key on the HOME over USB. The key goes from the file on
+    this computer straight down the serial line: never through the browser,
+    never over the radio (remotes get it by USB or their setup portal)."""
+    if not _key_viewer_ok():
+        return jsonify({"ok": False, "error": "only from this computer or your Tailscale devices"}), 403
+    k = _fleet_key()
+    if not k:
+        return jsonify({"ok": False, "error": "no fleet key saved on this computer yet"}), 404
+    home = fleet.home_id
+    if not home:
+        return jsonify({"ok": False, "error": "no home node on USB"}), 409
+    try:
+        return jsonify({"ok": True, "job": commander.submit("setkey", home, {"key": k})})
+    except PlanError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/api/jobs")

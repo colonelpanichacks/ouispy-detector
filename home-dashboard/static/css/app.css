@@ -564,3 +564,11 @@ input[type="checkbox"]:checked::after {
 .nmark.lab-b .label { left: 0; top: 16px; transform: translateX(-50%); }
 .nmark.home.lab-t .label { top: -48px; }
 .nmark.home.lab-b .label { top: 18px; }
+
+/* GPS carry */
+.gpsbox { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.gpstag { font-style: normal; font-size: 9px; font-weight: 800; letter-spacing: 1px; color: var(--pink);
+          border: 1px solid rgba(240,171,252,0.5); border-radius: 3px; padding: 0 4px; margin-left: 6px; text-shadow: var(--glow-pink); }
+
+.cfgtable td.key-good { color: var(--accent); } .cfgtable td.key-bad { color: var(--red); } .cfgtable td.key-warn { color: var(--amber); }
+.mono { font-family: var(--mono); }

@@ -23,6 +23,9 @@ const S = {
     prevHomeAlive: null,
     prevHeal: 0,
     jobs: [],                 // remote-management command log (newest first)
+    trails: {},               // node -> [[ts, lat, lon, acc]] GPS breadcrumbs (last 30 min)
+    gpsLive: {},              // node -> ts of its latest phone fix
+    gps: null,                // this phone carrying a node: {node, watch, lastSent, last, lock}
     jobState: {},             // job id -> last seen state (for finish toasts)
     filterMeta: null,         // types, hex lengths, presets
     editing: null,            // filter rows being edited in the drawer
@@ -308,10 +311,11 @@ function markerHtml(n) {
     const st = nodeState(n);
     const sub = n.is_home ? "home" : (n.rssi ? `${n.rssi} dBm` : st);
     const recent = S.dets.filter((d) => d.node === n.id && now() - d.ts < 900).length;
+    const gpsOn = S.gpsLive[n.id] && now() - S.gpsLive[n.id] < 60;
     return `<div class="nmark ${st} ${n.is_home ? "home" : ""} ${S.selected === n.id ? "sel" : ""}">
         <span class="ping"></span><span class="burst"></span><span class="core"></span>
         ${recent ? `<span class="badge" title="Detections in the last 15 min">${recent}</span>` : ""}
-        <span class="label">${esc(n.alias || n.id)}<small>${esc(sub)}</small></span></div>`;
+        <span class="label">${esc(n.alias || n.id)}${gpsOn ? `<i class="gpstag">GPS</i>` : ""}<small>${esc(sub)}</small></span></div>`;
 }
 function renderMap() {
     const seen = new Set();
@@ -384,6 +388,85 @@ function renderLinks() {
         S.links.addLayer(line);
     }
 }
+// ------------------------------------------------------------------
+// GPS: a phone carrying a node feeds its position; every viewer sees the
+// marker move and a breadcrumb trail.
+// ------------------------------------------------------------------
+function renderTrails() {
+    if (!S.trailLayer) S.trailLayer = L.layerGroup().addTo(map);
+    S.trailLayer.clearLayers();
+    const cutoff = now() - 1800;
+    for (const [nid, pts] of Object.entries(S.trails)) {
+        const ll = pts.filter((p) => p[0] >= cutoff).map((p) => [p[1], p[2]]);
+        if (ll.length < 2) continue;
+        S.trailLayer.addLayer(L.polyline(ll, { color: "#f0abfc", weight: 3, opacity: 0.7, dashArray: "2 6", interactive: false }));
+    }
+}
+function onGps(g) {
+    S.gpsLive[g.node] = g.ts;
+    (S.trails[g.node] = S.trails[g.node] || []).push([g.ts, g.lat, g.lon, g.acc]);
+    if (S.trails[g.node].length > 2000) S.trails[g.node].splice(0, 500);
+    const n = nodeById(g.node);
+    if (n) { n.lat = g.lat; n.lon = g.lon; }
+    renderMap();
+    renderTrails();
+}
+function gpsInfo(text) { $("dGpsInfo").textContent = text; }
+function renderGpsButton() {
+    const mine = S.gps && S.gps.node === S.selected;
+    $("dGps").textContent = mine ? "Stop carrying" : "Carry with this phone";
+    $("dGps").classList.toggle("armed", !!mine);
+    if (!mine) {
+        const ts = S.gpsLive[S.selected];
+        gpsInfo(ts && now() - ts < 60 ? `GPS live from another device, ${ago(ts)}` : "");
+    }
+}
+async function stopCarry(clearTrail) {
+    if (!S.gps) return;
+    navigator.geolocation.clearWatch(S.gps.watch);
+    try { if (S.gps.lock) await S.gps.lock.release(); } catch (e) { /* ignore */ }
+    const node = S.gps.node;
+    S.gps = null;
+    await api(`/api/nodes/${node}/gps${clearTrail ? "?clear=1" : ""}`, { method: "DELETE" });
+    renderGpsButton();
+}
+async function startCarry(node) {
+    if (!window.isSecureContext) {
+        toast("warn", "Location needs HTTPS", "Open the dashboard through its https:// Tailscale address to share this phone's GPS");
+        gpsInfo("needs the https:// address");
+        return;
+    }
+    if (!("geolocation" in navigator)) { toast("bad", "No GPS", "This browser has no location support"); return; }
+    if (S.gps) await stopCarry(false);
+    S.gps = { node, lastSent: 0, last: null, lock: null };
+    try { if (navigator.wakeLock) S.gps.lock = await navigator.wakeLock.request("screen"); } catch (e) { /* optional */ }
+    S.gps.watch = navigator.geolocation.watchPosition(async (pos) => {
+        if (!S.gps) return;
+        const c = pos.coords, t = Date.now() / 1000;
+        const moved = S.gps.last ? map.distance([S.gps.last.lat, S.gps.last.lon], [c.latitude, c.longitude]) : 1e9;
+        if (t - S.gps.lastSent >= 2 || moved >= 3) {
+            S.gps.lastSent = t;
+            S.gps.last = { lat: c.latitude, lon: c.longitude };
+            await api(`/api/nodes/${S.gps.node}/gps`, { method: "POST",
+                body: { lat: c.latitude, lon: c.longitude, acc: c.accuracy } });
+        }
+        if (S.selected === S.gps.node) gpsInfo(`GPS live, accuracy ${Math.round(c.accuracy)} m`);
+    }, (err) => {
+        gpsInfo(err.code === 1 ? "location permission denied" : "no GPS fix yet");
+        if (err.code === 1) stopCarry(false);
+    }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+    renderGpsButton();
+    gpsInfo("waiting for a GPS fix...");
+    toast("good", `Carrying ${nodeName(node)}`, "This phone's GPS now positions the node. Keep the page open.");
+}
+$("dGps").onclick = () => (S.gps && S.gps.node === S.selected) ? stopCarry(false) : startCarry(S.selected);
+document.addEventListener("visibilitychange", async () => {
+    // wake locks drop when the page is hidden; take it back on return
+    if (S.gps && !document.hidden && navigator.wakeLock) {
+        try { S.gps.lock = await navigator.wakeLock.request("screen"); } catch (e) { /* ignore */ }
+    }
+});
+
 // Marker labels: each picks the side (right, left, above, below) that
 // doesn't overlap a label already placed or another marker, so nodes a few
 // metres apart stay readable. Re-run after every render, zoom and pan.
@@ -639,6 +722,7 @@ async function openDrawer(id) {
     $("dEvents").innerHTML = evs.length
         ? evs.map((e) => `<div><span class="${e.event === "online" ? "on" : "off"}">${e.event.toUpperCase()}</span> ${fullTime(e.ts)}</div>`).join("")
         : `<div>No link events in 24 h.</div>`;
+    renderGpsButton();
     if (S.editFor && S.editFor !== id) { S.editing = null; S.editFor = null; }
     if (S.audioDirty && S.audioDirty !== id) S.audioDirty = null;
     $("dFilters").innerHTML = "";
@@ -831,7 +915,7 @@ function cfgCells(n) {
         ["Firmware", c.fw ? c.fw.replace(/^(\w+ \d+) \d{4}/, "$1") : "-"],
         ["Mode", (c.mode || "-").toUpperCase(), c.mode === "scan" ? "good" : "warn"],
         ["Burned in", c.locked ? "YES" : "NO", c.locked ? "good" : "warn"],
-        ["Fleet key", c.key ? "SET" : "NONE", c.key ? "good" : "warn"],
+        ["Fleet key", keyState(n).txt, keyState(n).cls],
         ["Filters", `${c.filters}${sync ? `<span class="sync ${sync}">${sync === "ok" ? "SAME AS HOME" : "DIFFERS"}</span>` : ""}`, "", true],
         ["Uptime", uptime(c.up)],
         ["Heap", c.heap ? `${Math.round(c.heap / 1024)}K` : "-"],
@@ -1111,7 +1195,7 @@ function renderFleetCtl() {
         const yn = (v, goodWhen = 1) => `<td class="${v === goodWhen ? "on" : "off"}">${v ? "on" : "off"}</td>`;
         return `<tr data-id="${esc(n.id)}"><td class="v">${esc(n.alias || n.id)}${n.is_home ? ` <span class="cfg-age">home</span>` : ""}</td>
             <td>${esc(c.fw || "-")}</td><td>${esc(c.mode || "")}</td><td>${c.locked ? "yes" : "no"}</td>
-            ${yn(c.buzzer)}${yn(c.led)}<td class="${c.key ? "on" : "off"}">${c.key ? "set" : "none"}</td>
+            ${yn(c.buzzer)}${yn(c.led)}<td class="key-${keyState(n).cls}" title="${esc(keyState(n).tip || "")}">${keyState(n).txt}</td>
             <td>${c.filters}${sync ? `<span class="sync ${sync}">${sync === "ok" ? "SAME" : "DIFFERS"}</span>` : ""}</td>
             <td>${uptime(c.up)}</td><td>${c.heap ? Math.round(c.heap / 1024) + "K" : ""}</td>
             <td>${c.dsent != null ? `${c.dacked}/${c.dsent}` : ""}</td><td>${ago(n.cfg_ts)}</td></tr>`;
@@ -1310,11 +1394,29 @@ $("clearBtn").onclick = async () => {
 // ------------------------------------------------------------------
 // fleet key as QR (this computer + Tailscale devices only; server enforces it)
 // ------------------------------------------------------------------
+// Per-node key state: compares the fingerprint each node reports with the
+// fingerprint of the key on this computer (neither reveals the key).
+function keyState(n) {
+    const c = n && n.cfg;
+    if (!c) return { txt: "-", cls: "" };
+    if (!c.key) return { txt: "NO KEY", cls: "bad" };
+    if (!c.kfp) return { txt: "SET", cls: "warn", tip: "firmware too old to verify the key matches" };
+    if (!S.keyFp) return { txt: "SET", cls: "warn", tip: "no key on this computer to compare" };
+    return c.kfp === S.keyFp ? { txt: "KEY OK", cls: "good" } : { txt: "DIFFERS", cls: "bad", tip: "this node holds a different key: it can't talk to the fleet" };
+}
 async function loadFleetKeyStatus() {
     const st = await api("/api/fleetkey/status");
-    $("fkStatus").textContent = !st.present ? "No fleet key saved on this computer yet."
-        : st.viewable ? "A fleet key is saved on this computer." : "Saved on the computer running OUI-SPY Mesh. Viewable only there or from your Tailscale devices.";
+    S.keyFp = st.fp || null;
+    const fp = st.fp ? `${st.fp.slice(0, 4)}-${st.fp.slice(4)}` : "";
+    $("fkStatus").innerHTML = !st.present ? "No fleet key on this computer yet."
+        : `Key fingerprint <b class="mono">${esc(fp)}</b>${st.viewable ? "" : " (the key itself is viewable only on the computer running OUI-SPY Mesh or your Tailscale devices)"}`;
     $("fkShow").style.display = st.present && st.viewable ? "" : "none";
+    $("fkCreate").style.display = !st.present && st.viewable ? "" : "none";
+    const h = homeNode();
+    const hs = keyState(h);
+    $("fkHome").style.display = st.present && st.viewable && h && hs.txt !== "KEY OK" ? "" : "none";
+    renderFleetCtl();
+    renderRemote();
 }
 let fkTimer = null;
 function hideFleetKey() {
@@ -1325,30 +1427,45 @@ function hideFleetKey() {
     clearTimeout(fkTimer);
 }
 $("fkShow").onclick = () => twoTap($("fkShow"), async () => {
-    const r = await fetch("/api/fleetkey", { cache: "no-store" });
+    const r = await fetch("/api/fleetkey/reveal", { method: "POST", cache: "no-store" });
     const d = await r.json();
     if (!d.ok) { toast("bad", "Fleet key", d.error); return; }
     const q = qrcode(0, "M");
     q.addData(d.key);
     q.make();
     $("fkQr").innerHTML = q.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
-    $("fkText").value = d.key;
+    $("fkText").value = d.key.match(/.{1,4}/g).join(" ");   // grouped for reading; Copy and QR use it raw
+    $("fkText").dataset.raw = d.key;
+    $("fkSub").textContent = `Fingerprint ${d.fp.slice(0, 4)}-${d.fp.slice(4)}. Hides itself in 60 s`;
     $("fkModal").classList.add("open");
     clearTimeout(fkTimer);
     fkTimer = setTimeout(hideFleetKey, 60000);
 });
 $("fkClose").onclick = hideFleetKey;
 $("fkModal").onclick = (e) => { if (e.target === $("fkModal")) hideFleetKey(); };
+document.addEventListener("visibilitychange", () => { if (document.hidden) hideFleetKey(); });
 $("fkCopy").onclick = async () => {
-    const t = $("fkText");
+    const raw = $("fkText").dataset.raw || "";
     try {
-        await navigator.clipboard.writeText(t.value);   // needs a secure context
+        await navigator.clipboard.writeText(raw);       // needs a secure context
     } catch (e) {
-        t.select(); t.setSelectionRange(0, 999);         // plain-http fallback
-        document.execCommand("copy");
+        const t = document.createElement("textarea");   // plain-http fallback
+        t.value = raw; document.body.appendChild(t); t.select();
+        document.execCommand("copy"); t.remove();
     }
-    $("fkCopied").textContent = "Copied";
+    $("fkCopied").textContent = "Copied (no spaces)";
 };
+$("fkCreate").onclick = () => twoTap($("fkCreate"), async () => {
+    const r = await api("/api/fleetkey/create", { method: "POST" });
+    if (!r.ok) { toast("bad", "Fleet key", r.error); return; }
+    toast("good", "Fleet key created", `Fingerprint ${r.fp.slice(0, 4)}-${r.fp.slice(4)}. Now set it on every node.`);
+    loadFleetKeyStatus();
+});
+$("fkHome").onclick = () => twoTap($("fkHome"), async () => {
+    const r = await api("/api/fleetkey/provision_home", { method: "POST" });
+    if (!r.ok) { toast("bad", "Fleet key", r.error); return; }
+    onJob(r.job);
+});
 
 // tabs
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
@@ -1404,16 +1521,23 @@ async function boot() {
     S.hourly = st.hourly || [];
     S.macAliases = st.mac_aliases || {};
     S.filterMeta = st.filter_meta;
+    try {
+        const tr = await api("/api/tracks");
+        S.trails = tr.tracks || {};
+        for (const [k, v] of Object.entries(tr.live || {})) S.gpsLive[k] = v.ts;
+    } catch (e) { /* older server */ }
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     vendorOptions($("dPreset"));
     presetOptions($("fPreset"));
+    loadFleetKeyStatus();
     const badge = $("modeBadge");
     badge.textContent = st.mode.toUpperCase();
     badge.className = `mode-badge ${st.mode}`;
     applyFleet(st.fleet);
     applyTiles();
     initView();
+    renderTrails();
     renderSources();
     renderToggles();
     renderFeed();
@@ -1431,6 +1555,13 @@ async function boot() {
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); });
     sock.on("mac_aliases", (m) => { S.macAliases = m; });
     sock.on("job", onJob);
+    sock.on("gps", onGps);
+    sock.on("gps_stop", (g) => {
+        delete S.gpsLive[g.node];
+        if (g.cleared) delete S.trails[g.node];
+        renderMap(); renderTrails();
+        if (S.selected === g.node) renderGpsButton();
+    });
     sock.on("node_event", (e) => {
         const n = nodeById(e.id);
         if (S.booted && e.id !== S.fleet.home.id && !(n && n.is_home)) {
