@@ -40,7 +40,7 @@ DEFAULT_SETTINGS = {
     "links": True,                  # draw home-to-remote link lines on the map
     "status_poll": 120,             # s between automatic settings reads (0 = off)
     "map_view": None,               # [lat, lon, zoom]
-    "serial_port": "auto",          # auto | off | /dev/cu.usbmodemXXXX
+    "serial_port": "auto",          # auto | off | a port: COM5, /dev/ttyACM0, /dev/cu.usbmodemXXXX
     "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
              "topic": "+/detection"},
 }
@@ -49,11 +49,11 @@ DEFAULT_SETTINGS = {
 def parse_args():
     ap = argparse.ArgumentParser(description="OUI-SPY home node dashboard")
     ap.add_argument("--host", default=os.environ.get("OUISPY_HOST", "0.0.0.0"),
-                    help="bind address (default all interfaces: LAN + Tailscale; 127.0.0.1 = this Mac only)")
+                    help="bind address (default all interfaces: LAN + Tailscale; 127.0.0.1 = this computer only)")
     ap.add_argument("--open", action="store_true",
                     help="no access token from anywhere (not recommended: the dashboard can reboot the fleet)")
     ap.add_argument("--require-token", action="store_true",
-                    help="require the token from every device except this Mac, LAN and Tailscale included")
+                    help="require the token from every device except this computer, LAN and Tailscale included")
     ap.add_argument("--port", type=int, default=int(os.environ.get("OUISPY_PORT", 5077)))
     ap.add_argument("--serial", help="serial port, 'auto' (USB VID 0x303A) or 'off'")
     ap.add_argument("--mqtt", help="MQTT broker host[:port] (enables MQTT)")
@@ -76,7 +76,7 @@ app = Flask(__name__)
 
 # ----------------------------------------------------------------------
 # Access control. The dashboard can reboot, re-channel and re-filter the
-# fleet, so anything that isn't this Mac needs a token: open the printed
+# fleet, so anything that isn't this computer needs a token: open the printed
 # link (?token=...) once and the browser keeps it in a cookie.
 # ----------------------------------------------------------------------
 TOKEN_FILE = os.path.join(HERE, "access_token")
@@ -122,8 +122,8 @@ def _is_trusted_net():
     return any(ip in n for n in TRUSTED_NETS)
 
 
-# The fleet key (kept on this Mac, outside the repo) can be shown as a QR for
-# provisioning a node from a phone. Only this Mac and your Tailscale devices
+# The fleet key (kept on this computer, outside the repo) can be shown as a QR
+# for provisioning a node from a phone. Only this computer and your Tailscale devices
 # may see it: the plain LAN reaches the dashboard without a token.
 FLEET_KEY_FILE = os.path.expanduser("~/.config/ouispy/fleet_key")
 KEY_VIEW_NETS = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
@@ -163,7 +163,7 @@ def _gate():
     if request.path.startswith("/socket.io"):
         return None   # checked in the connect handler
     if not _authorized():
-        return Response("OUI-SPY Mesh: open the link with ?token=... printed on the Mac "
+        return Response("OUI-SPY Mesh: open the link with ?token=... printed where it runs "
                         "(or in home-dashboard/access_token).", 401, mimetype="text/plain")
     if request.args.get("token") and request.path == "/":
         # Trade the URL token for a long-lived cookie and drop it from the URL.
@@ -521,10 +521,10 @@ def api_fleetkey_status():
 @app.route("/api/fleetkey")
 def api_fleetkey():
     if not _key_viewer_ok():
-        return jsonify({"ok": False, "error": "the fleet key is only shown on this Mac or your Tailscale devices"}), 403
+        return jsonify({"ok": False, "error": "the fleet key is only shown on the computer running OUI-SPY Mesh or your Tailscale devices"}), 403
     k = _fleet_key()
     if not k:
-        return jsonify({"ok": False, "error": "no fleet key saved on this Mac (~/.config/ouispy/fleet_key)"}), 404
+        return jsonify({"ok": False, "error": "no fleet key saved on this computer (~/.config/ouispy/fleet_key)"}), 404
     resp = jsonify({"ok": True, "key": k})
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -606,21 +606,39 @@ def on_connect():
 
 
 def _addresses():
-    """LAN and Tailscale (100.x) addresses to print as ready-made links."""
+    """LAN and Tailscale (100.x) addresses to print as ready-made links.
+    Portable: no ifconfig/ip/ipconfig parsing, works on Linux, macOS and
+    Windows. A UDP "connect" picks the outbound interface without sending
+    anything; Tailscale's own CLI reports its address when installed."""
     out = []
     try:
-        import subprocess
-        txt = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3).stdout
-        for line in txt.splitlines():
-            line = line.strip()
-            if line.startswith("inet ") and not line.startswith("inet 127."):
-                out.append(line.split()[1])
-    except Exception:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))          # private, unroutable: nothing is sent
+        out.append(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            out.append(info[4][0])
+    except OSError:
+        pass
+    import shutil
+    import subprocess
+    ts = shutil.which("tailscale") or next((p for p in (
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        r"C:\Program Files\Tailscale\tailscale.exe") if os.path.exists(p)), None)
+    if ts:
         try:
-            out.append(socket.gethostbyname(socket.gethostname()))
-        except OSError:
+            r = subprocess.run([ts, "ip", "-4"], capture_output=True, text=True, timeout=3)
+            out += [l.strip() for l in r.stdout.splitlines() if l.strip()]
+        except (OSError, subprocess.SubprocessError):
             pass
-    return out
+    seen = []
+    for ip in out:
+        if ip and not ip.startswith("127.") and ip not in seen:
+            seen.append(ip)
+    return seen
 
 
 if __name__ == "__main__":
@@ -646,7 +664,7 @@ if __name__ == "__main__":
     threading.Thread(target=ticker, daemon=True).start()
     mode = "DEMO" if args.demo else ("REPLAY" if args.replay else "LIVE")
     print(f"OUI-SPY Mesh [{mode}]  (db: {db_path})")
-    print(f"  this Mac:  http://127.0.0.1:{args.port}")
+    print(f"  this computer:  http://127.0.0.1:{args.port}")
     if args.host not in ("127.0.0.1", "localhost"):
         q = f"/?token={ACCESS_TOKEN}" if args.require_token else ""
         for ip in _addresses():

@@ -1272,12 +1272,12 @@ $("clearBtn").onclick = async () => {
 };
 
 // ------------------------------------------------------------------
-// fleet key as QR (this Mac + Tailscale devices only; server enforces it)
+// fleet key as QR (this computer + Tailscale devices only; server enforces it)
 // ------------------------------------------------------------------
 async function loadFleetKeyStatus() {
     const st = await api("/api/fleetkey/status");
-    $("fkStatus").textContent = !st.present ? "No fleet key saved on the Mac yet."
-        : st.viewable ? "A fleet key is saved on the Mac." : "Saved on the Mac. Viewable only from the Mac itself or your Tailscale devices.";
+    $("fkStatus").textContent = !st.present ? "No fleet key saved on this computer yet."
+        : st.viewable ? "A fleet key is saved on this computer." : "Saved on the computer running OUI-SPY Mesh. Viewable only there or from your Tailscale devices.";
     $("fkShow").style.display = st.present && st.viewable ? "" : "none";
 }
 let fkTimer = null;

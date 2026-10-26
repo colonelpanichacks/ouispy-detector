@@ -116,7 +116,7 @@ class SerialSource(Source):
         if serial is None:
             self.set_state(detail="pyserial not installed")
             return
-        rec = open(self.record, "a", buffering=1) if self.record else None
+        rec = open(self.record, "a", buffering=1, encoding="utf-8") if self.record else None
         while not self.stop_evt.is_set():
             port = self._pick_port()
             if not port:

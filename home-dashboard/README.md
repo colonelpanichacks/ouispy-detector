@@ -6,23 +6,62 @@ detection. It runs entirely on your machine: no cloud, no accounts, no telemetry
 
 ## Run
 
+Works the same on Linux, macOS and Windows: Python 3.9+ and a terminal. Run
+it from inside `home-dashboard/`.
+
+Linux / macOS:
+
 ```bash
 cd home-dashboard
-pip install -r requirements.txt
-python ouispymesh.py
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python ouispymesh.py
 ```
 
-Open http://127.0.0.1:5077.
+Windows (PowerShell or Windows Terminal):
 
-| Command | What it does |
+```powershell
+cd home-dashboard
+py -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python ouispymesh.py
+```
+
+Then open http://127.0.0.1:5077. The terminal also prints the LAN and
+Tailscale links.
+
+| Option | What it does |
 |---|---|
-| `python ouispymesh.py` | Live mode: auto-detects the home node on USB (Espressif VID `0x303A`), plus MQTT if you set it up in Settings |
-| `python ouispymesh.py --demo` | Simulated 5-node fleet with 24 h of backfilled history. Needs no hardware and uses its own database |
-| `python ouispymesh.py --serial /dev/cu.usbmodem1101` | Use a specific serial port (`--serial off` turns serial off) |
-| `python ouispymesh.py --mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
-| `python ouispymesh.py --record capture.log` | Also append every raw serial line (with a timestamp) to a file |
-| `python ouispymesh.py --replay capture.log --speed 4` | Replay a recorded capture through the dashboard |
-| `--host 0.0.0.0 --port 5077` | Bind address and port (the default is localhost only) |
+| *(none)* | Live mode: auto-detects the home node on USB (Espressif VID `0x303A`), plus MQTT if set up in Settings |
+| `--demo` | Simulated 5-node fleet with 24 h of backfilled history. Needs no hardware and uses its own database |
+| `--serial PORT` | A specific serial port: `COM5` (Windows), `/dev/ttyACM0` (Linux), `/dev/cu.usbmodem1101` (macOS). `--serial off` turns serial off |
+| `--mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
+| `--record capture.log` | Also append every raw serial line (with a timestamp) to a file |
+| `--replay capture.log --speed 4` | Replay a recorded capture through the dashboard |
+| `--host` / `--port` | Bind address and port (default all interfaces, port 5077). `--host 127.0.0.1` restricts it to this computer |
+
+**Linux serial permissions:** add yourself to the serial group once with
+`sudo usermod -aG dialout $USER` (`uucp` on Arch), then log out and back in.
+
+## Start automatically
+
+Ready-made files are in [`autostart/`](autostart/). Edit the paths in them to
+match where you put the repo.
+
+- **macOS (launchd):** copy `autostart/com.ouispy.mesh.plist` to
+  `~/Library/LaunchAgents/`, then run
+  `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ouispy.mesh.plist`.
+  Run `launchctl kickstart -k gui/$(id -u)/com.ouispy.mesh` to restart it after
+  updating, and `launchctl bootout gui/$(id -u)/com.ouispy.mesh` to stop it
+  (stop it before flashing the home over USB).
+- **Linux (systemd, per user):** copy `autostart/ouispymesh.service` to
+  `~/.config/systemd/user/`, then run
+  `systemctl --user daemon-reload && systemctl --user enable --now ouispymesh`.
+  `loginctl enable-linger $USER` keeps it running without a login session.
+  Run `systemctl --user stop ouispymesh` before flashing.
+- **Windows (Task Scheduler):** run `autostart\install-windows-task.ps1` once in
+  PowerShell. It starts OUI-SPY Mesh at logon and restarts it if it stops.
+  Run `Stop-ScheduledTask OUISPYMesh` before flashing.
 
 ## Data path
 
@@ -158,16 +197,21 @@ against the demo console simulator.
 With a fleet key set, the whole mesh is sealed (AES-256-GCM). Each node gets the
 key over its USB console (`meshkey <key>`) or through its setup portal (Mesh
 section, Fleet key). It never goes over the air. The dashboard reads the key from
-`~/.config/ouispy/fleet_key` on this Mac, outside the repo.
+`~/.config/ouispy/fleet_key` on the computer running it, outside the repo.
 
 **Settings, Fleet key, Show key as QR** displays it as a QR code, which hides
 itself after 60 s. Scan it on your phone, then paste it into a new node's portal.
-The key is only shown to this Mac and your Tailscale devices, never to the plain
+The key is only shown on that computer and your Tailscale devices, never to the plain
 LAN.
 
 ## Privacy notes
 
-- The server binds `127.0.0.1` and Socket.IO only accepts same-origin connections.
+- The server listens on all interfaces. This computer, your LAN and Tailscale
+  open it directly; any other network needs the access token in
+  `home-dashboard/access_token` (`?token=...` once, then a cookie).
+  `--require-token` demands it from everything except this computer, and
+  `--host 127.0.0.1` keeps it local-only. Socket.IO only accepts same-origin
+  connections.
 - Leaflet and the Socket.IO client are vendored in `static/vendor/`, so the page
   loads no third-party scripts.
 - Map tiles are the one thing that goes online. By default they come from
