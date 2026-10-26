@@ -245,6 +245,31 @@ burnin                                   → same as provisiondone, then lock co
 
 Responses are `OK ...` / `ERR ...` per line. Filters staged this way persist like any saved config.
 
+**Remote management console**
+
+These work in **any mode**, including a burned-in home node in the field. `<target>` is a node's stable ID (e.g. `D4E5F6`) or `all`. A command for one node goes out addressed to that node, and the others ignore it.
+
+```
+status                                   → this node's settings + health as one RST {json} line
+filters                                  → this node's filter list as one RFL {json} line
+audio <0|1> <0|1>                        → this node: buzzer on/off, LED on/off (persisted)
+ident [secs]                             → this node: beep + flash so you can find it (ignores mute)
+reboot                                   → reboot this node
+rstatus <target>                         → ask node(s) for their settings (RST lines come back)
+rfilters <target>                        → ask node(s) for their filter lists (RFL lines come back)
+raudio <target> <0|1> <0|1>              → set buzzer/LED on node(s)
+rident <target> [secs]                   → make node(s) beep + flash
+rpreset <target> <axon|meta|ipro|verkada> → add a vendor preset on node(s), which then reboot
+rreboot <target>                         → reboot node(s)
+mfbegin <target|self|all>                → start a filter-list upload (from a tool or script):
+mfdata <hex>                             →   records in the MESH_CMD_FILTERS format, up to 96 bytes a line
+mfend                                    →   validate and send it (self = write to this node)
+```
+
+Each accepted command prints `CMD {"op":..,"id":..,"target":..}`, and every ack from the fleet prints `ACK {"node":..,"id":..,"st":..}` (`st` 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed). Nodes on firmware older than this build answer the new commands with `st` 1. They still obey fleet-wide `raudio`/`rreboot` and filter pushes.
+
+A pushed filter list is validated as a whole before the remote writes anything. A list it can't take is refused, and its existing filters stay intact.
+
 **Serial output**
 
 ```

@@ -24,7 +24,8 @@ extern bool isSerialConnected();
 //                  tail (stable across reboots; the roster and UI key on
 //                  this, never on the randomized origin MAC), then per type:
 //
-// Announce body:  {u8 nodeId[3], u8 role}
+// Announce body:  {u8 nodeId[3], u8 role, u8 channel}  (channel: the
+//                  sender's mesh channel; older builds send no channel byte)
 // Detection body: {u8 nodeId[3], i8 rssi, u8 dtype, u8 flags(bit0=wifi),
 //                  char mac[18], char ident[18], char desc[40], u16 detId}
 //                  detId (origin's detection counter) makes delivery
@@ -35,6 +36,8 @@ extern bool isSerialConnected();
 //                  u32 crc32, data[]}  (crc covers the reassembled payload)
 // Ack body:       {u8 nodeId[3], u8 cmd, u16 cmdId, u8 status, u8 count}
 // Bye body:       {u8 nodeId[3], u8 reason}
+// Status body:    {u8 nodeId[3], data[]}  (management reply, layout owned
+//                  by main.cpp; flooded, ttl 3)
 #define MESH_MAGIC0   'O'
 #define MESH_MAGIC1   'S'
 #define MESH_VERSION  3
@@ -44,6 +47,7 @@ extern bool isSerialConnected();
 #define MESH_T_ACK      4
 #define MESH_T_BYE      5
 #define MESH_T_DETACK   7    // 6 is the esp-lr-mesh library's DATA_TO
+#define MESH_T_STATUS   8
 #define MESH_TTL        3
 #define MESH_HDR_LEN    12
 #define MESH_MIN_LEN    (MESH_HDR_LEN + 3)   // header + nodeId: every packet has both
@@ -113,6 +117,8 @@ static MeshDetSeen detSeen[MESH_DET_SEEN];
 static uint32_t detSent = 0, detRetries = 0, detAcked = 0, detExpired = 0, detEvicted = 0;
 
 static bool meshStarted = false;
+static bool meshLrRateOk = false;   // ESP-NOW really transmitting at the LR rate
+static volatile bool txInflight = false;   // a frame is on the air, awaiting its send callback
 static bool meshParked = false;
 static uint8_t selfMac[6] = {0};
 static uint8_t selfId[3] = {0};   // factory MAC tail — the stable node ID
@@ -134,6 +140,28 @@ static uint8_t txHead = 0, txTail = 0, txCount = 0;
 // in meshTick — same portMUX pattern as the detection ring in main.cpp.
 static uint8_t rxQ[MESH_RXQ_SIZE][MESH_PKT_MAX];
 static uint8_t rxLen[MESH_RXQ_SIZE];
+static uint8_t rxChan[MESH_RXQ_SIZE];   // radio channel when each frame arrived
+
+// The channel the radio is on right now (0 = unknown, e.g. an MQTT STA
+// window). Frames heard on any OTHER channel than the mesh's come from a
+// node parked somewhere else, caught while our sweep passed its channel:
+// they must not count as a link. Treating them as one hid split fleets —
+// the roster flapped, and heal never ran because the stray frames kept
+// resetting its silence timer.
+static volatile uint8_t radioCh = 0;
+
+// Stray sightings: nodes heard on a channel other than ours.
+#define MESH_STRAY_SLOTS 4
+struct MeshStray { uint8_t id[3]; uint8_t ch; uint8_t role; uint32_t ts; };
+static MeshStray strays[MESH_STRAY_SLOTS];
+
+// Remote fast-follow: a remote that hears the HOME announcing on another
+// channel moves there (the home is the fleet's channel anchor and never
+// heals on its own). Needs repeated sightings so one odd frame can't move it.
+#define MESH_FOLLOW_HITS     3
+#define MESH_FOLLOW_WINDOW_MS 15000UL
+static uint8_t  followCh = 0, followHits = 0;
+static uint32_t followFirstAt = 0, homeLinkedAt = 0;
 static uint8_t rxHead = 0, rxTail = 0, rxCount = 0;
 static portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -173,6 +201,31 @@ static uint16_t outLen = 0, outOff = 0, outCmdId = 0;
 static uint8_t  outCmd = 0;
 static uint32_t outCrc = 0;
 static bool     outActive = false;
+
+// Command repeat rounds. Every node time-slices its radio (WiFi sweep, BLE
+// scan, mesh window), so a command sent once only lands if the receiver is
+// on the mesh channel at that moment — in scanning mode most single-shot
+// commands simply vanished. A transfer now goes out in several rounds
+// spread over ~4 s (longer than a receiver's sweep cycle); receivers drop
+// rounds of a command they already applied (doneRecently, plus an RTC copy
+// that survives the reboot a REBOOT/FILTERS/PRESET command causes). Big
+// transfers repeat less so they don't hog the channel.
+static const uint16_t kCmdRoundGapMs[] = { 150, 250, 350, 450, 600, 800, 1000 };
+static uint8_t  outRepeatLeft = 0, outRoundIdx = 0;
+static uint32_t outRepeatAt = 0;
+
+// Listen window: after sending a command (or while owing a reply) the node
+// keeps its radio on the mesh channel, without BLE, so the answers coming
+// back aren't lost to a BLE scan (coexistence gives it ~2/3 of the air).
+static uint32_t listenUntil = 0;
+
+// Acks go out three times (receivers would otherwise miss them the same
+// way); the commander counts and reports each node's ack once.
+#define MESH_ACK_COPIES 3
+struct MeshAckRep { bool used; uint8_t body[5]; uint8_t left; uint32_t nextAt; };
+static MeshAckRep ackRep[4];
+struct MeshAckSeen { uint8_t node[3]; uint16_t cmdId; uint32_t ts; };
+static MeshAckSeen ackSeen[16];
 
 // Fleet key replay protection: highest counter accepted per commander, and
 // this node's own send counter. Both persist across reboots.
@@ -242,7 +295,8 @@ void meshStats(uint32_t& rxAll, uint32_t& rxQueued, uint32_t& rxDup,
 #define MESH_URGENT_MS 1500UL
 bool meshUrgent() {
     if (!meshStarted) return false;
-    if (txCount > 0 || outActive) return true;
+    if (txCount > 0 || outActive || outRepeatLeft) return true;
+    if ((int32_t)(listenUntil - millis()) > 0) return true;
     uint32_t now = millis();
     for (int i = 0; i < MESH_DET_PENDING; i++) {
         if (pendDet[i].used && now - pendDet[i].firstAt < MESH_URGENT_MS) return true;
@@ -495,6 +549,11 @@ static bool meshTxPush(const uint8_t* pkt, uint8_t len) {
 // MESH_TXQ_RESERVE slots for announces, acks and relays. Chunk k carries
 // bytes [180k, 180k+180); the final chunk carries the CRC of the payload.
 static void meshPumpCommand() {
+    if (!outActive && outRepeatLeft && (int32_t)(millis() - outRepeatAt) >= 0) {
+        outOff = 0;            // next round: the whole transfer again
+        outActive = true;
+        outRepeatLeft--;
+    }
     while (outActive && txCount < MESH_TXQ_SIZE - MESH_TXQ_RESERVE) {
         uint16_t chunkLen = min((uint16_t)MESH_CMD_CHUNK, (uint16_t)(outLen - outOff));
         bool more = (outOff + chunkLen) < outLen;
@@ -512,7 +571,13 @@ static void meshPumpCommand() {
         if (chunkLen > 0) { memcpy(pkt + n, outBuf + outOff, chunkLen); n += chunkLen; }
         meshTxPush(pkt, n);
         outOff += chunkLen;
-        if (!more) outActive = false;
+        if (!more) {
+            outActive = false;
+            if (outRepeatLeft) {
+                outRepeatAt = millis() + kCmdRoundGapMs[min((int)outRoundIdx, 6)] + random(0, 80);
+                outRoundIdx++;
+            }
+        }
     }
 }
 
@@ -523,26 +588,34 @@ static void meshPumpCommand() {
 // driver rejects (typically a BLE coexistence collision) gets exactly one
 // retry next flush instead of vanishing.
 static void meshPumpDetections(uint32_t now);
+static void meshAckRepeatTick(uint32_t now);
 
 void meshFlushTxNow() {
     if (!meshStarted || !meshParked) return;
     meshPumpCommand();
+    meshAckRepeatTick(millis());   // here, not in meshTick: pre-reboot flush loops only call this
     meshPumpDetections(millis());
     uint8_t bcast[6];
     memset(bcast, 0xFF, 6);
-    static uint8_t retryBuf[MESH_PKT_MAX];
-    static uint8_t retryLen = 0;
-    if (retryLen > 0) {
-        if (esp_now_send(bcast, retryBuf, retryLen) == ESP_OK) meshTxSent++;
-        else meshTxFail++;
-        retryLen = 0;
-    }
+    // One frame on the air at a time: the next goes out after the driver's
+    // send-done callback for the last one (25 ms cap). Firing the whole
+    // queue back-to-back overflowed ESP-NOW's internal buffer — at the LR
+    // rate a frame is ~4x longer on air — and the driver rejected frames,
+    // sometimes the very command being delivered. A rejected frame stays at
+    // the head and is retried (3 tries) instead of being thrown away.
+    static uint8_t headTries = 0;
     while (txCount > 0) {
-        if (esp_now_send(bcast, txQ[txTail], txLen[txTail]) == ESP_OK) meshTxSent++;
-        else {
+        uint32_t t0 = millis();
+        while (txInflight && millis() - t0 < 25) delay(1);
+        txInflight = false;
+        if (esp_now_send(bcast, txQ[txTail], txLen[txTail]) == ESP_OK) {
+            meshTxSent++;
+            txInflight = true;
+            headTries = 0;
+        } else {
             meshTxFail++;
-            memcpy(retryBuf, txQ[txTail], txLen[txTail]);
-            retryLen = txLen[txTail];
+            if (++headTries < 3) { delay(2); continue; }
+            headTries = 0;   // give up on this one, keep the queue moving
         }
         txTail = (txTail + 1) % MESH_TXQ_SIZE;
         txCount--;
@@ -554,6 +627,10 @@ uint8_t meshTxPending() {
     uint16_t left = 0;
     if (outActive) left = (uint16_t)((outLen - outOff + MESH_CMD_CHUNK - 1) / MESH_CMD_CHUNK);
     if (outActive && left == 0) left = 1;   // empty payload: one final chunk
+    left += outRepeatLeft;                  // rounds still to come
+    for (int i = 0; i < 4; i++) {           // ack copies still to come: a node
+        if (ackRep[i].used) left += ackRep[i].left;   // about to reboot waits for them
+    }
     uint16_t total = txCount + left;
     return total > 255 ? 255 : (uint8_t)total;
 }
@@ -671,13 +748,20 @@ static void meshSendDetAck(const uint8_t* origin, uint16_t detId) {
 }
 
 static void meshSendAnnounce() {
-    uint8_t pkt[MESH_BYE_LEN + 1];
+    uint8_t pkt[MESH_BYE_LEN + 2];
     uint8_t n = meshBuildHeader(pkt, MESH_T_ANNOUNCE, 1);
     n += meshBuildBodyId(pkt + n);
     pkt[n++] = meshCfg.home ? 1 : 0;
-    if (!meshTxPush(pkt, n) && isSerialConnected()) {
-        Serial.println("[MESH] TX queue full, announce dropped");
-    }
+    // Our channel, stated outright. The radio can't be trusted to tell:
+    // 2.4 GHz channels overlap, so up close a frame sent on channel 4 is
+    // also decoded by a node parked on 6 and looks like a working link —
+    // until the nodes move apart and it vanishes.
+    pkt[n++] = meshCfg.channel;
+    // Announces repeat every 1.5 s, so when the queue is nearly full (a
+    // command's repeat rounds, acks, status replies) skip this one quietly
+    // and leave the slots for traffic that matters.
+    if (txCount >= MESH_TXQ_SIZE - 1) return;
+    meshTxPush(pkt, n);
 }
 
 uint16_t meshNewCmdId() {
@@ -729,7 +813,7 @@ static void keyCtrStore(const uint8_t* id, uint32_t ctr) {
 }
 
 bool meshQueueCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint16_t len) {
-    if (!meshStarted || outActive) return false;
+    if (!meshStarted || outActive || outRepeatLeft) return false;
     bool sign = meshKeySet();
     if (len > MESH_STAGE_MAX - (sign ? MESH_SIG_LEN : 0)) return false;
     if (len) memcpy(outBuf, payload, len);
@@ -748,6 +832,10 @@ bool meshQueueCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
     outLen = len;
     outOff = 0;
     outCmdId = cmdId;
+    uint16_t chunks = (len + MESH_CMD_CHUNK - 1) / MESH_CMD_CHUNK;
+    outRepeatLeft = (chunks <= 2) ? 7 : (chunks <= 6) ? 3 : 1;   // 8 / 4 / 2 rounds
+    outRoundIdx = 0;
+    meshHoldRadio(8000);   // rounds take ~4 s; replies trail them by a few more
     outCrc = crc32_le(0, outBuf, outLen);
     outActive = true;
     meshPumpCommand();
@@ -768,6 +856,57 @@ void meshSendAck(uint8_t cmd, uint16_t cmdId, uint8_t status, uint8_t count) {
     pkt[n++] = count;
     if (!meshTxPush(pkt, n) && isSerialConnected()) {
         Serial.println("[MESH] TX queue full, ack dropped");
+    }
+    // Schedule the extra copies (fresh seq each, so relays forward them).
+    int slot = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!ackRep[i].used) { slot = i; break; }
+        if (ackRep[i].nextAt < ackRep[slot].nextAt) slot = i;
+    }
+    memcpy(ackRep[slot].body, pkt + MESH_HDR_LEN + 3, 5);
+    ackRep[slot].left = MESH_ACK_COPIES - 1;
+    ackRep[slot].nextAt = millis() + 250 + random(0, 150);
+    ackRep[slot].used = true;
+}
+
+static void meshAckRepeatTick(uint32_t now) {
+    for (int i = 0; i < 4; i++) {
+        MeshAckRep& a = ackRep[i];
+        if (!a.used || (int32_t)(now - a.nextAt) < 0 || txCount >= MESH_TXQ_SIZE) continue;
+        uint8_t pkt[MESH_ACK_LEN];
+        uint8_t n = meshBuildHeader(pkt, MESH_T_ACK, MESH_TTL);
+        n += meshBuildBodyId(pkt + n);
+        memcpy(pkt + n, a.body, 5);
+        n += 5;
+        meshTxPush(pkt, n);
+        if (--a.left == 0) a.used = false;
+        else a.nextAt = now + 500 + random(0, 300);
+    }
+}
+
+// True the first time (node, cmdId) acks within 30 s; copies return false.
+static bool ackFirst(const uint8_t* node, uint16_t cmdId, uint32_t now) {
+    int slot = 0;
+    for (int i = 0; i < 16; i++) {
+        if (ackSeen[i].ts && now - ackSeen[i].ts < 30000 && ackSeen[i].cmdId == cmdId &&
+            memcmp(ackSeen[i].node, node, 3) == 0) return false;
+        if (ackSeen[i].ts < ackSeen[slot].ts) slot = i;
+    }
+    memcpy(ackSeen[slot].node, node, 3);
+    ackSeen[slot].cmdId = cmdId;
+    ackSeen[slot].ts = now ? now : 1;
+    return true;
+}
+
+void meshSendStatus(const uint8_t* data, uint8_t len) {
+    if (!meshStarted || len > MESH_PKT_MAX - MESH_MIN_LEN) return;
+    uint8_t pkt[MESH_PKT_MAX];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_STATUS, MESH_TTL);
+    n += meshBuildBodyId(pkt + n);
+    memcpy(pkt + n, data, len);
+    n += len;
+    if (!meshTxPush(pkt, n) && isSerialConnected()) {
+        Serial.println("[MESH] TX queue full, status dropped");
     }
 }
 
@@ -800,7 +939,16 @@ static void stageReset() {
     stageTotal = 0;
 }
 
+// The last command applied, kept in RTC RAM: it survives the software
+// reset a REBOOT/FILTERS/PRESET command triggers, so the repeat rounds
+// still on the air when the node comes back up aren't applied again.
+struct MeshRtcDone { uint32_t magic; uint8_t origin[3]; uint16_t cmdId; };
+static RTC_NOINIT_ATTR MeshRtcDone rtcDone;
+#define MESH_RTC_MAGIC 0x4F53444EUL   // 'OSDN'
+
 static bool doneRecently(const uint8_t* origin, uint16_t cmdId, uint32_t now) {
+    if (rtcDone.magic == MESH_RTC_MAGIC && rtcDone.cmdId == cmdId &&
+        memcmp(rtcDone.origin, origin, 3) == 0 && now < MESH_STAGE_GAP_MS) return true;
     for (int i = 0; i < 4; i++) {
         if (doneCache[i].live && doneCache[i].cmdId == cmdId &&
             memcmp(doneCache[i].origin, origin, 3) == 0 &&
@@ -821,6 +969,9 @@ static void doneRemember(const uint8_t* origin, uint16_t cmdId, uint32_t now) {
     doneCache[slot].cmdId = cmdId;
     doneCache[slot].ts = now;
     doneCache[slot].live = true;
+    memcpy(rtcDone.origin, origin, 3);
+    rtcDone.cmdId = cmdId;
+    rtcDone.magic = MESH_RTC_MAGIC;
 }
 
 // Verify (fleet key) and hand a complete, CRC-checked payload to main.cpp.
@@ -939,6 +1090,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
     if (type == MESH_T_ACK && len < MESH_ACK_LEN) { meshRxShort++; return; }
     if (type == MESH_T_BYE && len < MESH_BYE_LEN) { meshRxShort++; return; }
     if (type == MESH_T_DETACK && len < MESH_DETACK_LEN) { meshRxShort++; return; }
+    if (type == MESH_T_STATUS && len < MESH_MIN_LEN + 1) { meshRxShort++; return; }
     if (memcmp(data + 6, selfMac, 6) == 0) { meshRxSelf++; return; }  // our own packet relayed back
 
     if (meshSeen(data + 6, data[5], millis())) { meshRxDup++; return; }
@@ -948,6 +1100,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
         uint8_t l = (uint8_t)min(len, MESH_PKT_MAX);
         memcpy(rxQ[rxHead], data, l);
         rxLen[rxHead] = l;
+        rxChan[rxHead] = radioCh;
         rxHead = (rxHead + 1) % MESH_RXQ_SIZE;
         rxCount++;
         meshRxQueued++;
@@ -956,6 +1109,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
 }
 
 static void meshSendCb(const uint8_t* mac_addr, esp_now_send_status_t status) {
+    txInflight = false;   // the radio is free for the next frame
     if (status != ESP_NOW_SEND_SUCCESS) { sendFailures++; meshTxCbFail++; }
 }
 
@@ -985,7 +1139,14 @@ bool mesh_init() {
     // Opt-in (build flag): send ESP-NOW itself at the LR PHY rate. A fleet-
     // wide change — every node must run the same setting. Without it ESP-NOW
     // uses the driver's default rate.
-    esp_wifi_config_espnow_rate(WIFI_IF_STA, (wifi_phy_rate_t)MESH_ESPNOW_LR_RATE);
+    {
+        esp_err_t re = esp_wifi_config_espnow_rate(WIFI_IF_STA, (wifi_phy_rate_t)MESH_ESPNOW_LR_RATE);
+        meshLrRateOk = (re == ESP_OK);
+        if (isSerialConnected()) Serial.printf("[MESH] ESP-NOW TX rate: LR (phy rate %d): %s\n",
+                                               (int)MESH_ESPNOW_LR_RATE, esp_err_to_name(re));
+    }
+#else
+    if (isSerialConnected()) Serial.println("[MESH] ESP-NOW TX rate: driver default (1 Mbps, not LR)");
 #endif
     // NOTE: deliberately no esp_wifi_set_ps()/set_max_tx_power() here. Both
     // abort inside pm_set_sleep_type from wifi_set_channel_process on this
@@ -1049,13 +1210,116 @@ void mesh_deinit() {
     esp_now_deinit();
 }
 
+// Radio duty accounting: how much of the time this node actually sits on
+// the mesh channel (and how much of that is shared with a BLE scan, which
+// coexistence gives most of the airtime). Two nodes only hear each other
+// while both are parked, so these numbers bound the link. Rolling 10 s.
+static uint32_t dutyAt = 0, dutyParkMs = 0, dutyBleMs = 0, dutyWinAt = 0;
+static bool dutyBle = false;
+static uint8_t dutyParkPct = 0, dutyBlePct = 0;
+
+static void dutyAccount(uint32_t now) {
+    if (meshParked) {
+        uint32_t d = now - dutyAt;
+        dutyParkMs += d;
+        if (dutyBle) dutyBleMs += d;
+    }
+    dutyAt = now;
+}
+
+void meshSetBlePhase(bool scanning) {
+    dutyAccount(millis());
+    dutyBle = scanning;
+}
+
+void meshDutyStats(uint8_t& parkPct, uint8_t& parkBlePct) {
+    parkPct = dutyParkPct;
+    parkBlePct = dutyBlePct;
+}
+
+static void dutyTick(uint32_t now) {
+    if (now - dutyWinAt < 10000) return;
+    dutyAccount(now);
+    uint32_t win = now - dutyWinAt;
+    dutyParkPct = (uint8_t)min(100UL, (unsigned long)(dutyParkMs * 100 / win));
+    dutyBlePct = (uint8_t)min(100UL, (unsigned long)(dutyBleMs * 100 / win));
+    dutyParkMs = dutyBleMs = 0;
+    dutyWinAt = now;
+}
+
 void meshParkChannel() {
     if (!meshStarted) return;
     esp_wifi_set_channel(meshCfg.channel, WIFI_SECOND_CHAN_NONE);
+    radioCh = meshCfg.channel;
+    dutyAccount(millis());
     meshParked = true;
 }
 
-void meshUnparkChannel() { meshParked = false; }
+void meshUnparkChannel() { dutyAccount(millis()); meshParked = false; }
+
+void meshNoteRadioChannel(uint8_t ch) { radioCh = ch; }
+
+// Narrower than meshUrgent(): only work that justifies pausing BLE — a
+// command going out, a reply owed or expected, a fresh detection. Routine
+// announces sitting in the queue do NOT count (they are almost always
+// there, and counting them starved BLE completely).
+bool meshNeedsAir() {
+    if (!meshStarted) return false;
+    uint32_t now = millis();
+    if (outActive || outRepeatLeft || (int32_t)(listenUntil - now) > 0) return true;
+    for (int i = 0; i < MESH_DET_PENDING; i++) {
+        if (pendDet[i].used && now - pendDet[i].firstAt < MESH_URGENT_MS) return true;
+    }
+    return false;
+}
+
+void meshHoldRadio(uint32_t ms) {
+    uint32_t until = millis() + ms;
+    if ((int32_t)(until - listenUntil) > 0) listenUntil = until;
+}
+
+const char* meshTxRateName() {
+#ifdef MESH_ESPNOW_LR_RATE
+    if (meshLrRateOk) return (MESH_ESPNOW_LR_RATE == WIFI_PHY_RATE_LORA_250K) ? "lr250k" : "lr500k";
+    return "lr-failed";
+#else
+    return "1m";
+#endif
+}
+
+void meshStraysJson(String& out) {
+    uint32_t now = millis();
+    out = "[";
+    bool first = true;
+    for (int i = 0; i < MESH_STRAY_SLOTS; i++) {
+        if (!strays[i].ts || now - strays[i].ts > 60000) continue;
+        char b[64];
+        snprintf(b, sizeof(b), "%s{\"id\":\"%02X%02X%02X\",\"ch\":%u,\"last\":%lu}",
+                 first ? "" : ",", strays[i].id[0], strays[i].id[1], strays[i].id[2],
+                 strays[i].ch, (unsigned long)((now - strays[i].ts) / 1000));
+        out += b;
+        first = false;
+    }
+    out += "]";
+}
+
+static void strayRecord(const uint8_t* id, uint8_t ch, uint8_t role, uint32_t now) {
+    int slot = 0;
+    for (int i = 0; i < MESH_STRAY_SLOTS; i++) {
+        if (strays[i].ts && memcmp(strays[i].id, id, 3) == 0) { slot = i; break; }
+        if (strays[i].ts < strays[slot].ts) slot = i;
+    }
+    bool fresh = !(strays[slot].ts && memcmp(strays[slot].id, id, 3) == 0 &&
+                   strays[slot].ch == ch && now - strays[slot].ts < 30000);
+    memcpy(strays[slot].id, id, 3);
+    strays[slot].ch = ch;
+    if (role != 0xFF) strays[slot].role = role;
+    strays[slot].ts = now ? now : 1;
+    if (fresh && isSerialConnected()) {
+        Serial.printf("[MESH] node %02X%02X%02X heard on channel %u — fleet channel is %u\n",
+                      id[0], id[1], id[2], ch, meshCfg.channel);
+    }
+}
 
 static void meshRelay(uint8_t* pkt, uint8_t len) {
     if (pkt[4] > 1 && txCount < MESH_TXQ_SIZE) {
@@ -1080,23 +1344,65 @@ void meshTick() {
     // Drain RX ring.
     while (true) {
         uint8_t pkt[MESH_PKT_MAX];
-        uint8_t len = 0;
+        uint8_t len = 0, ch = 0;
         portENTER_CRITICAL(&rxMux);
         if (rxCount > 0) {
             memcpy(pkt, rxQ[rxTail], rxLen[rxTail]);
             len = rxLen[rxTail];
+            ch = rxChan[rxTail];
             rxTail = (rxTail + 1) % MESH_RXQ_SIZE;
             rxCount--;
         }
         portEXIT_CRITICAL(&rxMux);
         if (len == 0) break;
-        lastTrafficAt = now;
 
         uint8_t type = pkt[3];
         const uint8_t* nodeId = pkt + MESH_HDR_LEN;
         bool isAnnounce = (type == MESH_T_ANNOUNCE);
-        bool isNewNode = meshRosterUpdate(nodeId, isAnnounce,
-                                          isAnnounce ? pkt[MESH_HDR_LEN + 3] : 0xFF, now);
+        uint8_t role = isAnnounce ? pkt[MESH_HDR_LEN + 3] : 0xFF;
+        // Announces from current builds state the sender's channel; that
+        // beats the radio channel (adjacent-channel leakage fakes links).
+        if (isAnnounce && len >= MESH_MIN_LEN + 2) {
+            uint8_t stated = pkt[MESH_HDR_LEN + 4];
+            if (stated >= MESH_CH_MIN && stated <= MESH_CH_MAX) ch = stated;
+        }
+
+        // Same channel as ours (or a heal step listening on healCh, or
+        // channel unknown) = a real link. Anything else is a stray: its
+        // payload still counts (a detection is a detection), but it is not
+        // presence, and it doesn't reset the heal silence timer.
+        bool sameCh = ch == 0 || ch == meshCfg.channel || (healActive && ch == healCh);
+        if (!sameCh) {
+            strayRecord(nodeId, ch, role, now);
+            bool stated = isAnnounce && len >= MESH_MIN_LEN + 2;
+            if (!meshCfg.home && isAnnounce && role == 1 && !healActive &&
+                (stated || now - homeLinkedAt > MESH_FOLLOW_WINDOW_MS)) {
+                if (followCh != ch || now - followFirstAt > MESH_FOLLOW_WINDOW_MS) {
+                    followCh = ch;
+                    followHits = 0;
+                    followFirstAt = now;
+                }
+                if (++followHits >= MESH_FOLLOW_HITS) {
+                    if (isSerialConnected()) {
+                        Serial.printf("[MESH] home %02X%02X%02X is on channel %u — following it (was %u)\n",
+                                      nodeId[0], nodeId[1], nodeId[2], ch, meshCfg.channel);
+                    }
+                    meshCfg.channel = ch;
+                    mesh_saveConfig();
+                    for (int i = 0; i < MESH_ROSTER_SIZE; i++) roster[i].live = false;
+                    followHits = 0;
+                    lastTrafficAt = now;
+                    meshParkChannel();
+                    meshStartBurst(now);
+                }
+            }
+            if (isAnnounce) continue;   // an announce carries nothing else
+        } else {
+            lastTrafficAt = now;
+            if (role == 1) homeLinkedAt = now;
+        }
+
+        bool isNewNode = sameCh && meshRosterUpdate(nodeId, isAnnounce, role, now);
         if (isNewNode) {
             // Link handshake: answer a new neighbor with a full burst so
             // both sides' rosters (and link LEDs) fill within one frame of
@@ -1151,9 +1457,18 @@ void meshTick() {
             meshRelay(pkt, len);   // relay first: a reboot command still spreads
             meshHandleCommand(pkt, len);
             break;
-        case MESH_T_ACK:
-            meshAckRecord(pkt[MESH_HDR_LEN + 4] | (pkt[MESH_HDR_LEN + 5] << 8),
-                          pkt[MESH_HDR_LEN + 6]);
+        case MESH_T_ACK: {
+            uint16_t ackId = pkt[MESH_HDR_LEN + 4] | (pkt[MESH_HDR_LEN + 5] << 8);
+            if (ackFirst(nodeId, ackId, now)) {   // count + report each node once
+                meshAckRecord(ackId, pkt[MESH_HDR_LEN + 6]);
+                meshOnAck(nodeId, pkt[MESH_HDR_LEN + 3], ackId,
+                          pkt[MESH_HDR_LEN + 6], pkt[MESH_HDR_LEN + 7]);
+            }
+            meshRelay(pkt, len);
+            break;
+        }
+        case MESH_T_STATUS:
+            meshOnStatus(nodeId, pkt + MESH_HDR_LEN + 3, len - (MESH_HDR_LEN + 3));
             meshRelay(pkt, len);
             break;
         case MESH_T_BYE:
@@ -1176,6 +1491,8 @@ void meshTick() {
         }
     }
 
+    dutyTick(now);
+
     // Stale partial transfer cleanup.
     if (stageActive && now - stageLastChunk > MESH_STAGE_GAP_MS) stageReset();
 
@@ -1183,11 +1500,15 @@ void meshTick() {
     // channels (1-11, the same range the config allows), listening on each.
     // Any mesh traffic adopts that channel permanently. The loop() bypasses
     // the scan phase machine while this runs so nothing fights the changes.
-    if (healAllowed && !healActive && meshNodeCount() == 0 && now - lastTrafficAt > MESH_HEAL_AFTER_MS) {
+    // The HOME is the channel anchor: it never wanders (its channel changes
+    // only by meshrechan, which takes the whole fleet along). Remotes heal.
+    if (healAllowed && !meshCfg.home && !healActive && meshNodeCount() == 0 &&
+        now - lastTrafficAt > MESH_HEAL_AFTER_MS) {
         healActive = true;
         healCh = MESH_CH_MIN;
         healStepAt = now;
         esp_wifi_set_channel(healCh, WIFI_SECOND_CHAN_NONE);
+        radioCh = healCh;
         meshParked = true;
         if (isSerialConnected()) Serial.println("[MESH] alone >2min — sweeping channels for the fleet");
     }
@@ -1201,9 +1522,20 @@ void meshTick() {
                 Serial.printf("[MESH] fleet found on channel %d — adopted and saved\n", healCh);
             }
         } else if (now - healStepAt >= MESH_HEAL_DWELL_MS) {
-            healCh = (healCh >= MESH_CH_MAX) ? MESH_CH_MIN : healCh + 1;
-            healStepAt = now;
-            esp_wifi_set_channel(healCh, WIFI_SECOND_CHAN_NONE);
+            if (healCh >= MESH_CH_MAX) {
+                // One full pass found nobody: go home to the saved channel
+                // and try again after another quiet spell, so a node whose
+                // fleet is simply switched off doesn't stop scanning for good.
+                healActive = false;
+                lastTrafficAt = now;
+                meshParkChannel();
+                if (isSerialConnected()) Serial.println("[MESH] heal pass found no fleet — back to saved channel");
+            } else {
+                healCh++;
+                healStepAt = now;
+                esp_wifi_set_channel(healCh, WIFI_SECOND_CHAN_NONE);
+                radioCh = healCh;
+            }
         }
     }
 

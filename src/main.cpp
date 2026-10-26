@@ -18,6 +18,7 @@
 #include <ArduinoJson.h>
 #include "mqtt.h"
 #include "mesh.h"
+#include <rom/crc.h>
 
 // ================================
 // 802.11 Header Definition
@@ -250,6 +251,8 @@ bool isSerialConnected() {
 //   preset <axon|meta|ipro|verkada>   install a full vendor signature set + reboot
 //   meshpush                          flood the current filter list to the fleet
 //   meshrechan <ch>                   re-channel the whole fleet, any mode
+//   meshmute [all] / meshunmute       fleet buzzer (and LED) off / on, any mode
+//   meshkey <secret|->                set / clear the fleet key, any mode
 //   clearfilters
 //   provisiondone                     save + switch to scanning
 struct PresetEntry;
@@ -275,11 +278,28 @@ static void apForcePlainProtocol() {
     Serial.printf("AP protocol forced to b/g/n: %s (ap=0x%X)\n", esp_err_to_name(e), ap);
 }
 
+static bool remoteConsoleCommand(const String& line);   // remote management, below
+static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig);
+
+// Fleet command issued from the console, so its ack count can be reported
+// once remotes have had time to answer (0 = none outstanding).
+static uint16_t g_consoleCmdId = 0;
+static unsigned long g_consoleCmdAt = 0;
+static const char* g_consoleCmdName = "";
+
 static void serialConsoleTick() {
+    if (g_consoleCmdId && millis() - g_consoleCmdAt > 4000) {
+        Serial.printf("[MESH] %s confirmed by %u remote(s)\n", g_consoleCmdName, meshCmdAckCount(g_consoleCmdId));
+        g_consoleCmdId = 0;
+    }
     if (!Serial.available()) return;
     String line = Serial.readStringUntil('\n');
     line.trim();
     if (line.length() == 0) return;
+
+    // Dashboard / fleet management commands (status, remote settings,
+    // filter transfers) work in ANY mode — see remoteConsoleCommand.
+    if (remoteConsoleCommand(line)) return;
 
     // Locked-node fleet management from ANY mode (USB = full control):
     if (line.startsWith("meshrechan ")) {
@@ -318,6 +338,28 @@ static void serialConsoleTick() {
         }
         delay(300);
         ESP.restart();
+        return;
+    }
+
+    // Fleet audio from USB, any mode (a burned-in home has no portal):
+    //   meshmute        remotes' buzzers off (LEDs stay on)
+    //   meshmute all    buzzer and LED off
+    //   meshunmute      both back on
+    // Same MESH_CMD_AUDIO as the portal's Mute/Unmute All Remotes; live and
+    // persisted on the remotes. This node's own audio is untouched.
+    if (line == "meshmute" || line == "meshmute all" || line == "meshunmute") {
+        if (!meshCfg.enabled) { Serial.println("ERR mesh is off on this node"); return; }
+        bool unmute = (line == "meshunmute");
+        uint8_t p[2] = { (uint8_t)(unmute ? 1 : 0), (uint8_t)((unmute || line == "meshmute") ? 1 : 0) };
+        uint16_t cmdId = meshNewCmdId();
+        if (!meshQueueCommand(MESH_CMD_AUDIO, cmdId, p, 2)) {
+            Serial.println("ERR mesh TX busy or down, try again");
+            return;
+        }
+        g_consoleCmdId = cmdId;
+        g_consoleCmdAt = millis();
+        g_consoleCmdName = unmute ? "unmute" : (p[1] ? "mute (buzzer)" : "mute (buzzer + LED)");
+        Serial.printf("OK %s flooded to the fleet — ack count in 4 s\n", g_consoleCmdName);
         return;
     }
 
@@ -372,25 +414,14 @@ static void serialConsoleTick() {
         if (targetFilters.size() == 0) { Serial.println("ERR no filters installed"); return; }
         uint8_t* buf = (uint8_t*)malloc(4096);
         if (!buf) { Serial.println("ERR out of memory"); return; }
-        uint16_t n = 0;
         bool tooBig = false;
-        for (const TargetFilter& f : targetFilters) {
-            uint8_t idLen = f.identifier.length();
-            uint8_t descLen = min((int)f.description.length(), 48);
-            if (idLen == 0 || idLen > 16) continue;
-            if (n + 4 + idLen + descLen > 4096) { tooBig = true; break; }
-            buf[n++] = (uint8_t)f.type;
-            buf[n++] = f.isFullMAC ? 1 : 0;
-            buf[n++] = idLen;
-            buf[n++] = descLen;
-            memcpy(buf + n, f.identifier.c_str(), idLen);    n += idLen;
-            memcpy(buf + n, f.description.c_str(), descLen); n += descLen;
-        }
+        uint16_t n = serializeFilters(buf, 4096, tooBig);
         uint16_t cmdId = meshNewCmdId();
         bool ok = !tooBig && meshQueueCommand(MESH_CMD_FILTERS, cmdId, buf, n);
         free(buf);
         if (!ok) { Serial.println("ERR too many filters or mesh TX down"); return; }
         Serial.printf("OK filter push flooded to fleet (cmd %d, %d records) — acks in heartbeat\n", cmdId, targetFilters.size());
+        Serial.printf("CMD {\"op\":\"meshpush\",\"id\":%u,\"target\":\"all\",\"cmd\":%u}\n", cmdId, MESH_CMD_FILTERS);
         return;
     }
 
@@ -1127,47 +1158,104 @@ void meshReport(const char* mac, const char* ident, const char* desc,
 // written straight to NVS using saveConfiguration's key scheme; the node
 // then reboots so the list loads through the normal boot path — the live
 // targetFilters vector is never mutated while the radio is running.
+// Validate one filter record list (MESH_CMD_FILTERS wire format) without
+// touching NVS. Identifier rules follow the filter type: OUIs and WiFi
+// signatures are 6 hex, full MACs 12 hex, company IDs / 16-bit service
+// UUIDs 4 hex, name substrings and the Meta composite 1-16 printable chars.
+static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countOut) {
+    uint16_t off = 0;
+    uint8_t count = 0;
+    while (off < len) {
+        if (off + 4 > len || count >= 100) return false;
+        uint8_t type = buf[off], idLen = buf[off + 2], descLen = buf[off + 3];
+        off += 4;
+        if (type > FT_WIFI_BEACON || idLen == 0 || idLen > 16 || descLen > 48 ||
+            off + idLen + descLen > len) return false;
+        const char* id = (const char*)(buf + off);
+        uint8_t needHex = 0;
+        switch ((FilterType)type) {
+            case FT_MAC_PREFIX: case FT_WIFI_PROBE: case FT_WIFI_BEACON: needHex = 6; break;
+            case FT_FULL_MAC: needHex = 12; break;
+            case FT_COMPANY_ID: case FT_SERVICE_UUID_16: needHex = 4; break;
+            default: break;
+        }
+        for (uint8_t i = 0; i < idLen; i++) {
+            unsigned char c = (unsigned char)id[i];
+            if (needHex ? !isxdigit(c) : (c < 0x20 || c > 0x7E)) return false;
+        }
+        if (needHex && idLen != needHex) return false;
+        for (uint8_t i = 0; i < descLen; i++) {
+            if ((unsigned char)buf[off + idLen + i] < 0x20) return false;
+        }
+        off += idLen + descLen;
+        count++;
+    }
+    countOut = count;
+    return count > 0;
+}
+
+// Writes a pushed filter list to NVS using saveConfiguration's key scheme.
+// The whole list is validated FIRST: a list this firmware can't take is
+// refused before a single key changes (writing record by record used to
+// leave a half-overwritten list behind when a later record failed).
 static bool meshWriteFiltersToNvs(const uint8_t* buf, uint16_t len, uint8_t& countOut) {
+    countOut = 0;
+    uint8_t total = 0;
+    if (!filterRecordsValid(buf, len, total)) return false;
     Preferences p;
     p.begin("ouispy", false);
     uint16_t off = 0;
-    uint8_t count = 0;
-    bool ok = true;
-    while (off + 4 <= len && count < 100) {
+    for (uint8_t count = 0; count < total; count++) {
         uint8_t type = buf[off];
         bool fullMac = (buf[off + 1] & 0x01) != 0;
         uint8_t idLen = buf[off + 2];
         uint8_t descLen = buf[off + 3];
         off += 4;
-        if (type > FT_WIFI_BEACON || (idLen != 6 && idLen != 12) ||
-            off + idLen + descLen > len) { ok = false; break; }
-        const char* id = (const char*)(buf + off);
-        for (uint8_t i = 0; i < idLen; i++) {
-            if (!isxdigit((unsigned char)id[i])) { ok = false; break; }
-        }
-        if (!ok) break;
-        char ident[13];
-        memcpy(ident, id, idLen);
+        char ident[17];
+        memcpy(ident, buf + off, idLen);
         ident[idLen] = '\0';
         char desc[49];
         memcpy(desc, buf + off + idLen, descLen);
         desc[descLen] = '\0';
         off += idLen + descLen;
-
-        String keyId   = "id_"   + String(count);
-        String keyMAC  = "mac_"  + String(count);
-        String keyDesc = "desc_" + String(count);
-        String keyType = "type_" + String(count);
-        p.putString(keyId.c_str(), ident);
-        p.putBool  (keyMAC.c_str(), fullMac);
-        p.putString(keyDesc.c_str(), desc);
-        p.putUChar (keyType.c_str(), type);
-        count++;
+        p.putString(("id_"   + String(count)).c_str(), ident);
+        p.putBool  (("mac_"  + String(count)).c_str(), fullMac);
+        p.putString(("desc_" + String(count)).c_str(), desc);
+        p.putUChar (("type_" + String(count)).c_str(), type);
     }
-    if (ok) p.putInt("filterCount", count);
+    p.putInt("filterCount", total);
     p.end();
-    countOut = count;
-    return ok;
+    countOut = total;
+    return true;
+}
+
+// Remote management state + helpers (definitions below meshApplyCommand).
+static uint32_t statusDueAt = 0;
+static uint8_t statusCopies = 0;   // STATUS goes out 3 times (radios time-slice)
+static uint32_t filtersReportDueAt = 0;
+static uint32_t identifyUntil = 0, identifyNextAt = 0;
+static uint8_t identifyFlags = 0;
+static const char* PRESET_NAMES[] = { "axon", "meta", "ipro", "verkada" };
+static String jsonEsc(const String& in);
+static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len);
+
+static void selfIdBytes(uint8_t out[3]) {
+    char hex[7];
+    meshSelfIdHex(hex);
+    for (int i = 0; i < 3; i++) {
+        char b[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
+        out[i] = (uint8_t)strtol(b, nullptr, 16);
+    }
+}
+
+static bool presetLookup(uint8_t idx, const PresetEntry*& table, size_t& count, const char*& label) {
+    switch (idx) {
+        case 0: table = PRESET_AXON;    count = PRESET_AXON_COUNT;    label = "Axon body cam";   return true;
+        case 1: table = PRESET_META;    count = PRESET_META_COUNT;    label = "META / RAY-BAN";  return true;
+        case 2: table = PRESET_IPRO;    count = PRESET_IPRO_COUNT;    label = "I-PRO body cam";  return true;
+        case 3: table = PRESET_VERKADA; count = PRESET_VERKADA_COUNT; label = "Verkada camera";  return true;
+    }
+    return false;
 }
 
 // Command handler invoked by meshTick (loop context) with a complete,
@@ -1250,10 +1338,454 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         ESP.restart();
         break;
     }
+    case MESH_CMD_TARGET: {
+        if (len < 4) { meshSendAck(cmd, cmdId, 1, 0); return; }
+        uint8_t me[3];
+        selfIdBytes(me);
+        bool all = !payload[0] && !payload[1] && !payload[2];
+        if (!all && memcmp(payload, me, 3) != 0) return;   // not for us: stay quiet
+        uint8_t inner = payload[3];
+        // Re-channeling one node would split it off the fleet; reports and
+        // nested wrappers make no sense addressed.
+        if (inner == MESH_CMD_TARGET || inner == MESH_CMD_SETCHAN ||
+            inner == MESH_CMD_FILTERS_REPORT) {
+            meshSendAck(inner, cmdId, 1, 0);
+            return;
+        }
+        meshApplyCommand(inner, cmdId, payload + 4, len - 4);
+        break;
+    }
+    case MESH_CMD_STATUS:
+        // The STATUS packet is the reply. Jittered so a fleet-wide request
+        // doesn't make every node transmit in the same instant.
+        statusDueAt = millis() + random(150, 2500);
+        if (!statusDueAt) statusDueAt = 1;
+        statusCopies = 3;
+        meshHoldRadio(5500);   // stay on the mesh until all three copies are out
+        if (isSerialConnected()) Serial.println("[MESH] status requested by home, replying");
+        break;
+    case MESH_CMD_IDENTIFY: {
+        uint8_t secs = len >= 1 ? payload[0] : 10;
+        if (secs < 1) secs = 1;
+        if (secs > 120) secs = 120;
+        identifyFlags = len >= 2 ? payload[1] : 3;
+        identifyUntil = millis() + secs * 1000UL;
+        identifyNextAt = 0;
+        if (isSerialConnected()) Serial.printf("[MESH] identify for %u s (home asked)\n", secs);
+        meshSendAck(cmd, cmdId, 0, secs);
+        break;
+    }
+    case MESH_CMD_PRESET: {
+        const PresetEntry* table = nullptr;
+        size_t count = 0;
+        const char* label = nullptr;
+        if (len < 1 || !presetLookup(payload[0], table, count, label)) {
+            meshSendAck(cmd, cmdId, 1, 0);
+            return;
+        }
+        int added = applyPreset(table, count, label);
+        saveConfiguration();
+        meshSendAck(cmd, cmdId, 0, (uint8_t)added);
+        for (int i = 0; i < 30 && meshTxPending() > 0; i++) {
+            meshFlushTxNow();
+            delay(100);
+        }
+        if (isSerialConnected()) {
+            Serial.printf("[MESH] preset %s installed by home (%d new) — rebooting\n", PRESET_NAMES[payload[0]], added);
+            Serial.flush();
+        }
+        mesh_deinit();
+        delay(200);
+        ESP.restart();
+        break;
+    }
+    case MESH_CMD_GETFILTERS:
+        meshHoldRadio(4000);
+        filtersReportDueAt = millis() + random(200, 3000);
+        if (!filtersReportDueAt) filtersReportDueAt = 1;
+        break;
+    case MESH_CMD_FILTERS_REPORT: {
+        // {reporterId[3], records...}: print it, never apply or ack it.
+        if (len < 3) return;
+        char hex[7];
+        snprintf(hex, sizeof(hex), "%02X%02X%02X", payload[0], payload[1], payload[2]);
+        printFilterReport(hex, payload + 3, len - 3);
+        break;
+    }
     default:
         meshSendAck(cmd, cmdId, 1, 0);
         break;
     }
+}
+
+// ================================
+// Remote management (dashboard <-> home <-> fleet)
+// ================================
+// The home dashboard drives the fleet through the USB console. The home
+// floods the commands, and every reply comes back as one machine-readable
+// line (human logs are untouched):
+//   RST {json}  a node's settings + health (a STATUS reply, or "status" locally)
+//   ACK {json}  a command ack from a node, with its stable ID
+//   RFL {json}  a node's installed filter list (a FILTERS_REPORT, or "filters")
+//   CMD {json}  a console command was accepted and flooded; id = cmdId
+#define STATUS_FMT 1
+#define STATUS_LEN 52
+static const char FW_BUILD[] = __DATE__ " " __TIME__;
+
+static void put16(uint8_t* d, uint8_t& n, uint16_t v) { memcpy(d + n, &v, 2); n += 2; }
+static void put32(uint8_t* d, uint8_t& n, uint32_t v) { memcpy(d + n, &v, 4); n += 4; }
+static uint16_t get16(const uint8_t* d) { uint16_t v; memcpy(&v, d, 2); return v; }
+static uint32_t get32(const uint8_t* d) { uint32_t v; memcpy(&v, d, 4); return v; }
+
+static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig) {
+    uint16_t n = 0;
+    tooBig = false;
+    for (const TargetFilter& f : targetFilters) {
+        uint8_t idLen = f.identifier.length();
+        uint8_t descLen = min((int)f.description.length(), 48);
+        if (idLen == 0 || idLen > 16) continue;
+        if (n + 4 + idLen + descLen > cap) { tooBig = true; break; }
+        buf[n++] = (uint8_t)f.type;
+        buf[n++] = f.isFullMAC ? 1 : 0;
+        buf[n++] = idLen;
+        buf[n++] = descLen;
+        memcpy(buf + n, f.identifier.c_str(), idLen);    n += idLen;
+        memcpy(buf + n, f.description.c_str(), descLen); n += descLen;
+    }
+    return n;
+}
+
+// CRC32 of the serialized list: equal CRCs = identical filter sets, so the
+// dashboard can tell at a glance which nodes drifted from the home.
+static uint32_t filtersCrc() {
+    uint8_t* buf = (uint8_t*)malloc(4096);
+    if (!buf) return 0;
+    bool tooBig;
+    uint16_t n = serializeFilters(buf, 4096, tooBig);
+    uint32_t crc = crc32_le(0, buf, n);
+    free(buf);
+    return crc;
+}
+
+static uint8_t buildStatus(uint8_t* d) {
+    uint32_t sent = 0, retries = 0, acked = 0, expired = 0;
+    uint8_t pend = 0;
+    if (meshCfg.enabled) meshDeliveryStats(sent, retries, acked, expired, pend);
+    Preferences p;
+    p.begin("ouispy", true);
+    bool locked = p.getBool("configLocked", false);
+    p.end();
+    uint8_t n = 0;
+    d[n++] = STATUS_FMT;
+    d[n++] = meshCfg.home ? 1 : 0;
+    d[n++] = currentMode == SCANNING_MODE ? 1 : 0;
+    d[n++] = meshCfg.channel;
+    d[n++] = (buzzerEnabled ? 1 : 0) | (ledEnabled ? 2 : 0) | (meshKeySet() ? 4 : 0) |
+             (locked ? 8 : 0) | (mqttCfg.enabled ? 16 : 0) |
+             ((meshCfg.enabled && meshHealing()) ? 32 : 0);
+    d[n++] = meshCfg.enabled ? meshNodeCount() : 0;
+    d[n++] = (uint8_t)(meshCfg.enabled ? meshLinkRssi() : 0);
+    d[n++] = 0;
+    put16(d, n, (uint16_t)targetFilters.size());
+    put32(d, n, filtersCrc());
+    put32(d, n, millis() / 1000);
+    put32(d, n, ESP.getFreeHeap());
+    put16(d, n, (uint16_t)devices.size());
+    put32(d, n, sent);
+    put32(d, n, acked);
+    put32(d, n, expired);
+    memset(d + n, 0, 16);
+    strncpy((char*)d + n, FW_BUILD, 15);
+    n += 16;
+    return n;   // STATUS_LEN
+}
+
+static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
+    if (!isSerialConnected()) return;
+    if (len < STATUS_LEN || d[0] != STATUS_FMT) {
+        Serial.printf("RST {\"node\":\"%s\",\"fmt\":%u}\n", id, len ? d[0] : 0);
+        return;
+    }
+    uint8_t f = d[4];
+    char fw[17];
+    memcpy(fw, d + 36, 16);
+    fw[16] = '\0';
+    for (int i = 0; fw[i]; i++) if (fw[i] == '"' || fw[i] == '\\' || fw[i] < 0x20) fw[i] = ' ';
+    Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
+                  "\"buzzer\":%d,\"led\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
+                  "\"peers\":%u,\"lrssi\":%d,\"filters\":%u,\"fcrc\":\"%08lX\",\"up\":%lu,"
+                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"}\n",
+                  id, d[1] ? "home" : "remote", d[2] ? "scan" : "config", d[3],
+                  (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
+                  (f & 16) ? 1 : 0, (f & 32) ? 1 : 0, d[5], (int)(int8_t)d[6],
+                  get16(d + 8), (unsigned long)get32(d + 10), (unsigned long)get32(d + 14),
+                  (unsigned long)get32(d + 18), get16(d + 22), (unsigned long)get32(d + 24),
+                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw);
+}
+
+static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len) {
+    if (!isSerialConnected()) return;
+    uint8_t count = 0;
+    bool ok = filterRecordsValid(buf, len, count) || len == 0;
+    Serial.printf("RFL {\"node\":\"%s\",\"ok\":%d,\"filters\":[", id, ok ? 1 : 0);
+    uint16_t off = 0;
+    for (uint8_t i = 0; ok && i < count; i++) {
+        uint8_t type = buf[off], idLen = buf[off + 2], descLen = buf[off + 3];
+        bool full = (buf[off + 1] & 1) != 0;
+        off += 4;
+        String ident = String((const char*)(buf + off)).substring(0, idLen);
+        char tmp[49];
+        memcpy(tmp, buf + off + idLen, descLen);
+        tmp[descLen] = '\0';
+        off += idLen + descLen;
+        Serial.printf("%s{\"t\":\"%s\",\"id\":\"%s\",\"d\":\"%s\",\"full\":%d}",
+                      i ? "," : "", filterTypeCode((FilterType)type), jsonEsc(ident).c_str(),
+                      jsonEsc(String(tmp)).c_str(), full ? 1 : 0);
+    }
+    Serial.println("]}");
+}
+
+void meshOnStatus(const uint8_t* nodeId, const uint8_t* data, uint8_t len) {
+    char hex[7];
+    snprintf(hex, sizeof(hex), "%02X%02X%02X", nodeId[0], nodeId[1], nodeId[2]);
+    printStatusLine(hex, data, len);
+}
+
+void meshOnAck(const uint8_t* nodeId, uint8_t cmd, uint16_t cmdId, uint8_t status, uint8_t count) {
+    if (!isSerialConnected()) return;
+    Serial.printf("ACK {\"node\":\"%02X%02X%02X\",\"cmd\":%u,\"id\":%u,\"st\":%u,\"n\":%u}\n",
+                  nodeId[0], nodeId[1], nodeId[2], cmd, cmdId, status, count);
+}
+
+// loop()-context: deferred replies and the identify pattern. Called next to
+// every meshTick().
+static void remoteMgmtTick() {
+    uint32_t now = millis();
+    if (statusDueAt && (int32_t)(now - statusDueAt) >= 0) {
+        uint8_t d[STATUS_LEN];
+        meshSendStatus(d, buildStatus(d));
+        // Repeat so it meets the home's mesh window; copies are harmless
+        // (the dashboard just overwrites the same node's settings).
+        statusDueAt = (statusCopies > 1) ? now + 600 + random(0, 400) : 0;
+        if (statusCopies) statusCopies--;
+    }
+    if (filtersReportDueAt && (int32_t)(now - filtersReportDueAt) >= 0) {
+        uint8_t* buf = (uint8_t*)malloc(4096);
+        if (buf) {
+            selfIdBytes(buf);
+            bool tooBig;
+            uint16_t n = 3 + serializeFilters(buf + 3, 4093, tooBig);
+            // Busy with another transfer: try again in a second, for up to
+            // 30 s (a list too big to send at all never gets through).
+            static uint8_t tries = 0;
+            if (meshQueueCommand(MESH_CMD_FILTERS_REPORT, meshNewCmdId(), buf, n) || ++tries >= 30) {
+                filtersReportDueAt = 0;
+                tries = 0;
+            } else {
+                filtersReportDueAt = now + 1000;
+            }
+            free(buf);
+        }
+    }
+    if (identifyUntil) {
+        if ((int32_t)(now - identifyUntil) >= 0) {
+            identifyUntil = 0;
+            ledcWrite(0, 0);
+            digitalWrite(LED_PIN, HIGH);   // inverted: HIGH = off
+        } else if ((int32_t)(now - identifyNextAt) >= 0) {
+            identifyNextAt = now + 900;
+            // Deliberately ignores mute/LED settings: the point is finding it.
+            startDetectionFlash();
+            if (identifyFlags & 2) digitalWrite(LED_PIN, LOW);
+            if (identifyFlags & 1) {
+                ledcSetup(0, BUZZER_FREQ, 8);
+                ledcWrite(0, BUZZER_DUTY);
+            }
+            delay(90);
+            ledcWrite(0, 0);
+            digitalWrite(LED_PIN, HIGH);
+        }
+    }
+}
+
+static bool parseTarget(String t, uint8_t out[3], bool& all) {
+    t.trim();
+    t.toUpperCase();
+    if (t == "ALL" || t == "*") { memset(out, 0, 3); all = true; return true; }
+    if (t.length() != 6) return false;
+    for (int i = 0; i < 6; i++) if (!isxdigit((unsigned char)t[i])) return false;
+    for (int i = 0; i < 3; i++) out[i] = (uint8_t)strtol(t.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
+    all = false;
+    return true;
+}
+
+// Flood a management command: fleet-wide commands go out unwrapped (so
+// older firmware still obeys AUDIO/REBOOT/FILTERS), addressed ones inside a
+// MESH_CMD_TARGET wrapper.
+static bool sendMgmt(const char* op, const uint8_t t[3], bool all, uint8_t cmd,
+                     const uint8_t* p, uint16_t len) {
+    if (!meshCfg.enabled) { Serial.printf("ERR %s: mesh disabled on this node\n", op); return false; }
+    uint16_t id = meshNewCmdId();
+    bool ok;
+    if (all) {
+        ok = meshQueueCommand(cmd, id, p, len);
+    } else {
+        uint8_t* buf = (uint8_t*)malloc(len + 4);
+        if (!buf) { Serial.printf("ERR %s: out of memory\n", op); return false; }
+        memcpy(buf, t, 3);
+        buf[3] = cmd;
+        if (len) memcpy(buf + 4, p, len);
+        ok = meshQueueCommand(MESH_CMD_TARGET, id, buf, len + 4);
+        free(buf);
+    }
+    if (!ok) { Serial.printf("ERR %s: mesh busy (transfer in progress) or down\n", op); return false; }
+    char hex[7] = "all";
+    if (!all) snprintf(hex, sizeof(hex), "%02X%02X%02X", t[0], t[1], t[2]);
+    Serial.printf("CMD {\"op\":\"%s\",\"id\":%u,\"target\":\"%s\",\"cmd\":%u}\n", op, id, hex, cmd);
+    return true;
+}
+
+// Staged filter upload from the dashboard: mfbegin <target|self|all>, then
+// mfdata <hex> lines (short enough for the USB RX buffer, each answered
+// "OK mfdata <bytes>" so the sender paces itself), then mfend.
+static uint8_t* mfBuf = nullptr;
+static uint16_t mfLen = 0;
+static uint8_t mfTarget[3];
+static bool mfAll = false, mfSelf = false;
+
+static void localReboot(const char* why) {
+    Serial.printf("OK %s — rebooting\n", why);
+    Serial.flush();
+    for (int i = 0; i < 20 && meshTxPending() > 0; i++) { meshFlushTxNow(); delay(100); }
+    mesh_deinit();
+    delay(200);
+    ESP.restart();
+}
+
+// Returns true when the line was one of ours (handled, even if it failed).
+static bool remoteConsoleCommand(const String& line) {
+    int sp = line.indexOf(' ');
+    String verb = sp < 0 ? line : line.substring(0, sp);
+    String rest = sp < 0 ? String("") : line.substring(sp + 1);
+    rest.trim();
+    String arg[4];
+    {
+        String r = rest;
+        for (int i = 0; i < 4; i++) {
+            r.trim();
+            int s2 = r.indexOf(' ');
+            arg[i] = s2 < 0 ? r : r.substring(0, s2);
+            r = s2 < 0 ? String("") : r.substring(s2 + 1);
+        }
+    }
+    uint8_t t[3];
+    bool all = false;
+    char selfHex[7];
+    meshSelfIdHex(selfHex);
+
+    if (verb == "status") {
+        uint8_t d[STATUS_LEN];
+        printStatusLine(selfHex, d, buildStatus(d));
+        return true;
+    }
+    if (verb == "filters") {
+        uint8_t* buf = (uint8_t*)malloc(4096);
+        if (!buf) { Serial.println("ERR out of memory"); return true; }
+        bool tooBig;
+        uint16_t n = serializeFilters(buf, 4096, tooBig);
+        printFilterReport(selfHex, buf, n);
+        free(buf);
+        return true;
+    }
+    if (verb == "audio") {          // local: audio <buzzer 0|1> <led 0|1>
+        if (arg[0].length() == 0 || arg[1].length() == 0) { Serial.println("ERR usage: audio <0|1> <0|1>"); return true; }
+        buzzerEnabled = arg[0].toInt() != 0;
+        ledEnabled = arg[1].toInt() != 0;
+        saveConfiguration();
+        Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
+        return true;
+    }
+    if (verb == "reboot") { localReboot("reboot"); return true; }
+    if (verb == "ident") {          // local identify: ident [secs]
+        int secs = arg[0].length() ? arg[0].toInt() : 10;
+        identifyFlags = 3;
+        identifyUntil = millis() + (uint32_t)constrain(secs, 1, 120) * 1000UL;
+        identifyNextAt = 0;
+        Serial.printf("OK identify %d s\n", constrain(secs, 1, 120));
+        return true;
+    }
+
+    bool remote = verb == "rstatus" || verb == "raudio" || verb == "rreboot" ||
+                  verb == "rident" || verb == "rpreset" || verb == "rfilters";
+    if (remote) {
+        if (!parseTarget(arg[0], t, all)) { Serial.printf("ERR %s: target must be a node ID or all\n", verb.c_str()); return true; }
+        if (verb == "rstatus") {
+            sendMgmt("rstatus", t, all, MESH_CMD_STATUS, nullptr, 0);
+        } else if (verb == "rfilters") {
+            sendMgmt("rfilters", t, all, MESH_CMD_GETFILTERS, nullptr, 0);
+        } else if (verb == "rreboot") {
+            sendMgmt("rreboot", t, all, MESH_CMD_REBOOT, nullptr, 0);
+        } else if (verb == "raudio") {
+            if (arg[1].length() == 0 || arg[2].length() == 0) { Serial.println("ERR usage: raudio <target> <0|1> <0|1>"); return true; }
+            uint8_t p[2] = { (uint8_t)(arg[1].toInt() != 0), (uint8_t)(arg[2].toInt() != 0) };
+            sendMgmt("raudio", t, all, MESH_CMD_AUDIO, p, 2);
+        } else if (verb == "rident") {
+            int secs = arg[1].length() ? arg[1].toInt() : 10;
+            uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
+            sendMgmt("rident", t, all, MESH_CMD_IDENTIFY, p, 2);
+        } else if (verb == "rpreset") {
+            int idx = -1;
+            String name = arg[1];
+            name.toLowerCase();
+            for (int i = 0; i < 4; i++) if (name == PRESET_NAMES[i]) idx = i;
+            if (idx < 0) { Serial.println("ERR unknown preset (axon|meta|ipro|verkada)"); return true; }
+            uint8_t p[1] = { (uint8_t)idx };
+            sendMgmt("rpreset", t, all, MESH_CMD_PRESET, p, 1);
+        }
+        return true;
+    }
+
+    if (verb == "mfbegin") {
+        String a = arg[0];
+        a.toUpperCase();
+        mfSelf = (a == "SELF" || a == String(selfHex));
+        if (!mfSelf && !parseTarget(arg[0], mfTarget, mfAll)) { Serial.println("ERR mfbegin: target must be a node ID, self or all"); return true; }
+        if (!mfBuf) mfBuf = (uint8_t*)malloc(4096);
+        if (!mfBuf) { Serial.println("ERR out of memory"); return true; }
+        mfLen = 0;
+        Serial.println("OK mfbegin");
+        return true;
+    }
+    if (verb == "mfdata") {
+        if (!mfBuf) { Serial.println("ERR mfdata: no mfbegin"); return true; }
+        if (rest.length() % 2 || mfLen + rest.length() / 2 > 4000) { Serial.println("ERR mfdata: bad hex or too long"); return true; }
+        for (unsigned i = 0; i < rest.length(); i += 2) {
+            if (!isxdigit((unsigned char)rest[i]) || !isxdigit((unsigned char)rest[i + 1])) { Serial.println("ERR mfdata: bad hex"); return true; }
+            mfBuf[mfLen++] = (uint8_t)strtol(rest.substring(i, i + 2).c_str(), nullptr, 16);
+        }
+        Serial.printf("OK mfdata %u\n", mfLen);
+        return true;
+    }
+    if (verb == "mfend") {
+        if (!mfBuf) { Serial.println("ERR mfend: no mfbegin"); return true; }
+        uint8_t count = 0;
+        if (!filterRecordsValid(mfBuf, mfLen, count)) {
+            Serial.println("ERR mfend: filter list invalid");
+        } else if (mfSelf) {
+            uint8_t written = 0;
+            bool ok = meshWriteFiltersToNvs(mfBuf, mfLen, written);
+            free(mfBuf); mfBuf = nullptr;
+            if (ok) { localReboot("filters written to this node"); return true; }
+            Serial.println("ERR mfend: NVS write failed");
+            return true;
+        } else {
+            sendMgmt("filters", mfTarget, mfAll, MESH_CMD_FILTERS, mfBuf, mfLen);
+        }
+        free(mfBuf);
+        mfBuf = nullptr;
+        return true;
+    }
+    return false;
 }
 
 // WiFi OUI fast-path table. A small const array of 3-byte OUIs extracted
@@ -1927,10 +2459,15 @@ static void scan_to_wifi_sweep() {
     // channel — mesh RX pauses until the next BLE phase (TX still lands on
     // the mesh channel; the broadcast peer is pinned there).
     meshUnparkChannel();
+    meshSetBlePhase(false);
 
     g_radioPhase = PHASE_WIFI_SWEEP;
     g_wifiChannel = 11;
     esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
+    meshNoteRadioChannel(g_wifiChannel);
+    // A stale "on a mesh visit" flag from the previous sweep made the urgent
+    // hold below sit on channel 11 believing it was on the mesh.
+    g_meshVisit = false;
 }
 
 // Transition to BLE scan phase (idempotent).
@@ -1952,6 +2489,7 @@ static void scan_to_ble_scan() {
     // window. ESP-NOW RX works here alongside the BLE scan (coexistence
     // time-slices the two), and TX flush happens in meshTick().
     meshParkChannel();
+    meshSetBlePhase(true);
 
     g_radioPhase = PHASE_BLE_SCAN;
 }
@@ -1961,6 +2499,7 @@ static void scan_wifi_hop_channel() {
     if (g_radioPhase != PHASE_WIFI_SWEEP) return;
     g_wifiChannel = (g_wifiChannel > 1) ? g_wifiChannel - 1 : 11;
     esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
+    meshNoteRadioChannel(g_wifiChannel);
     g_meshVisit = false;
 }
 
@@ -2027,6 +2566,7 @@ static void mqttReportTick(unsigned long now, bool canOpenWindow) {
         case MR_IDLE:
             if (canOpenWindow && mqttPendingCount > 0) {
                 if (isSerialConnected()) Serial.println("[MQTT] report window opening (STA up)");
+                meshNoteRadioChannel(0);   // the AP picks the channel now: unknown
                 WiFi.begin(mqttCfg.sta_ssid, mqttCfg.sta_pass);
                 g_mqttReportStart = now;
                 g_mqttReportState = MR_CONNECTING;
@@ -5365,6 +5905,10 @@ static void emitTelemetry() {
     if (meshCfg.enabled) meshStats(rxAll, rxQ, rxDup, rxSelf, rxBad, txS, txF, txC);
     uint32_t dSent=0, dRetry=0, dAck=0, dLost=0; uint8_t dPend=0;
     if (meshCfg.enabled) meshDeliveryStats(dSent, dRetry, dAck, dLost, dPend);
+    uint8_t park = 0, parkBle = 0;
+    if (meshCfg.enabled) meshDutyStats(park, parkBle);
+    String stray = "[]";
+    if (meshCfg.enabled) meshStraysJson(stray);
     char selfId[7];
     meshSelfIdHex(selfId);
     String roster = "{\"nodes\":[]}";
@@ -5376,7 +5920,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -5390,7 +5934,9 @@ static void emitTelemetry() {
                   meshCfg.enabled ? (int)meshLinkRssi() : 0,
                   (meshCfg.enabled && meshHealing()) ? 1 : 0,
                   mqttConnected ? 1 : 0, (unsigned long)dSent, (unsigned long)dRetry,
-                  (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend, nodes.c_str());
+                  (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend,
+                  (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
+                  stray.c_str(), nodes.c_str());
 }
 
 void loop() {
@@ -5452,6 +5998,7 @@ void loop() {
         // the home isn't aggregating while it's being configured.
         if (meshCfg.enabled) {
             meshTick();
+            remoteMgmtTick();
             meshLinkLedTick();
             static unsigned long lastMeshLinkLog = 0;
             if (millis() - lastMeshLinkLog >= 10000) {
@@ -5491,6 +6038,8 @@ void loop() {
             // the mesh instead of powering the radio down.
             if (meshCfg.enabled) {
                 meshTick();
+                remoteMgmtTick();
+                serialConsoleTick();
             } else {
                 scan_exit();
                 delay(100);
@@ -5514,6 +6063,7 @@ void loop() {
         // transitions, no hops — just the mesh, the console, and the LED.
         if (meshCfg.enabled && meshHealing()) {
             meshTick();
+            remoteMgmtTick();
             serialConsoleTick();
             updateNeoPixelAnimation();
             meshLinkLedTick();
@@ -5531,15 +6081,38 @@ void loop() {
 
         unsigned long phaseDur = (g_radioPhase == PHASE_WIFI_SWEEP) ? WIFI_SWEEP_MS : BLE_SCAN_MS;
 
+        // Mesh priority: while the mesh has something time-critical (a
+        // command going out, replies expected, a fresh detection) the radio
+        // stays on the mesh channel WITHOUT a BLE scan. Coexistence gives a
+        // running BLE scan ~2/3 of the airtime, and that is exactly where
+        // replies were being lost. Capped at 10 s of continuous urgency so a
+        // stuck flag can never starve detection scanning.
+        static unsigned long urgentSince = 0;
+        bool meshPriority = false;
+        if (meshCfg.enabled && !meshHealing() && meshNeedsAir()) {
+            if (!urgentSince) urgentSince = currentMillis ? currentMillis : 1;
+            meshPriority = currentMillis - urgentSince < 10000;
+        } else {
+            urgentSince = 0;
+        }
+        if (meshPriority && g_mqttReportState == MR_IDLE && g_radioPhase == PHASE_BLE_SCAN) {
+            if (hasWifiFilters) {
+                scan_to_wifi_sweep();            // the sweep then parks on the mesh (below)
+                g_phaseStartTime = currentMillis;
+            } else if (pBLEScan && pBLEScan->isScanning()) {
+                pBLEScan->stop();                // BLE-only: already parked, just pause BLE
+            }
+        }
+
         // Phase transition on timeout (frozen while an MQTT report cycle
-        // owns the radio).
+        // owns the radio, and no BLE phase while the mesh has priority).
         if (g_mqttReportState == MR_IDLE && currentMillis - g_phaseStartTime >= phaseDur) {
             // Alternate when both domains have filters — or when the mesh is
             // enabled and WiFi filters exist: the BLE phase doubles as the
             // mesh window, so WiFi-only nodes must still open it.
             if ((hasWifiFilters && hasBleFilters) || (meshCfg.enabled && hasWifiFilters)) {
                 if (g_radioPhase == PHASE_WIFI_SWEEP) {
-                    scan_to_ble_scan();
+                    if (!meshPriority) scan_to_ble_scan();
                 } else {
                     scan_to_wifi_sweep();
                 }
@@ -5551,7 +6124,7 @@ void loop() {
         // 2.2 s phase timer, and with no WiFi domain there's no alternating
         // transition to re-arm it — top it up here so BLE-only configs keep
         // scanning instead of going silent after the first window.
-        if (g_mqttReportState == MR_IDLE && hasBleFilters && !hasWifiFilters &&
+        if (g_mqttReportState == MR_IDLE && hasBleFilters && !hasWifiFilters && !meshPriority &&
             g_radioPhase == PHASE_BLE_SCAN && pBLEScan && !pBLEScan->isScanning()) {
             pBLEScan->start(2, nullptr, false);
             g_phaseStartTime = currentMillis;
@@ -5689,6 +6262,7 @@ void loop() {
         // above (they alert + publish like local ones), relay floods, flush
         // the TX queue, announce presence, prune the roster.
         if (meshCfg.enabled) meshTick();
+        remoteMgmtTick();
 
         // Locked-node management channel: accepts ONLY 'meshrechan <ch>' —
         // see serialConsoleTick. Everything else is config-mode-only.

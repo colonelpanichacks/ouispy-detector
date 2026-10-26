@@ -52,6 +52,26 @@ void meshQueueDetection(const char* mac, const char* ident, const char* desc,
 void meshParkChannel();
 // Called when something else owns the radio (WiFi sweep / MQTT STA window).
 void meshUnparkChannel();
+// ESP-NOW TX rate actually in force: "lr250k", "lr500k", "1m" (LR not
+// built in) or "lr-failed" (the driver refused the LR rate).
+const char* meshTxRateName();
+// True while the mesh has work that justifies pausing BLE scanning: a
+// command transfer, a listen window (replies owed/expected), a fresh
+// detection. Unlike meshUrgent(), queued routine announces don't count.
+bool meshNeedsAir();
+// Keep the radio on the mesh channel (meshUrgent() true) for at least ms:
+// used while commands go out and while this node owes a reply.
+void meshHoldRadio(uint32_t ms);
+// The main loop's WiFi sweep moved the radio to channel ch (any channel).
+void meshNoteRadioChannel(uint8_t ch);
+// Nodes heard on another channel than ours in the last 60 s, as a JSON
+// array: [{"id","ch","last"}]. A healthy fleet has none.
+void meshStraysJson(String& out);
+// Tell the duty accounting whether a BLE scan shares the radio right now.
+void meshSetBlePhase(bool scanning);
+// Rolling 10 s: % of time parked on the mesh channel, and % parked while a
+// BLE scan was also running (coexistence takes most of that airtime).
+void meshDutyStats(uint8_t& parkPct, uint8_t& parkBlePct);
 
 // loop()-context housekeeping: drain received packets (inject + relay),
 // flush the TX queue, send periodic presence announcements, prune the node
@@ -109,8 +129,22 @@ void meshSetHealAllowed(bool allowed);
 #define MESH_CMD_FILTERS 2   // payload: binary TargetFilter records (reboot to apply)
 #define MESH_CMD_REBOOT  3   // payload: none
 #define MESH_CMD_SETCHAN 4   // payload: u8 channel 1-11 (NVS + reboot to apply)
+// Remote management (v3 extension; older firmware acks these as rejected):
+#define MESH_CMD_TARGET  5   // payload: u8 target[3], u8 innerCmd, inner payload.
+                             // Only the node whose stable ID matches (000000 =
+                             // every node) applies the inner command; others
+                             // stay silent. SETCHAN is fleet-wide only.
+#define MESH_CMD_STATUS  6   // payload: none. Node floods a STATUS packet (jittered).
+#define MESH_CMD_IDENTIFY 7  // payload: u8 seconds, u8 flags (bit0 beep, bit1 light)
+#define MESH_CMD_PRESET  8   // payload: u8 preset (0 axon, 1 meta, 2 ipro, 3 verkada); reboots
+#define MESH_CMD_GETFILTERS 9      // payload: none. Node answers with FILTERS_REPORT.
+#define MESH_CMD_FILTERS_REPORT 10 // payload: filter records (node -> home). Never
+                                   // applied or acked; the home prints it.
 // Ack body (remote -> home): u8 cmd, u16 cmdId, u8 status, u8 count
 // status: 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed
+
+// Flood a STATUS packet: body = {selfId[3], data[len]} (len <= 200).
+void meshSendStatus(const uint8_t* data, uint8_t len);
 
 uint16_t meshNewCmdId();
 // Floods payload in chunks, fed into the TX queue as it drains. Returns
@@ -136,6 +170,12 @@ void meshFlushTxNow();
 // Implemented in main.cpp — applies a complete, CRC-verified command payload
 // in loop context. May reboot the node (filter push, reboot command).
 void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint16_t len);
+
+// Implemented in main.cpp — a STATUS packet arrived from another node.
+void meshOnStatus(const uint8_t* nodeId, const uint8_t* data, uint8_t len);
+// Implemented in main.cpp — a command ack arrived (any status), with the
+// stable ID of the node that sent it.
+void meshOnAck(const uint8_t* nodeId, uint8_t cmd, uint16_t cmdId, uint8_t status, uint8_t count);
 
 // Implemented in main.cpp — bridge into the shared detection ring buffer so a
 // mesh-originated detection gets the same alert/MQTT treatment as a local one.
