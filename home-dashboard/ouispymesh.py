@@ -554,8 +554,9 @@ def _jobs(node, include_auto=False):
 
 
 def _filter_meta():
-    vendors = [{"key": g["key"], "label": g["label"], "kind": g["kind"], "count": len(g["ouis"]),
-                "ouis": g["ouis"], "meta": g["meta"]} for g in flt.vendor_db()]
+    vendors = [{"key": g["key"], "label": g["label"], "kind": g["kind"],
+                "count": len(g.get("rows") or g["ouis"]), "ouis": g["ouis"],
+                "rows": g.get("rows"), "meta": g["meta"]} for g in flt.vendor_db()]
     return {"types": flt.LABELS, "hex": flt.HEX_LEN,
             "presets": {k: [{"t": t, "id": i, "d": d} for t, i, d in v] for k, v in flt.PRESETS.items()},
             "vendors": vendors}

@@ -933,7 +933,8 @@ function vendorOptions(sel) {
     sel.innerHTML =
         `<optgroup label="Firmware presets">${Object.keys(p).map((k) => opt("p:" + k, `${k.toUpperCase()} preset (${p[k].length})`)).join("")}</optgroup>` +
         `<optgroup label="OUI database - BLE">${v.filter((g) => g.kind === "ble").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>` +
-        `<optgroup label="OUI database - WiFi">${v.filter((g) => g.kind === "wifi").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>`;
+        `<optgroup label="OUI database - WiFi">${v.filter((g) => g.kind === "wifi").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>` +
+        `<optgroup label="Extra signatures">${v.filter((g) => g.kind === "extra").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>`;
 }
 
 function presetOptions(sel) {
@@ -986,12 +987,13 @@ function allGroups() {
     return Object.keys(p).map((k) => ({ key: "p:" + k, label: `${k.toUpperCase()} preset`, kind: "preset",
                                        rows: p[k], section: "Firmware presets" }))
         .concat(v.map((g) => ({ key: "v:" + g.key, label: g.label, kind: g.kind, ouis: g.ouis, meta: g.meta,
-                                section: g.kind === "ble" ? "OUI database - BLE" : "OUI database - WiFi" })));
+                                rows: g.rows || null,
+                                section: g.kind === "ble" ? "OUI database - BLE" : g.kind === "wifi" ? "OUI database - WiFi" : "Extra signatures" })));
 }
 // Rows a group would add (same rules as the portal: BLE entries = BLE OUI
 // and/or WiFi probe per OUI; WiFi entries = probe/beacon per frame types).
 function groupRows(g) {
-    if (g.kind === "preset") return g.rows.map((r) => ({ t: r.t, id: r.id, d: r.d }));
+    if (g.kind === "preset" || g.kind === "extra") return g.rows.map((r) => ({ t: r.t, id: r.id, d: r.d }));
     const d = g.label.slice(0, 32), out = [];
     for (const o of g.ouis) {
         if (g.kind === "ble") {
@@ -1009,7 +1011,7 @@ function groupRows(g) {
 // Database vendors: any OUI-style row (BLE OUI / probe / beacon) on its OUIs.
 function rowInGroup(g, f) {
     const id = String(f.id || "").replace(/[:\-\s]/g, "").toUpperCase();
-    if (g.kind === "preset") return g.rows.some((r) => r.t === f.t && r.id.toUpperCase() === id);
+    if (g.kind === "preset" || g.kind === "extra") return g.rows.some((r) => r.t === f.t && r.id.toUpperCase() === id);
     return ["OUI", "PROBE", "BEACON"].includes(f.t) && g.ouis.includes(id);
 }
 function groupState(g, list) {
@@ -1030,7 +1032,7 @@ function renderGroups() {
         const full = st.total > 0 && st.got === st.total;
         const chip = full ? `<span class="gst on">INSTALLED</span>`
             : st.any ? `<span class="gst part">PARTIAL</span>` : `<span class="gst">-</span>`;
-        const info = g.kind === "preset" ? `${g.rows.length} signatures`
+        const info = g.kind === "preset" || g.kind === "extra" ? `${g.rows.length} signature${g.rows.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`
             : `${g.ouis.length} OUI${g.ouis.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`;
         html += `<div class="grow" data-key="${esc(g.key)}">
             ${chip}<span class="gname" title="${esc(info)}">${esc(g.label)}</span><span class="ginfo">${esc(info)}</span>

@@ -153,16 +153,32 @@ def _parse_db(path, kind):
     return out
 
 
+# Signatures the OUI lists can't express (they hold address prefixes only):
+# device-name matches and the like. Installed as fixed filter rows.
+EXTRAS = [
+    {"label": "FLIPPER ZERO (BLE name)",
+     "rows": [("NAME", "Flipper", "Flipper Zero (BLE name)")],
+     "meta": {"Category": "Pentest / Hacking Tool",
+              "Common Devices": "Flipper Zero: BLE device name contains \"Flipper\""}},
+]
+
+
 def vendor_db():
-    """[{key, label, kind: ble|wifi, ouis: [...], meta: {...}}] from the repo's OUI lists."""
+    """[{key, label, kind: ble|wifi|extra, ouis: [...], meta: {...}}]: the repo's
+    OUI lists plus the extra (non-OUI) signatures."""
+    extras = [{"key": f"extra:{i}", "label": e["label"], "kind": "extra", "ouis": [],
+               "rows": [{"t": t, "id": i_, "d": d} for t, i_, d in e["rows"]], "meta": e["meta"]}
+              for i, e in enumerate(EXTRAS)]
     return _parse_db(os.path.join(REPO, "BLEOUIs.md"), "ble") + \
-           _parse_db(os.path.join(REPO, "WiFiOUIs.md"), "wifi")
+           _parse_db(os.path.join(REPO, "WiFiOUIs.md"), "wifi") + extras
 
 
 def vendor_filters(group, ble=True, wifi=True):
     """Filter rows for one database entry, exactly as the portal adds them:
     BLE entries -> BLE OUI and/or WiFi probe per OUI (both by default);
     WiFi entries -> probe and/or beacon per their Frame Types line."""
+    if group["kind"] == "extra":
+        return [dict(r) for r in group["rows"]]
     desc = group["label"][:32]
     rows = []
     for o in group["ouis"]:

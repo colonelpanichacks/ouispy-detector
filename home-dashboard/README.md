@@ -1,5 +1,7 @@
 # OUI-SPY Mesh
 
+> **For research and educational purposes only.** Use it only where you are legally permitted to, and only on devices and networks you own or are authorized to test. You are responsible for complying with all applicable laws.
+
 A local web dashboard for the OUI-SPY Detector **home node**. It shows the whole
 mesh fleet live, puts the nodes on a map, and keeps a searchable history of every
 detection. It runs entirely on your machine: no cloud, no accounts, no telemetry.

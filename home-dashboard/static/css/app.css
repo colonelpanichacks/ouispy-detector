@@ -583,3 +583,5 @@ input[type="checkbox"]:checked::after {
     .map-panel .panel-head .help { display: none; }
     .trailctl { margin-left: auto; }
 }
+
+.disclaimer { text-align: center; font-size: 10.5px; color: var(--faint); padding: 4px 16px 18px; letter-spacing: 0.3px; }

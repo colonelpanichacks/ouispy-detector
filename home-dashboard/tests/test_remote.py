@@ -63,6 +63,9 @@ class VendorDbTest(unittest.TestCase):
         self.assertTrue(any(l.startswith("FLOCK SAFETY") for l in labels))
         self.assertIn("ble", {g["kind"] for g in db})
         for g in db:
+            if g["kind"] == "extra":          # non-OUI signatures (names, ...)
+                self.assertTrue(g["rows"])
+                continue
             self.assertTrue(g["ouis"])
             self.assertTrue(all(len(o) == 6 for o in g["ouis"]))
 
