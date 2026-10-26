@@ -1,6 +1,6 @@
 # OUI-SPY Mesh
 
-> **For research and educational purposes only.** Use it only where you are legally permitted to, and only on devices and networks you own or are authorized to test. You are responsible for complying with all applicable laws.
+> **WARNING - research and educational use only.** The dashboard stores and maps MAC addresses, device names, locations and times, which can be personal data. Use it only where it is legal, only with gear you own or are authorized to test, and never to stalk, track or identify people. Keep it on your own network; never expose it to the internet. Detections are not proof. Provided **AS IS, with no warranty**; the authors accept **no liability** for any use or misuse. See the full [Disclaimer](../README.md#disclaimer).
 
 A local web dashboard for the OUI-SPY Detector **home node**. It shows the whole
 mesh fleet live, puts the nodes on a map, and keeps a searchable history of every

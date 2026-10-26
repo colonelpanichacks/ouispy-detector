@@ -2,7 +2,7 @@
 
 ![OUI-SPY](ouispy.png)
 
-> **For research and educational purposes only.** Use it only where you are legally permitted to, and only on devices and networks you own or are authorized to test. You are responsible for complying with all applicable laws.
+> **WARNING - research and educational use only.** This firmware passively listens to Bluetooth and Wi-Fi traffic. Laws on receiving radio transmissions and on tracking people or their devices differ by country, state and city, and you alone are responsible for following them. Never use it to stalk, track, harass or identify people. Detections are not proof of anything. It is provided **AS IS, with no warranty**, and the authors accept **no liability** for how it is used. Read the full [Disclaimer](#disclaimer) before you flash it.
 
 Professional dual-domain (BLE + WiFi) scanning system that detects specific devices by MAC address or OUI with audio feedback. BLE advertisements and 802.11 management frames (probe requests / beacons) are detected on the shared 2.4 GHz radio via time-sliced scanning.
 
@@ -12,7 +12,10 @@ No Python, no PlatformIO, no drivers to install:
 
 **https://colonelpanichacks.github.io/ouispy-detector/**
 
-Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data cable, click **Connect & Flash**, pick the serial port. Always ships the latest committed `src/detector.bin`.
+Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data cable, click **Connect & Flash**, pick the serial port. It writes the full image (bootloader, partition table, boot selector and `src/detector.bin`), so a blank or bricked board comes up clean, and it always ships the latest firmware on `main`.
+
+- **Erase or keep settings:** the flasher asks. Erase for a fresh install; keep to update a node without losing its filters, Wi-Fi, MQTT and mesh settings. A burn-in lock survives a reflash unless you erase.
+- **Mesh fleets:** this build sends ESP-NOW at the long-range 250 kbps rate. Flash **every node in a mesh** with the same release so they all speak the same rate and protocol.
 
 ## Hardware
 
@@ -213,7 +216,7 @@ Link multiple OUI-SPY nodes so a detection heard by any node alerts everywhere a
 
 **How it works**
 
-- Transport is ESP-NOW broadcast (vendor-specific action frames) on the mesh channel, with the LR protocol enabled on every node. ESP-NOW goes out at the driver's default rate; building with `-DMESH_ESPNOW_LR_RATE=WIFI_PHY_RATE_LORA_250K` switches it to the LR PHY rate for more range (fleet-wide: flash every node with the same setting).
+- Transport is ESP-NOW broadcast (vendor-specific action frames) on the mesh channel, with the LR protocol enabled on every node. Release builds (and the web flasher) send ESP-NOW at the LR PHY rate (`-DMESH_ESPNOW_LR_RATE=WIFI_PHY_RATE_LORA_250K` in `platformio.ini`) for more range; remove that flag to fall back to the driver's default 1 Mbps. It is fleet-wide: flash every node with the same setting.
 - Flooding uses a 3-hop TTL and a 60 s (origin, seq) duplicate cache, so every packet is relayed at most once per node and loops die naturally.
 - The mesh window is the BLE phase: the radio parks on the mesh channel there, so RX/TX works alongside BLE scanning. During WiFi sweeps the mesh goes quiet by design (the sweep owns the radio); TX still lands on the mesh channel because the broadcast peer is pinned there, so nothing is lost.
 - A node with **no filters at all** but mesh enabled becomes a pure relay — drop one on a hill between two others and the mesh extends itself.
@@ -374,6 +377,19 @@ OUI-SPY Detector is part of the OUI-SPY firmware family:
 | **[Sky-Spy](https://github.com/colonelpanichacks/Sky-Spy)** | Drone Remote ID detection | ESP32-S3 / ESP32-C5 |
 | **[Remote-ID-Spoofer](https://github.com/colonelpanichacks/Remote-ID-Spoofer)** | WiFi Remote ID spoofer & simulator with swarm mode | ESP32-S3 |
 | **[OUI-SPY UniPwn](https://github.com/colonelpanichacks/Oui-Spy-UniPwn)** | Unitree robot exploitation system | ESP32-S3 |
+
+## Disclaimer
+
+**Read this before you build, flash or use OUI-SPY Detector. By doing any of those you accept it.**
+
+- **Research and education only.** This is a tool for studying which wireless devices are around you. It is not a consumer safety product, a security system, or a law-enforcement or forensic tool.
+- **Legal use is your responsibility.** Laws covering the reception, recording and use of radio transmissions, and the tracking of people or their devices, vary by country, state and city, and they change. You alone are responsible for knowing and obeying every law that applies where you use it. If you are not sure it is legal where you are, do not use it.
+- **Never use it against people.** Do not use it to stalk, follow, track, locate, harass, intimidate or identify any person, or to find someone who does not want to be found.
+- **Passive only, your own gear only.** It is meant to listen, not to transmit at, jam, deauthenticate, connect to or interfere with anything. Only test devices and networks you own or are explicitly authorized to test.
+- **Detections are not proof.** Many devices randomize their MAC addresses, one vendor prefix (OUI) can cover many unrelated products, and signatures go out of date. A match does not mean a particular device, company, agency or person is present, and silence does not mean nothing is there. Expect false positives and missed detections. Never rely on it for safety, security, legal or evidentiary decisions.
+- **Treat what it records as personal data.** MAC addresses, device names, locations and timestamps can identify people and may be personal data under laws such as the GDPR and CCPA. Collect as little as you need, keep it secure, do not publish it, and delete it when you are done.
+- **Networked features carry risk.** The node mesh, MQTT and the home dashboard move detection data over radio and over your network. Set a fleet key, keep it private, and never expose the dashboard or your MQTT broker to the internet.
+- **No warranty, no liability.** The firmware, web flasher, dashboard and hardware designs are provided **AS IS, without warranty of any kind**, express or implied, including fitness for a particular purpose. In no event shall the authors, contributors or sellers be liable for any claim, damages, data loss, legal consequence or other liability arising from the use or misuse of this project.
 
 ## License
 
