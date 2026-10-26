@@ -137,9 +137,20 @@ class SerialSource(Source):
                 # USB-CDC sending again if an earlier host left it stalled.
                 self.ser.write(b"\n")
                 last_rx = time.time()
+                opened_at = time.time()
+                proven = self.port_cfg != "auto"   # an explicit --serial port is trusted
                 self.set_state(connected=True, port=port, detail=f"{port} @ {self.baud}")
                 buf = b""
                 while not self.stop_evt.is_set():
+                    # Auto mode keeps a port only once it proves to be an
+                    # OUI-SPY node (a TLM line). Other Espressif boards on
+                    # USB (other projects!) are released within 12 s, never
+                    # held, and skipped for a while.
+                    if not proven and time.time() - opened_at > 12:
+                        if self.cur_sn:
+                            self.skip[self.cur_sn] = time.time()
+                        self.set_state(connected=False, detail=f"{port} is not an OUI-SPY node, released")
+                        break
                     chunk = self.ser.read(self.ser.in_waiting or 1)
                     if not chunk:
                         # The firmware prints every 5 s. Silent for 12 s with the
@@ -156,6 +167,8 @@ class SerialSource(Source):
                         line = raw.decode("utf-8", "replace").rstrip("\r")
                         if rec:
                             rec.write(f"{time.time():.3f}\t{line}\n")
+                        if line.startswith("TLM "):
+                            proven = True
                         if not self._role_check(line):
                             raise serial.SerialException("that port is a remote node, looking for the home")
                         self.fleet.feed_line(line, "serial")
