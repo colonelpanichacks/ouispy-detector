@@ -533,3 +533,16 @@ input[type="checkbox"]:checked::after {
 .fa h4 { margin: 0 0 8px; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); }
 .fa .ctl-row { margin: 0; }
 .cfgtable td.on { color: var(--accent); } .cfgtable td.off { color: var(--amber); }
+
+/* predefined filter groups (editor) */
+.groups { border: 1px solid var(--line); border-radius: 8px; max-height: 320px; overflow-y: auto; margin-bottom: 10px; }
+.gsec { font-size: 9px; letter-spacing: 1.8px; text-transform: uppercase; color: var(--faint); font-weight: 800;
+        padding: 7px 10px 4px; background: var(--panel-2); position: sticky; top: 0; }
+.grow { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-top: 1px solid var(--line); font-size: 12px; }
+.grow .gname { color: #fff; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.grow .ginfo { color: var(--faint); font-family: var(--mono); font-size: 10.5px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grow .btn.mini { margin-left: 0; flex: none; }
+.gst { flex: none; min-width: 74px; text-align: center; font-size: 9px; font-weight: 800; letter-spacing: 1px;
+       padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--faint); }
+.gst.on { color: var(--accent); border-color: rgba(78,205,196,0.5); text-shadow: var(--glow-accent); }
+.gst.part { color: var(--amber); border-color: rgba(251,191,36,0.5); }

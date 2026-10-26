@@ -822,6 +822,90 @@ function renderRemote() {
     renderFilters(n);
     renderJobs();
 }
+// ------------------------------------------------------------------
+// Predefined filter groups: the firmware presets + the portal's OUI
+// database. Each can be added to or removed from the node being edited;
+// changes are staged in the editor and go out with Push.
+// ------------------------------------------------------------------
+function allGroups() {
+    const p = (S.filterMeta && S.filterMeta.presets) || {};
+    const v = (S.filterMeta && S.filterMeta.vendors) || [];
+    return Object.keys(p).map((k) => ({ key: "p:" + k, label: `${k.toUpperCase()} preset`, kind: "preset",
+                                       rows: p[k], section: "Firmware presets" }))
+        .concat(v.map((g) => ({ key: "v:" + g.key, label: g.label, kind: g.kind, ouis: g.ouis, meta: g.meta,
+                                section: g.kind === "ble" ? "OUI database - BLE" : "OUI database - WiFi" })));
+}
+// Rows a group would add (same rules as the portal: BLE entries = BLE OUI
+// and/or WiFi probe per OUI; WiFi entries = probe/beacon per frame types).
+function groupRows(g) {
+    if (g.kind === "preset") return g.rows.map((r) => ({ t: r.t, id: r.id, d: r.d }));
+    const d = g.label.slice(0, 32), out = [];
+    for (const o of g.ouis) {
+        if (g.kind === "ble") {
+            if (S.groupBle !== false) out.push({ t: "OUI", id: o, d });
+            if (S.groupWifi !== false) out.push({ t: "PROBE", id: o, d });
+        } else {
+            const fr = ((g.meta && g.meta["Frame Types"]) || "Probe Request").toLowerCase();
+            if (fr.includes("probe")) out.push({ t: "PROBE", id: o, d });
+            if (fr.includes("beacon")) out.push({ t: "BEACON", id: o, d });
+        }
+    }
+    return out;
+}
+// Does an installed row belong to this group? Presets: exact type+ID.
+// Database vendors: any OUI-style row (BLE OUI / probe / beacon) on its OUIs.
+function rowInGroup(g, f) {
+    const id = String(f.id || "").replace(/[:\-\s]/g, "").toUpperCase();
+    if (g.kind === "preset") return g.rows.some((r) => r.t === f.t && r.id.toUpperCase() === id);
+    return ["OUI", "PROBE", "BEACON"].includes(f.t) && g.ouis.includes(id);
+}
+function groupState(g, list) {
+    const want = groupRows(g);
+    const key = (r) => r.t + ":" + String(r.id).replace(/[:\-\s]/g, "").toUpperCase();
+    const have = new Set(list.map(key));
+    const got = want.filter((r) => have.has(key(r))).length;
+    const any = list.some((f) => rowInGroup(g, f));
+    return { got, total: want.length, any };
+}
+function renderGroups() {
+    const box = $("feGroups");
+    if (!box || !S.editing) return;
+    let html = "", section = "";
+    for (const g of allGroups()) {
+        if (g.section !== section) { section = g.section; html += `<div class="gsec">${esc(section)}</div>`; }
+        const st = groupState(g, S.editing);
+        const full = st.total > 0 && st.got === st.total;
+        const chip = full ? `<span class="gst on">INSTALLED</span>`
+            : st.any ? `<span class="gst part">PARTIAL</span>` : `<span class="gst">-</span>`;
+        const info = g.kind === "preset" ? `${g.rows.length} signatures`
+            : `${g.ouis.length} OUI${g.ouis.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`;
+        html += `<div class="grow" data-key="${esc(g.key)}">
+            ${chip}<span class="gname" title="${esc(info)}">${esc(g.label)}</span><span class="ginfo">${esc(info)}</span>
+            ${full ? "" : `<button class="btn ghost mini gadd">Add</button>`}
+            ${st.any ? `<button class="btn ghost mini danger grm">Remove</button>` : ""}
+        </div>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".gadd").forEach((b) => b.onclick = () => {
+        readEditor();
+        const g = allGroups().find((x) => x.key === b.closest(".grow").dataset.key);
+        const key = (r) => r.t + ":" + String(r.id).replace(/[:\-\s]/g, "").toUpperCase();
+        const have = new Set(S.editing.map(key));
+        const add = groupRows(g).filter((r) => !have.has(key(r)));
+        S.editing = S.editing.filter((f) => f.id).concat(add);
+        rerenderEditor();
+        toast("good", `Staged: +${add.length} filter${add.length === 1 ? "" : "s"}`, `${g.label} (press Push to apply)`);
+    });
+    box.querySelectorAll(".grm").forEach((b) => b.onclick = () => {
+        readEditor();
+        const g = allGroups().find((x) => x.key === b.closest(".grow").dataset.key);
+        const before = S.editing.length;
+        S.editing = S.editing.filter((f) => !rowInGroup(g, f));
+        rerenderEditor();
+        toast("warn", `Staged: -${before - S.editing.length} filter${before - S.editing.length === 1 ? "" : "s"}`, `${g.label} (press Push to apply)`);
+    });
+}
+
 function renderFilters(n) {
     const box = $("dFilters");
     $("dFiltInfo").textContent = n.filters ? `${n.filters.length} installed, read ${ago(n.filters_ts)}` : "";
@@ -840,20 +924,18 @@ function renderFilters(n) {
                 <button class="btn ghost" id="feAdd">Add row</button>
                 <button class="btn ghost" id="feHome">Copy home's list</button>
             </div>
-            <div class="ctl-row">
-                <select class="field" id="fePreset"></select>
-                <label class="switch" title="Add each OUI as a BLE filter"><input type="checkbox" id="feBle" checked><span></span>BLE</label>
-                <label class="switch" title="Add each OUI as a WiFi probe filter"><input type="checkbox" id="feWifi" checked><span></span>WiFi</label>
-                <button class="btn ghost" id="fePresetAdd">Add</button>
+            <div class="rb-head"><h4>Predefined filters</h4>
+                <label class="switch" title="OUI-database adds: each OUI as a BLE filter"><input type="checkbox" id="feBle" ${S.groupBle !== false ? "checked" : ""}><span></span>BLE</label>
+                <label class="switch" title="OUI-database adds: each OUI as a WiFi probe filter"><input type="checkbox" id="feWifi" ${S.groupWifi !== false ? "checked" : ""}><span></span>WiFi</label>
             </div>
-            <div class="help-text" id="feVendorInfo"></div>
+            <div class="groups" id="feGroups"></div>
             <div class="ctl-row">
                 <button class="btn" id="fePush">Push to ${esc(n.alias || n.id)}</button>
                 <button class="btn ghost" id="feCancel">Cancel</button>
             </div>
             <div class="help-text">Pushing replaces the node's whole filter list; it reboots to apply. CIDs and service UUIDs are 4 hex digits, OUIs 6, full MACs 12, names 1-16 characters.</div>
         </div>`;
-        vendorOptions($("fePreset"));
+        renderGroups();
         wireEditor(n);
         validateEdit();
         return;
@@ -879,49 +961,15 @@ function rerenderEditor() {
 function wireEditor(n) {
     const rows = $("fRows");
     rows.addEventListener("input", () => { readEditor(); validateEdit(); });
-    rows.addEventListener("change", () => { readEditor(); validateEdit(); });
+    rows.addEventListener("change", () => { readEditor(); validateEdit(); renderGroups(); });
     rows.querySelectorAll(".rm").forEach((b) => b.onclick = () => {
         readEditor();
         S.editing.splice(Number(b.closest(".frow").dataset.i), 1);
         rerenderEditor();
     });
     $("feAdd").onclick = () => { readEditor(); S.editing.push({ t: "OUI", id: "", d: "" }); rerenderEditor(); };
-    const showVendor = () => {
-        const v = $("fePreset").value;
-        const g = v.startsWith("v:") ? (S.filterMeta.vendors || []).find((x) => x.key === v.slice(2)) : null;
-        $("feBle").parentElement.style.display = $("feWifi").parentElement.style.display =
-            g && g.kind === "ble" ? "" : "none";
-        const m = g ? g.meta : {};
-        $("feVendorInfo").textContent = g
-            ? [m["Category"], m["Common Devices"], m["Frame Types"] ? "Frames: " + m["Frame Types"] : "",
-               `${g.count} OUI${g.count === 1 ? "" : "s"}: ${g.ouis.slice(0, 8).map((o) => o.replace(/(..)(..)(..)/, "$1:$2:$3")).join(" ")}${g.count > 8 ? " ..." : ""}`]
-                .filter(Boolean).join(" | ")
-            : "Firmware preset: full vendor signature set (OUI, company ID, service UUID, WiFi frames as applicable).";
-    };
-    $("fePreset").onchange = showVendor;
-    showVendor();
-    $("fePresetAdd").onclick = async () => {
-        readEditor();
-        const v = $("fePreset").value;
-        const label = $("fePreset").selectedOptions[0].textContent;
-        let rows = [];
-        if (v.startsWith("p:")) {
-            rows = S.filterMeta.presets[v.slice(2)] || [];
-        } else if (v.startsWith("v:")) {
-            const q = new URLSearchParams({ key: v.slice(2), ble: $("feBle").checked ? "1" : "0", wifi: $("feWifi").checked ? "1" : "0" });
-            rows = await api(`/api/filters/vendor?${q}`);
-        }
-        const have = new Set(S.editing.map((f) => f.t + ":" + f.id.toUpperCase()));
-        let added = 0;
-        for (const f of rows) {
-            if (!have.has(f.t + ":" + f.id.toUpperCase())) { S.editing.push({ t: f.t, id: f.id, d: f.d }); added++; }
-        }
-        S.editing = S.editing.filter((f) => f.id);   // drop the empty starter row
-        rerenderEditor();
-        $("fePreset").value = v;
-        $("fePreset").onchange();
-        toast("good", `Added ${added} filter${added === 1 ? "" : "s"}`, label);
-    };
+    $("feBle").onchange = () => { S.groupBle = $("feBle").checked; renderGroups(); };
+    $("feWifi").onchange = () => { S.groupWifi = $("feWifi").checked; renderGroups(); };
     $("feHome").onclick = () => {
         const h = homeNode();
         if (h && h.filters) {
