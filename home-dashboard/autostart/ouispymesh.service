@@ -1,0 +1,15 @@
+# systemd user service for OUI-SPY Mesh. Replace /PATH/TO/ouispy-detector
+# with where the repo lives, then see README "Start automatically".
+[Unit]
+Description=OUI-SPY Mesh dashboard
+After=network-online.target
+
+[Service]
+WorkingDirectory=/PATH/TO/ouispy-detector/home-dashboard
+ExecStart=/PATH/TO/ouispy-detector/home-dashboard/.venv/bin/python3 ouispymesh.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

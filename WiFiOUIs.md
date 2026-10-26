@@ -40,6 +40,64 @@ D4:2D:C5
 
 </details>
 
+<details>
+
+<summary><b>Verkada</b> <code>1 OUI</code></summary>
+
+- `E0:A7:00`
+
+**Copy OUIs:**
+
+```
+E0:A7:00
+```
+
+> **Category:** Security Cameras / Surveillance  
+> **Frame Types:** Probe Request, Beacon  
+> **Common Devices:** Verkada security cameras (CD/CM/CF series, WiFi models)
+
+</details>
+
+<details>
+
+<summary><b>WiFi PINEAPPLE (Hak5)</b> <code>1 OUI</code></summary>
+
+- `00:13:37`
+
+**Copy OUIs:**
+
+```
+00:13:37
+```
+
+> **Category:** Pentest / Hacking Tool (rogue access point)  
+
+> **Frame Types:** Beacon, Probe Request  
+
+> **Common Devices:** Hak5 WiFi Pineapple (address prefix community-reported)
+
+</details>
+
+<details>
+
+<summary><b>PWNAGOTCHI</b> <code>1 OUI</code></summary>
+
+- `DE:AD:BE`
+
+**Copy OUIs:**
+
+```
+DE:AD:BE
+```
+
+> **Category:** Pentest / Hacking Tool (WiFi handshake capture)  
+
+> **Frame Types:** Beacon  
+
+> **Common Devices:** Pwnagotchi (beacons from DE:AD:BE:EF:DE:AD)
+
+</details>
+
 ---
 
 ## Copy All WiFi OUIs for OUI-SPY
@@ -47,6 +105,9 @@ D4:2D:C5
 ```
 00:25:DF
 D4:2D:C5
+E0:A7:00
+00:13:37
+DE:AD:BE
 ```
 
 <div align="center">
@@ -73,7 +134,7 @@ Found a new WiFi OUI? Help build the database!
 
 <div align="center">
 
-**Total WiFi OUIs:** `2` | **Last Updated:** Auto-generated from categorized lists
+**Total WiFi OUIs:** `5` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 

@@ -185,6 +185,26 @@ A4:CF:12
 
 <details>
 
+<summary><b>AXON (BLE)</b> <code>1 OUI</code></summary>
+
+- `00:25:DF`
+
+**Copy OUIs:**
+
+```
+00:25:DF
+```
+
+> **Category:** Body Camera / Law Enforcement
+
+> **Detection Range:** BLE range — field-validated, stable non-randomised MAC in advertisements
+
+> **Common Devices:** Axon Body 3/4, Fleet dash cam, Taser 7/10 — same IEEE block as the WiFi side; BT SIG company ID `0x034D` and service UUID `0xFC81` complete the signature (AXON preset installs all five)
+
+</details>
+
+<details>
+
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
 - `0C:9A:E6`
@@ -308,6 +328,29 @@ F4:03:43
 
 </details>
 
+<details>
+
+<summary><b>FLIPPER ZERO</b> <code>2 OUIs</code></summary>
+
+- `80:E1:26`
+
+- `80:E1:27`
+
+**Copy OUIs:**
+
+```
+80:E1:26
+80:E1:27
+```
+
+> **Category:** Pentest / Hacking Tool  
+
+> **Detection Range:** BLE range  
+
+> **Common Devices:** Flipper Zero (BLE address prefixes, community-reported; its BLE name also contains "Flipper")
+
+</details>
+
 ---
 
 ## Copy All OUIs for OUI-SPY
@@ -344,6 +387,8 @@ CC:66:0A
 F4:03:43
 5C:E9:1E
 98:59:49
+80:E1:26
+80:E1:27
 ```
 
 <div align="center">
@@ -370,7 +415,7 @@ Found a new OUI? Help build the database!
 
 <div align="center">
 
-**Total OUIs:** `32` | **Last Updated:** Auto-generated from categorized lists
+**Total OUIs:** `64` | **Last Updated:** Auto-generated from categorized lists
 
 Made by the OUI-SPY community
 

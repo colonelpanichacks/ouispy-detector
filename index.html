@@ -182,6 +182,16 @@
     max-width: 520px;
   }
 
+  /* ─── DISCLAIMER ─── */
+  .warn-panel { border-color: var(--amber); }
+  .warn-panel > header { color: var(--amber); }
+  .warn-panel ul { margin: 0; padding-left: 20px; text-align: left; }
+  .warn-panel li { margin: 0 0 10px; color: var(--text); font-size: 14px; }
+  .warn-panel li b { color: var(--amber); }
+  .ack { display: flex; gap: 10px; align-items: flex-start; justify-content: center; margin: 6px auto 0; max-width: 520px; text-align: left; font-size: 13px; color: var(--white); cursor: pointer; }
+  .ack input { margin-top: 3px; accent-color: #ff2b9e; width: 16px; height: 16px; flex: none; }
+  #flashBtn button[disabled] { opacity: 0.35; cursor: not-allowed; }
+
   /* ─── MODES ─── */
   .mode {
     padding: 22px 0;
@@ -283,6 +293,21 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
 
 <main>
 
+<section class="panel warn-panel" id="disclaimer">
+  <header><span>Read first</span><span class="right">disclaimer</span></header>
+  <div class="body">
+    <ul>
+      <li><b>Research and educational use only.</b> This firmware passively listens to Bluetooth and Wi-Fi traffic. It is not a safety product, a security system, or a law-enforcement or forensic tool.</li>
+      <li><b>The law is your responsibility.</b> Rules on receiving radio transmissions and on tracking people or their devices differ by country, state and city. You alone must know and follow them. If you are not sure it is legal where you are, do not use it.</li>
+      <li><b>Never use it against people.</b> Not to stalk, follow, track, locate, harass, intimidate or identify anyone.</li>
+      <li><b>Passive, and only your own gear.</b> Do not use it to transmit at, jam, deauthenticate or connect to anything you do not own or are not authorized to test.</li>
+      <li><b>Detections are not proof.</b> MACs get randomized, one vendor prefix covers many products, signatures age. Expect false positives and misses; never rely on it for safety, security, legal or evidentiary decisions.</li>
+      <li><b>What it records can be personal data</b> (MACs, names, locations, times). Keep as little as you need, keep it private, delete it when done. Set a mesh fleet key and never expose the dashboard or MQTT broker to the internet.</li>
+      <li><b>AS IS, no warranty, no liability.</b> The authors, contributors and sellers accept no liability for any damage, data loss, legal consequence or misuse arising from this project.</li>
+    </ul>
+  </div>
+</section>
+
 <section class="panel">
   <header><span>Install</span><span class="right">3 steps</span></header>
   <div class="body">
@@ -296,10 +321,12 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
     <div class="step">
       <div class="n">2</div>
       <h3>Click Flash</h3>
-      <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The install takes about 30 seconds and wipes the board clean before installing.</p>
+      <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The flasher writes the complete image (bootloader, partition table, boot selector and app), so even a blank board comes up. It asks whether to <b>erase</b>: erase for a fresh install, or keep your saved filters, Wi-Fi, MQTT and mesh settings when updating. About 30 seconds.</p>
+      <p><b>Mesh fleets:</b> this release talks ESP-NOW at the long-range 250 kbps rate. Flash every node in a mesh with the same release.</p>
+      <label class="ack"><input type="checkbox" id="ackBox"> <span>I have read the disclaimer above. I will use this only where it is legal, only on gear I own or am authorized to test, and never to track people.</span></label>
 
       <esp-web-install-button id="flashBtn" manifest="./manifest.json">
-        <button slot="activate">&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
+        <button slot="activate" id="flashGo" disabled>&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
         <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
         <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
       </esp-web-install-button>
@@ -338,13 +365,31 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
     <div class="mode">
       <span class="tag">[ DB ]</span>
       <h3>OUI Database</h3>
-      <p>One-click vendor signatures in the web portal: RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META / RAY-BAN, and I-PRO body cameras.</p>
+      <p>One-click vendor signatures in the web portal: RING, AXON, FLOCK SAFETY, DJI, PARROT, SKYDIO, META / RAY-BAN and I-PRO body cameras, plus pentest gear: FLIPPER ZERO, PWNAGOTCHI and the Hak5 WiFi PINEAPPLE.</p>
     </div>
 
     <div class="mode">
       <span class="tag">[ MQTT ]</span>
       <h3>Home Assistant</h3>
       <p>Publishes detections to any MQTT broker with auto-discovery — the Detector shows up as a device in Home Assistant, blips on detection, returns to idle after 10 seconds.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ MESH ]</span>
+      <h3>Node mesh</h3>
+      <p>Any number of Detectors link over ESP-NOW long range: no access point, no pairing. Remotes relay detections hop by hop to one <b>home</b> node, which publishes them to MQTT. The home node anchors the mesh channel and the remotes follow it. An optional <b>fleet key</b> encrypts the mesh and signs every command.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ FLEET ]</span>
+      <h3>Remote control</h3>
+      <p>From the home node: live roster, push the filter list to every node, mute or unmute, reboot, and read each remote's status over the air. Every node streams <code>TLM</code> telemetry on serial.</p>
+    </div>
+
+    <div class="mode">
+      <span class="tag">[ MAP ]</span>
+      <h3>OUI-SPY Mesh dashboard</h3>
+      <p>A local web app for the home node (<code>home-dashboard/</code> in the repo): live map, node trails, searchable detection history and fleet control, from your desk or your phone on your own network. Runs on your computer; nothing goes to the cloud.</p>
     </div>
 
     <div class="mode">
@@ -381,7 +426,7 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
     <div class="step">
       <div class="n">?</div>
       <h3>Detector AP disappeared after locking config</h3>
-      <p>That's intentional — locking is a one-way seal. Hold <span class="kbd">BOOT</span> during power-on to clear the lock and restore the config AP. Reflashing does <b>not</b> unlock it; NVS survives a reflash.</p>
+      <p>That's intentional — locking is a one-way seal. Hold <span class="kbd">BOOT</span> during power-on to clear the lock and restore the config AP. Reflashing does <b>not</b> unlock it unless you choose <b>erase</b> in the flasher; otherwise NVS survives a reflash.</p>
     </div>
 
   </div>
@@ -393,6 +438,13 @@ d8P'  `Y8b  `888'     `8' `888'            d8P'    `Y8 `888   `Y88.  `888.   .8'
 
 </main>
 
+<script>
+  (function () {
+    var box = document.getElementById('ackBox'), go = document.getElementById('flashGo');
+    function sync() { go.disabled = !box.checked; }
+    box.addEventListener('change', sync); sync();
+  })();
+</script>
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 </body>
 </html>
