@@ -52,6 +52,9 @@ void meshQueueDetection(const char* mac, const char* ident, const char* desc,
 void meshParkChannel();
 // Called when something else owns the radio (WiFi sweep / MQTT STA window).
 void meshUnparkChannel();
+// Fleet-key encryption: whether it's on, and frames dropped as plaintext
+// (not our fleet), failing authentication (wrong key / tampered) or replayed.
+void meshEncStats(bool& on, uint32_t& dropPlain, uint32_t& dropAuth, uint32_t& dropReplay);
 // ESP-NOW TX rate actually in force: "lr250k", "lr500k", "1m" (LR not
 // built in) or "lr-failed" (the driver refused the LR rate).
 const char* meshTxRateName();

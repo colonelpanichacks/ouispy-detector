@@ -7,6 +7,9 @@
 #include <string.h>
 #include <esp_mac.h>
 #include <mbedtls/md.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/sha256.h>
+#include <esp_random.h>
 
 // Serial-guard shared with main.cpp
 extern bool isSerialConnected();
@@ -38,6 +41,19 @@ extern bool isSerialConnected();
 // Bye body:       {u8 nodeId[3], u8 reason}
 // Status body:    {u8 nodeId[3], data[]}  (management reply, layout owned
 //                  by main.cpp; flooded, ttl 3)
+//
+// Encryption (fleet key set): EVERY frame is sealed whole — nothing of the
+// layout above is visible on air:
+//   frame     = nonce[12] | AES-256-GCM(plain) | tag[8]
+//   plain     = len | u16 boot | u32 ctr | packet[len] | zero padding
+//   frame len = 64, 128, 192 or 250 bytes (padded: announces, acks and
+//               detections look alike)
+// key   = SHA-256("OUISPY-MESH-ENC-v1" | fleet key); nonce = 12 random bytes
+//         from the hardware RNG, fresh for every transmission (relays
+//         re-seal, so a relayed copy shares no bytes with the original).
+// boot/ctr belong to the frame's ORIGIN (boot counts up every boot in NVS)
+// and feed a per-sender replay window. No magic, type, seq or node ID in
+// the clear: a receiver recognises fleet frames by authenticating them.
 #define MESH_MAGIC0   'O'
 #define MESH_MAGIC1   'S'
 #define MESH_VERSION  3
@@ -48,6 +64,10 @@ extern bool isSerialConnected();
 #define MESH_T_BYE      5
 #define MESH_T_DETACK   7    // 6 is the esp-lr-mesh library's DATA_TO
 #define MESH_T_STATUS   8
+#define MESH_SEAL_NONCE 12
+#define MESH_SEAL_TAG   8
+#define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
+static const uint8_t kSealSizes[] = { 64, 128, 192, 250 };   // padded frame sizes
 #define MESH_TTL        3
 #define MESH_HDR_LEN    12
 #define MESH_MIN_LEN    (MESH_HDR_LEN + 3)   // header + nodeId: every packet has both
@@ -117,6 +137,9 @@ static MeshDetSeen detSeen[MESH_DET_SEEN];
 static uint32_t detSent = 0, detRetries = 0, detAcked = 0, detExpired = 0, detEvicted = 0;
 
 static bool meshStarted = false;
+static uint16_t encBoot = 0;   // encryption nonce epoch (NVS, +1 per boot)
+static uint32_t encCtr = 0;    // frames sealed this boot
+static void encSetup();
 static bool meshLrRateOk = false;   // ESP-NOW really transmitting at the LR rate
 static volatile bool txInflight = false;   // a frame is on the air, awaiting its send callback
 static bool meshParked = false;
@@ -166,7 +189,7 @@ static uint8_t rxHead = 0, rxTail = 0, rxCount = 0;
 static portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Roster of other nodes, keyed by the STABLE nodeId (never the MAC).
-struct MeshNode { uint8_t id[3]; uint32_t lastSeen; uint8_t role; uint32_t pkts; bool live; };
+struct MeshNode { uint8_t id[3]; uint32_t lastSeen; uint8_t role; uint32_t pkts; bool live; uint8_t mac[6]; };
 static MeshNode roster[MESH_ROSTER_SIZE];
 
 // Ack counters for the last few command batches (successful acks only).
@@ -237,7 +260,7 @@ static uint32_t keyTxCtr = 0;
 // with rx_ctrl, including our own ESP-NOW broadcasts — signal strength is
 // recorded here keyed by nodeId for range diagnostics and the UI JSON.
 #define MESH_SNIFF_SLOTS 8
-static uint8_t  sniffId[MESH_SNIFF_SLOTS][3];
+static uint8_t  sniffMac[MESH_SNIFF_SLOTS][6];   // origin MAC (clear header; the node ID may be encrypted)
 static int8_t   sniffRssi[MESH_SNIFF_SLOTS];
 static uint32_t sniffTs[MESH_SNIFF_SLOTS];
 
@@ -312,24 +335,22 @@ void meshDeliveryStats(uint32_t& sent, uint32_t& retries, uint32_t& acked,
     for (int i = 0; i < MESH_DET_PENDING; i++) if (pendDet[i].used) pending++;
 }
 
-void meshSniffRssi(const uint8_t* id, int8_t rssi) {
+void meshSniffRssi(const uint8_t* mac, int8_t rssi) {
+    static const uint8_t zero[6] = {0};
     uint32_t now = millis();
-    int free_ = -1;
+    int slot = -1, empty = -1;
     for (int i = 0; i < MESH_SNIFF_SLOTS; i++) {
-        if (sniffId[i][0] == 0 && sniffId[i][1] == 0 && sniffId[i][2] == 0) { free_ = i; break; }
-        if (memcmp(sniffId[i], id, 3) == 0) {
-            sniffRssi[i] = rssi; sniffTs[i] = now; return;
-        }
+        if (memcmp(sniffMac[i], mac, 6) == 0) { slot = i; break; }
+        if (empty < 0 && memcmp(sniffMac[i], zero, 6) == 0) empty = i;
     }
-    int slot = free_;
+    if (slot < 0) slot = empty;
     if (slot < 0) {
         uint32_t oldest = 0xFFFFFFFF;
         for (int i = 0; i < MESH_SNIFF_SLOTS; i++) {
             if (sniffTs[i] < oldest) { oldest = sniffTs[i]; slot = i; }
         }
     }
-    if (slot < 0) return;
-    memcpy(sniffId[slot], id, 3);
+    memcpy(sniffMac[slot], mac, 6);
     sniffRssi[slot] = rssi;
     sniffTs[slot] = now;
 }
@@ -339,7 +360,7 @@ int8_t meshLinkRssi() {
     int8_t best = 0;
     uint32_t bestTs = 0;
     for (int i = 0; i < MESH_SNIFF_SLOTS; i++) {
-        if (sniffId[i][0] == 0 && sniffId[i][1] == 0 && sniffId[i][2] == 0) continue;
+        if (!sniffTs[i]) continue;
         if (now - sniffTs[i] > 10000) continue;
         if (sniffTs[i] > bestTs) { bestTs = sniffTs[i]; best = sniffRssi[i]; }
     }
@@ -368,6 +389,17 @@ void mesh_loadConfig() {
     if (p.getBytesLength("mk_rx") == sizeof(keyCtr)) p.getBytes("mk_rx", keyCtr, sizeof(keyCtr));
     keyTxCtr = p.getULong("mk_tx", 0);
     p.end();
+    // Encryption nonce epoch: counts up every boot (and is saved first), so
+    // (boot, frame counter) never repeats even though the counter restarts.
+    {
+        Preferences w;
+        w.begin("ouispy", false);
+        encBoot = (uint16_t)(w.getUShort("mk_boot", (uint16_t)(esp_random() & 0x7FFF)) + 1);
+        w.putUShort("mk_boot", encBoot);
+        w.end();
+        encCtr = 0;
+    }
+    encSetup();
     // One radio, two interfaces: in AP_STA the AP beacon follows the STA
     // channel, so a mesh channel of 12-13 would drag the portal AP onto a
     // band many client devices can't even see. Clamp the fleet to
@@ -395,6 +427,7 @@ void meshSetKey(const char* key) {
     memset(keyCtr, 0, sizeof(keyCtr));
     keyCtrSave();
     mesh_saveConfig();
+    encSetup();   // traffic is (re)keyed immediately
 }
 
 bool meshIsRemoteUplink() { return meshCfg.enabled && !meshCfg.home; }
@@ -498,7 +531,7 @@ void meshNodesJson(String& out) {
         const char* role = (n.role == 0xFF) ? "unknown" : (n.role ? "home" : "remote");
         int8_t rssi = 0;
         for (int s = 0; s < MESH_SNIFF_SLOTS; s++) {
-            if (memcmp(sniffId[s], n.id, 3) == 0 && now - sniffTs[s] < 10000) {
+            if (memcmp(sniffMac[s], n.mac, 6) == 0 && now - sniffTs[s] < 10000) {
                 rssi = sniffRssi[s];
                 break;
             }
@@ -536,9 +569,134 @@ static uint8_t meshBuildBodyId(uint8_t* out) {
 // ================================
 // TX queue
 // ================================
+// ================================
+// Encryption (fleet key)
+// ================================
+static mbedtls_gcm_context encGcm;
+static bool encReady = false;
+static uint32_t encDropPlain = 0, encDropAuth = 0, encDropReplay = 0;
+// Replay window per sender: highest (boot, ctr) seen + a 32-frame bitmap
+// for frames that arrive slightly out of order (relays, repeat copies).
+struct MeshReplay { uint8_t id[3]; uint16_t boot; uint32_t top; uint32_t bits; uint32_t ts; };
+static MeshReplay replayWin[12];
+
+static void encSetup() {
+    if (encReady) { mbedtls_gcm_free(&encGcm); encReady = false; }
+    memset(replayWin, 0, sizeof(replayWin));
+    if (!meshCfg.key[0]) return;
+    uint8_t k[32];
+    mbedtls_sha256_context sh;
+    mbedtls_sha256_init(&sh);
+    mbedtls_sha256_starts(&sh, 0);
+    mbedtls_sha256_update(&sh, (const unsigned char*)"OUISPY-MESH-ENC-v1", 18);
+    mbedtls_sha256_update(&sh, (const unsigned char*)meshCfg.key, strlen(meshCfg.key));
+    mbedtls_sha256_finish(&sh, k);
+    mbedtls_sha256_free(&sh);
+    mbedtls_gcm_init(&encGcm);
+    encReady = mbedtls_gcm_setkey(&encGcm, MBEDTLS_CIPHER_ID_AES, k, 256) == 0;
+    memset(k, 0, sizeof(k));
+}
+
+// Relay context: a relayed frame keeps its ORIGIN's boot/ctr (the replay
+// windows downstream key on the origin), only the nonce is fresh.
+static bool sealRelay = false;
+static uint16_t curBoot = 0;
+static uint32_t curCtr = 0;
+
+// Seal packet[len] into out (a whole frame). Returns the frame length, 0 if
+// the packet is too big to seal.
+static uint8_t encSeal(const uint8_t* packet, uint8_t len, uint8_t* out) {
+    uint8_t inner = 0;
+    for (uint8_t sz : kSealSizes) {
+        if (len + MESH_SEAL_INNER + MESH_SEAL_NONCE + MESH_SEAL_TAG <= sz) { inner = sz - MESH_SEAL_NONCE - MESH_SEAL_TAG; break; }
+    }
+    if (!inner) return 0;
+    uint8_t plain[MESH_PKT_MAX];
+    memset(plain, 0, inner);
+    uint16_t boot = sealRelay ? curBoot : encBoot;
+    uint32_t ctr  = sealRelay ? curCtr  : ++encCtr;
+    plain[0] = len;
+    memcpy(plain + 1, &boot, 2);
+    memcpy(plain + 3, &ctr, 4);
+    memcpy(plain + MESH_SEAL_INNER, packet, len);
+    esp_fill_random(out, MESH_SEAL_NONCE);
+    if (mbedtls_gcm_crypt_and_tag(&encGcm, MBEDTLS_GCM_ENCRYPT, inner, out, MESH_SEAL_NONCE,
+                                  nullptr, 0, plain, out + MESH_SEAL_NONCE,
+                                  MESH_SEAL_TAG, out + MESH_SEAL_NONCE + inner) != 0) return 0;
+    return inner + MESH_SEAL_NONCE + MESH_SEAL_TAG;
+}
+
+// Sliding-window replay check for (sender, boot, ctr); records it if fresh.
+static bool replayFresh(const uint8_t* id, uint16_t boot, uint32_t ctr, uint32_t now) {
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < 12; i++) {
+        if (replayWin[i].ts && memcmp(replayWin[i].id, id, 3) == 0) { slot = i; break; }
+        if (replayWin[i].ts < replayWin[oldest].ts) oldest = i;
+    }
+    if (slot < 0) {   // first frame from this sender since we booted / rekeyed
+        slot = oldest;
+        memcpy(replayWin[slot].id, id, 3);
+        replayWin[slot].boot = boot;
+        replayWin[slot].top = ctr;
+        replayWin[slot].bits = 1;
+        replayWin[slot].ts = now ? now : 1;
+        return true;
+    }
+    MeshReplay& w = replayWin[slot];
+    w.ts = now ? now : 1;
+    if ((int16_t)(boot - w.boot) < 0) return false;          // an older boot session
+    if (boot != w.boot) { w.boot = boot; w.top = ctr; w.bits = 1; return true; }   // it rebooted
+    if (ctr > w.top) {
+        uint32_t shift = ctr - w.top;
+        w.bits = (shift >= 32) ? 1 : ((w.bits << shift) | 1);
+        w.top = ctr;
+        return true;
+    }
+    uint32_t back = w.top - ctr;
+    if (back >= 32 || (w.bits & (1UL << back))) return false;
+    w.bits |= (1UL << back);
+    return true;
+}
+
+// frame -> packet (into out). Fails on a wrong key / tampering, a malformed
+// inside or a replay. boot/ctr of the origin are returned for relaying.
+static bool encOpen(const uint8_t* frame, uint8_t flen, uint8_t* out, uint8_t& len,
+                    uint16_t& boot, uint32_t& ctr, uint32_t now) {
+    if (flen < MESH_SEAL_NONCE + MESH_SEAL_TAG + MESH_SEAL_INNER + MESH_MIN_LEN) return false;
+    uint8_t inner = flen - MESH_SEAL_NONCE - MESH_SEAL_TAG;
+    uint8_t plain[MESH_PKT_MAX];
+    if (mbedtls_gcm_auth_decrypt(&encGcm, inner, frame, MESH_SEAL_NONCE, nullptr, 0,
+                                 frame + MESH_SEAL_NONCE + inner, MESH_SEAL_TAG,
+                                 frame + MESH_SEAL_NONCE, plain) != 0) {
+        encDropAuth++;   // not ours: another fleet's key, another ESP-NOW device, or tampered
+        return false;
+    }
+    len = plain[0];
+    if (len < MESH_MIN_LEN || len > inner - MESH_SEAL_INNER) return false;
+    memcpy(&boot, plain + 1, 2);
+    memcpy(&ctr, plain + 3, 4);
+    memcpy(out, plain + MESH_SEAL_INNER, len);
+    if (out[0] != MESH_MAGIC0 || out[1] != MESH_MAGIC1 || out[2] != MESH_VERSION) return false;
+    return true;
+}
+
+void meshEncStats(bool& on, uint32_t& dropPlain, uint32_t& dropAuth, uint32_t& dropReplay) {
+    on = encReady;
+    dropPlain = encDropPlain;
+    dropAuth = encDropAuth;
+    dropReplay = encDropReplay;
+}
+
+// Every frame goes through here: with a fleet key it is sealed on the way
+// into the queue (relays included — they re-seal with a fresh nonce).
 static bool meshTxPush(const uint8_t* pkt, uint8_t len) {
     if (txCount >= MESH_TXQ_SIZE) return false;
-    memcpy(txQ[txHead], pkt, len);
+    if (encReady) {
+        len = encSeal(pkt, len, txQ[txHead]);
+        if (!len) return false;
+    } else {
+        memcpy(txQ[txHead], pkt, len);
+    }
     txLen[txHead] = len;
     txHead = (txHead + 1) % MESH_TXQ_SIZE;
     txCount++;
@@ -1077,8 +1235,44 @@ static void meshHandleCommand(const uint8_t* pkt, uint8_t pktLen) {
 // ================================
 // ESP-NOW callbacks (WiFi driver task context — keep cheap, no heap)
 // ================================
+// Minimum frame length per (plaintext) type.
+static bool meshLenOk(uint8_t type, int len) {
+    switch (type) {
+        case MESH_T_ANNOUNCE: return len >= MESH_MIN_LEN + 1;
+        case MESH_T_DETECT:   return len >= MESH_DETECT_LEN;
+        case MESH_T_COMMAND:  return len >= MESH_CMD_MIN;
+        case MESH_T_ACK:      return len >= MESH_ACK_LEN;
+        case MESH_T_BYE:      return len >= MESH_BYE_LEN;
+        case MESH_T_DETACK:   return len >= MESH_DETACK_LEN;
+        case MESH_T_STATUS:   return len >= MESH_MIN_LEN + 1;
+        default:              return len >= MESH_MIN_LEN;
+    }
+}
+
 static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
     meshRxAll++;
+    if (encReady && meshStarted) {
+        // Sealed fleet: nothing to inspect in the clear. Only the padded
+        // frame sizes can be ours; authentication happens in the drain.
+        bool sized = false;
+        for (uint8_t sz : kSealSizes) if (len == sz) sized = true;
+        if (!sized) {
+            if (len >= 2 && data[0] == MESH_MAGIC0 && data[1] == MESH_MAGIC1) encDropPlain++;
+            else meshRxBad++;
+            return;
+        }
+        portENTER_CRITICAL(&rxMux);
+        if (rxCount < MESH_RXQ_SIZE) {
+            memcpy(rxQ[rxHead], data, len);
+            rxLen[rxHead] = (uint8_t)len;
+            rxChan[rxHead] = radioCh;
+            rxHead = (rxHead + 1) % MESH_RXQ_SIZE;
+            rxCount++;
+            meshRxQueued++;
+        }
+        portEXIT_CRITICAL(&rxMux);
+        return;
+    }
     if (!meshStarted || len < MESH_MIN_LEN) { meshRxShort++; return; }
     if (data[0] != MESH_MAGIC0 || data[1] != MESH_MAGIC1) { meshRxBad++; return; }
 
@@ -1324,7 +1518,9 @@ static void strayRecord(const uint8_t* id, uint8_t ch, uint8_t role, uint32_t no
 static void meshRelay(uint8_t* pkt, uint8_t len) {
     if (pkt[4] > 1 && txCount < MESH_TXQ_SIZE) {
         pkt[4]--;
+        sealRelay = true;    // keep the origin's boot/ctr (replay windows key on it)
         if (!meshTxPush(pkt, len)) pkt[4]++;  // no slot: don't burn the ttl
+        sealRelay = false;
     }
 }
 
@@ -1355,6 +1551,18 @@ void meshTick() {
         }
         portEXIT_CRITICAL(&rxMux);
         if (len == 0) break;
+
+        if (encReady) {
+            // Sealed: open it, then the checks the receive callback can't
+            // do in the clear any more (self, duplicates, replays, length).
+            uint8_t frame[MESH_PKT_MAX];
+            memcpy(frame, pkt, len);
+            if (!encOpen(frame, len, pkt, len, curBoot, curCtr, now)) continue;
+            if (memcmp(pkt + 6, selfMac, 6) == 0) { meshRxSelf++; continue; }
+            if (meshSeen(pkt + 6, pkt[5], now)) { meshRxDup++; continue; }
+            if (!replayFresh(pkt + MESH_HDR_LEN, curBoot, curCtr, now)) { encDropReplay++; continue; }
+            if (!meshLenOk(pkt[3], len)) { meshRxShort++; continue; }
+        }
 
         uint8_t type = pkt[3];
         const uint8_t* nodeId = pkt + MESH_HDR_LEN;
@@ -1403,6 +1611,11 @@ void meshTick() {
         }
 
         bool isNewNode = sameCh && meshRosterUpdate(nodeId, isAnnounce, role, now);
+        if (sameCh) {
+            for (int i = 0; i < MESH_ROSTER_SIZE; i++) {
+                if (roster[i].live && memcmp(roster[i].id, nodeId, 3) == 0) { memcpy(roster[i].mac, pkt + 6, 6); break; }
+            }
+        }
         if (isNewNode) {
             // Link handshake: answer a new neighbor with a full burst so
             // both sides' rosters (and link LEDs) fill within one frame of

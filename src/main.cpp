@@ -2274,15 +2274,15 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
     uint8_t ftype = (fc0 >> 2) & 0x03;
     uint8_t subtype = (fc0 >> 4) & 0x0F;
 
-    // Mesh RSSI sniff: action frames carrying our magic get their rx_ctrl
-    // signal strength recorded for range testing (the ESP-NOW recv callback
-    // on this core can't see RSSI). Only fires during sweeps, where
-    // promiscuous mode is active. Bounded scan, no heap — driver context.
-    if (ftype == 0 && subtype == 0x0D) {
+    // Mesh RSSI sniff: ESP-NOW frames are 802.11 action frames, category
+    // 0x7F (vendor specific) with Espressif's OUI 18:FE:34 right after the
+    // MAC header. Recorded by transmitter address (addr2): with a fleet key
+    // the payload is sealed and has no visible marker. Only fires during
+    // sweeps, where promiscuous mode is active. No heap — driver context.
+    if (ftype == 0 && subtype == 0x0D && pkt->rx_ctrl.sig_len > 28) {
         const uint8_t* p = pkt->payload;
-        uint16_t slen = pkt->rx_ctrl.sig_len;
-        for (uint16_t i = 28; i + 15 <= slen && i < 72; i++) {
-            if (p[i] == 'O' && p[i+1] == 'S') { meshSniffRssi(&p[i+12], pkt->rx_ctrl.rssi); break; }
+        if (p[24] == 0x7F && p[25] == 0x18 && p[26] == 0xFE && p[27] == 0x34) {
+            meshSniffRssi(hdr->addr2, pkt->rx_ctrl.rssi);
         }
     }
 
@@ -5909,6 +5909,9 @@ static void emitTelemetry() {
     if (meshCfg.enabled) meshDutyStats(park, parkBle);
     String stray = "[]";
     if (meshCfg.enabled) meshStraysJson(stray);
+    bool encOn = false;
+    uint32_t eDropPlain = 0, eDropAuth = 0, eDropReplay = 0;
+    if (meshCfg.enabled) meshEncStats(encOn, eDropPlain, eDropAuth, eDropReplay);
     char selfId[7];
     meshSelfIdHex(selfId);
     String roster = "{\"nodes\":[]}";
@@ -5920,7 +5923,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -5936,7 +5939,8 @@ static void emitTelemetry() {
                   mqttConnected ? 1 : 0, (unsigned long)dSent, (unsigned long)dRetry,
                   (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend,
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
-                  stray.c_str(), nodes.c_str());
+                  encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
+                  (unsigned long)eDropReplay, stray.c_str(), nodes.c_str());
 }
 
 void loop() {
