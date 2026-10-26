@@ -546,3 +546,14 @@ input[type="checkbox"]:checked::after {
        padding: 1px 6px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--faint); }
 .gst.on { color: var(--accent); border-color: rgba(78,205,196,0.5); text-shadow: var(--glow-accent); }
 .gst.part { color: var(--amber); border-color: rgba(251,191,36,0.5); }
+
+/* fleet key QR */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 2600; display: none; align-items: center; justify-content: center; padding: 16px; }
+.modal.open { display: flex; }
+.modal-card { background: var(--panel); border: 1px solid var(--line-strong); border-radius: 12px; width: min(360px, 100%);
+              box-shadow: 0 0 0 1px rgba(78,205,196,0.25), 0 20px 60px rgba(0,0,0,0.7); padding-bottom: 14px; }
+.modal-card .drawer-head { padding: 14px 16px 10px; }
+.modal-card .qr { background: #fff; margin: 12px 16px; border-radius: 8px; padding: 6px; }
+.modal-card .qr svg { width: 100%; height: auto; display: block; }
+.modal-card .field, .modal-card .ctl-row { margin: 0 16px; width: calc(100% - 32px); }
+.field.mono { font-family: var(--mono); font-size: 12px; }

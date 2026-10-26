@@ -393,7 +393,7 @@ function setPlacing(on) {
         : `Drag markers to move nodes. Select a node, then "Place on map".`;
 }
 document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { if (S.placing) setPlacing(false); else { closeDrawer(); closeDevice(); } }
+    if (e.key === "Escape") { if (S.placing) setPlacing(false); else { closeDrawer(); closeDevice(); hideFleetKey(); } }
 });
 
 function hitNode(id) {
@@ -1271,11 +1271,54 @@ $("clearBtn").onclick = async () => {
     renderFeed(); renderKpis(); renderNodes(); loadHistory(false);
 };
 
+// ------------------------------------------------------------------
+// fleet key as QR (this Mac + Tailscale devices only; server enforces it)
+// ------------------------------------------------------------------
+async function loadFleetKeyStatus() {
+    const st = await api("/api/fleetkey/status");
+    $("fkStatus").textContent = !st.present ? "No fleet key saved on the Mac yet."
+        : st.viewable ? "A fleet key is saved on the Mac." : "Saved on the Mac. Viewable only from the Mac itself or your Tailscale devices.";
+    $("fkShow").style.display = st.present && st.viewable ? "" : "none";
+}
+let fkTimer = null;
+function hideFleetKey() {
+    $("fkModal").classList.remove("open");
+    $("fkQr").innerHTML = "";
+    $("fkText").value = "";
+    $("fkCopied").textContent = "";
+    clearTimeout(fkTimer);
+}
+$("fkShow").onclick = () => twoTap($("fkShow"), async () => {
+    const r = await fetch("/api/fleetkey", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) { toast("bad", "Fleet key", d.error); return; }
+    const q = qrcode(0, "M");
+    q.addData(d.key);
+    q.make();
+    $("fkQr").innerHTML = q.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
+    $("fkText").value = d.key;
+    $("fkModal").classList.add("open");
+    clearTimeout(fkTimer);
+    fkTimer = setTimeout(hideFleetKey, 60000);
+});
+$("fkClose").onclick = hideFleetKey;
+$("fkModal").onclick = (e) => { if (e.target === $("fkModal")) hideFleetKey(); };
+$("fkCopy").onclick = async () => {
+    const t = $("fkText");
+    try {
+        await navigator.clipboard.writeText(t.value);   // needs a secure context
+    } catch (e) {
+        t.select(); t.setSelectionRange(0, 999);         // plain-http fallback
+        document.execCommand("copy");
+    }
+    $("fkCopied").textContent = "Copied";
+};
+
 // tabs
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
     document.querySelectorAll(".tab-body").forEach((b) => b.classList.toggle("active", b.id === `tab-${t.dataset.tab}`));
-    if (t.dataset.tab === "settings") loadSettingsForm();
+    if (t.dataset.tab === "settings") { loadSettingsForm(); loadFleetKeyStatus(); }
     if (t.dataset.tab === "devices") loadDevices();
     if (t.dataset.tab === "console") $("console").scrollTop = $("console").scrollHeight;
 });

@@ -122,6 +122,33 @@ def _is_trusted_net():
     return any(ip in n for n in TRUSTED_NETS)
 
 
+# The fleet key (kept on this Mac, outside the repo) can be shown as a QR for
+# provisioning a node from a phone. Only this Mac and your Tailscale devices
+# may see it: the plain LAN reaches the dashboard without a token.
+FLEET_KEY_FILE = os.path.expanduser("~/.config/ouispy/fleet_key")
+KEY_VIEW_NETS = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
+
+
+def _key_viewer_ok():
+    if _is_local():
+        return True
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return any(ip in n for n in KEY_VIEW_NETS)
+
+
+def _fleet_key():
+    try:
+        with open(FLEET_KEY_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def _authorized():
     if args.open or _is_local():
         return True
@@ -484,6 +511,23 @@ def api_node_cmd(nid):
 def api_fleet_cmd():
     data = request.get_json(silent=True) or {}
     return _submit(str(data.get("op", "")), "all", data.get("args") or {})
+
+
+@app.route("/api/fleetkey/status")
+def api_fleetkey_status():
+    return jsonify({"present": _fleet_key() is not None, "viewable": _key_viewer_ok()})
+
+
+@app.route("/api/fleetkey")
+def api_fleetkey():
+    if not _key_viewer_ok():
+        return jsonify({"ok": False, "error": "the fleet key is only shown on this Mac or your Tailscale devices"}), 403
+    k = _fleet_key()
+    if not k:
+        return jsonify({"ok": False, "error": "no fleet key saved on this Mac (~/.config/ouispy/fleet_key)"}), 404
+    resp = jsonify({"ok": True, "key": k})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/jobs")

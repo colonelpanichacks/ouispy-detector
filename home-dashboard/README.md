@@ -153,6 +153,18 @@ and validation, command planning, and full commander round trips (status,
 audio, filter push and readback, an old-firmware refusal, local home commands)
 against the demo console simulator.
 
+## Fleet key
+
+With a fleet key set, the whole mesh is sealed (AES-256-GCM). Each node gets the
+key over its USB console (`meshkey <key>`) or through its setup portal (Mesh
+section, Fleet key). It never goes over the air. The dashboard reads the key from
+`~/.config/ouispy/fleet_key` on this Mac, outside the repo.
+
+**Settings, Fleet key, Show key as QR** displays it as a QR code, which hides
+itself after 60 s. Scan it on your phone, then paste it into a new node's portal.
+The key is only shown to this Mac and your Tailscale devices, never to the plain
+LAN.
+
 ## Privacy notes
 
 - The server binds `127.0.0.1` and Socket.IO only accepts same-origin connections.
