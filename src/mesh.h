@@ -43,7 +43,8 @@ void mesh_deinit();
 // publishing MQTT itself (remote role).
 bool meshIsRemoteUplink();
 
-// Queue a local detection for mesh-wide flooding. Called from loop() only.
+// Queue a LOCAL detection for mesh-wide delivery (never re-queue one that
+// arrived over the mesh). Retried until a home acks it. loop() only.
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
                         int rssi, uint8_t dtype, bool wifiDomain);
 
@@ -56,6 +57,16 @@ void meshUnparkChannel();
 // flush the TX queue, send periodic presence announcements, prune the node
 // roster. Never call from an interrupt or driver callback.
 void meshTick();
+
+// Reliable detection delivery counters: first sends, retries, detections
+// acked by a home, detections given up (no ack in 30 s / table overflow),
+// and how many are still in flight.
+void meshDeliveryStats(uint32_t& sent, uint32_t& retries, uint32_t& acked,
+                       uint32_t& expired, uint8_t& pending);
+
+// True while a fresh detection, queued frame or command transfer is waiting
+// to go out: the WiFi sweep holds the mesh channel until it clears.
+bool meshUrgent();
 
 // Number of distinct mesh nodes heard from in the roster window.
 uint8_t meshNodeCount();

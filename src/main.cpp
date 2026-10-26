@@ -1813,6 +1813,12 @@ static const unsigned long WIFI_SWEEP_MS = 2200;
 static const unsigned long BLE_SCAN_MS   = 2200;
 static const unsigned long WIFI_HOP_MS   = 200;
 static const unsigned long MESH_CH_DWELL_MS = 600;  // extra listen + mesh flush time while sweeping past the mesh channel
+static const unsigned long MESH_VISIT_MS    = 100;  // mesh-channel visit between foreign channels (mesh on)
+// With the mesh on, the sweep goes back to the mesh channel between every
+// foreign channel, so no node is ever off the mesh for more than one hop
+// (~200 ms): detections and their retries land near-instantly instead of
+// waiting out a whole off-channel stretch of a peer's sweep.
+static bool g_meshVisit = false;
 
 // Dual-domain time-slice architecture:
 // BLE and WiFi share the ESP32-S3's single 2.4 GHz antenna; simultaneous promiscuous
@@ -1955,6 +1961,7 @@ static void scan_wifi_hop_channel() {
     if (g_radioPhase != PHASE_WIFI_SWEEP) return;
     g_wifiChannel = (g_wifiChannel > 1) ? g_wifiChannel - 1 : 11;
     esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
+    g_meshVisit = false;
 }
 
 // Clean up scanning state and return radio to off (idempotent).
@@ -5356,6 +5363,8 @@ static void emitTelemetry() {
     if (!isSerialConnected()) return;
     uint32_t rxAll=0, rxQ=0, rxDup=0, rxSelf=0, rxBad=0, txS=0, txF=0, txC=0;
     if (meshCfg.enabled) meshStats(rxAll, rxQ, rxDup, rxSelf, rxBad, txS, txF, txC);
+    uint32_t dSent=0, dRetry=0, dAck=0, dLost=0; uint8_t dPend=0;
+    if (meshCfg.enabled) meshDeliveryStats(dSent, dRetry, dAck, dLost, dPend);
     char selfId[7];
     meshSelfIdHex(selfId);
     String roster = "{\"nodes\":[]}";
@@ -5366,7 +5375,8 @@ static void emitTelemetry() {
                   "\"ch\":%d,\"up\":%lu,\"heap\":%lu,\"dev\":%u,\"filters\":%u,\"n\":%d,"
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
-                  "\"heal\":%d,\"mqtt\":%d,%s}\n",
+                  "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
+                  "\"dlost\":%lu,\"dpend\":%u,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -5379,7 +5389,8 @@ static void emitTelemetry() {
                   meshCfg.enabled ? meshTxPending() : 0,
                   meshCfg.enabled ? (int)meshLinkRssi() : 0,
                   (meshCfg.enabled && meshHealing()) ? 1 : 0,
-                  mqttConnected ? 1 : 0, nodes.c_str());
+                  mqttConnected ? 1 : 0, (unsigned long)dSent, (unsigned long)dRetry,
+                  (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend, nodes.c_str());
 }
 
 void loop() {
@@ -5552,12 +5563,26 @@ void loop() {
         // window. Without this the peer receives in clumps spaced one full
         // phase cycle apart, and one late clump blinks the link light.
         if (g_radioPhase == PHASE_WIFI_SWEEP && hasWifiFilters) {
-            unsigned long dwell = (g_wifiChannel == meshCfg.channel)
-                                  ? MESH_CH_DWELL_MS : WIFI_HOP_MS;
-            if (currentMillis - g_lastHopTime >= dwell) {
-                scan_wifi_hop_channel();
-                if (g_wifiChannel == meshCfg.channel) meshParkChannel();
-                else meshUnparkChannel();
+            unsigned long dwell = g_meshVisit ? MESH_VISIT_MS
+                                : (g_wifiChannel == meshCfg.channel) ? MESH_CH_DWELL_MS : WIFI_HOP_MS;
+            bool urgent = meshCfg.enabled && !meshHealing() && meshUrgent();
+            if (urgent && !g_meshVisit && g_wifiChannel != meshCfg.channel) {
+                meshParkChannel();          // something to deliver: go to the mesh now
+                g_meshVisit = true;
+                g_lastHopTime = currentMillis;
+            } else if (urgent && g_meshVisit) {
+                g_lastHopTime = currentMillis;   // hold the mesh channel until it clears
+            } else if (currentMillis - g_lastHopTime >= dwell) {
+                if (meshCfg.enabled && !meshHealing() && !g_meshVisit &&
+                    g_wifiChannel != meshCfg.channel) {
+                    meshParkChannel();      // short mesh visit between foreign channels
+                    g_meshVisit = true;
+                } else {
+                    g_meshVisit = false;
+                    scan_wifi_hop_channel();
+                    if (g_wifiChannel == meshCfg.channel) meshParkChannel();
+                    else meshUnparkChannel();
+                }
                 g_lastHopTime = currentMillis;
             }
         }
@@ -5616,9 +5641,12 @@ void loop() {
                     detectionActive = true;
                 }
 
-                // Flood every validated detection mesh-wide. Remote nodes
-                // report this way; home nodes both publish MQTT and relay.
-                if (meshCfg.enabled) {
+                // Send our OWN radio's detections mesh-wide (retried until a
+                // home acks). Detections that arrived over the mesh already
+                // flooded from their origin; re-sending them would credit
+                // them to this node and multiply traffic.
+                bool fromMesh = (tag >= 0);
+                if (meshCfg.enabled && !fromMesh) {
                     meshQueueDetection(e.mac, e.identifier, e.description,
                                        e.rssi, (uint8_t)e.matchedType, e.wifiDomain);
                 }

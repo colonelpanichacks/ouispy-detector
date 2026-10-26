@@ -26,7 +26,11 @@ extern bool isSerialConnected();
 //
 // Announce body:  {u8 nodeId[3], u8 role}
 // Detection body: {u8 nodeId[3], i8 rssi, u8 dtype, u8 flags(bit0=wifi),
-//                  char mac[18], char ident[18], char desc[40]}
+//                  char mac[18], char ident[18], char desc[40], u16 detId}
+//                  detId (origin's detection counter) makes delivery
+//                  reliable: the home acks it, the origin retries until
+//                  acked, every node alerts once per (origin, detId).
+// Det-ack body:   {u8 nodeId[3] (home), u8 origin[3], u16 detId}
 // Command body:   {u8 nodeId[3], u8 cmd, u16 cmdId, u16 offset, u8 more,
 //                  u32 crc32, data[]}  (crc covers the reassembled payload)
 // Ack body:       {u8 nodeId[3], u8 cmd, u16 cmdId, u8 status, u8 count}
@@ -39,12 +43,15 @@ extern bool isSerialConnected();
 #define MESH_T_COMMAND  3
 #define MESH_T_ACK      4
 #define MESH_T_BYE      5
+#define MESH_T_DETACK   7    // 6 is the esp-lr-mesh library's DATA_TO
 #define MESH_TTL        3
 #define MESH_HDR_LEN    12
 #define MESH_MIN_LEN    (MESH_HDR_LEN + 3)   // header + nodeId: every packet has both
 #define MESH_PKT_MAX    250
 #define MESH_BODY       MESH_HDR_LEN
-#define MESH_DETECT_LEN (MESH_HDR_LEN + 3 + 1 + 1 + 1 + 18 + 18 + 40)
+#define MESH_DETECT_LEN (MESH_HDR_LEN + 3 + 1 + 1 + 1 + 18 + 18 + 40)   // legacy, no detId
+#define MESH_DETECT_ID_LEN (MESH_DETECT_LEN + 2)
+#define MESH_DETACK_LEN (MESH_HDR_LEN + 3 + 3 + 2)
 #define MESH_CMD_MIN    (MESH_HDR_LEN + 3 + 1 + 2 + 2 + 1 + 4)
 #define MESH_ACK_LEN    (MESH_HDR_LEN + 3 + 1 + 2 + 1 + 1)
 #define MESH_BYE_LEN    (MESH_HDR_LEN + 3 + 1)
@@ -66,7 +73,7 @@ extern bool isSerialConnected();
                              // RX silence) — 8 caps the per-flush burst
 #define MESH_TXQ_RESERVE 2   // slots a command transfer leaves free for
                              // announces, acks and relays
-#define MESH_RXQ_SIZE   8
+#define MESH_RXQ_SIZE   16   // retries + relays arrive in bursts
 #define MESH_SEEN_SIZE  32
 #define MESH_SEEN_TTL_MS    60000UL
 #define MESH_ROSTER_SIZE    8
@@ -80,6 +87,30 @@ extern bool isSerialConnected();
 #define MESH_CH_MAX 11
 
 MeshConfig meshCfg = { false, false, 6, "" };
+
+// ================================
+// Reliable detection delivery
+// ================================
+// The origin keeps each detection here and resends it (fresh seq, so relays
+// forward it again) until a home node acks it or MESH_DET_GIVEUP_MS passes.
+// The sweep visits the mesh channel every ~300 ms (main.cpp), so early
+// retries are tight; gaps grow and carry jitter so they never lock onto a
+// peer's cycle. With no home in the roster (or when this node IS the home)
+// nobody acks, so a detection goes out MESH_DET_BLIND times instead,
+// spanning more than a peer's longest off-channel stretch.
+#define MESH_DET_PENDING   12
+#define MESH_DET_GIVEUP_MS 30000UL
+#define MESH_DET_BLIND     4
+#define MESH_DET_SEEN      32
+#define MESH_DET_SEEN_TTL_MS 120000UL
+static const uint16_t kDetRetryMs[] = { 90, 90, 100, 110, 130, 160, 200, 300, 500, 800, 1200, 2000, 3000 };
+struct MeshPendDet { bool used; uint16_t detId; uint8_t body[MESH_DETECT_ID_LEN - MESH_HDR_LEN];
+                     uint32_t firstAt, nextAt; uint8_t tries; };
+static MeshPendDet pendDet[MESH_DET_PENDING];
+static uint16_t detCounter = 0;
+struct MeshDetSeen { uint8_t origin[3]; uint16_t detId; uint32_t ts; bool live; };
+static MeshDetSeen detSeen[MESH_DET_SEEN];
+static uint32_t detSent = 0, detRetries = 0, detAcked = 0, detExpired = 0, detEvicted = 0;
 
 static bool meshStarted = false;
 static bool meshParked = false;
@@ -201,6 +232,30 @@ void meshStats(uint32_t& rxAll, uint32_t& rxQueued, uint32_t& rxDup,
     rxAll = meshRxAll; rxQueued = meshRxQueued; rxDup = meshRxDup;
     rxSelf = meshRxSelf; rxBad = meshRxBad;
     txSent = meshTxSent; txFail = meshTxFail; txCbFail = meshTxCbFail;
+}
+
+// True while this node has something time-critical to put on the air: a
+// detection younger than MESH_URGENT_MS still awaiting delivery, queued
+// frames, or a command transfer. The sweep holds the mesh channel while
+// it is set, so the frame meets the receiver's next mesh visit instead of
+// waiting for this node's own schedule to come round.
+#define MESH_URGENT_MS 1500UL
+bool meshUrgent() {
+    if (!meshStarted) return false;
+    if (txCount > 0 || outActive) return true;
+    uint32_t now = millis();
+    for (int i = 0; i < MESH_DET_PENDING; i++) {
+        if (pendDet[i].used && now - pendDet[i].firstAt < MESH_URGENT_MS) return true;
+    }
+    return false;
+}
+
+void meshDeliveryStats(uint32_t& sent, uint32_t& retries, uint32_t& acked,
+                       uint32_t& expired, uint8_t& pending) {
+    sent = detSent; retries = detRetries; acked = detAcked;
+    expired = detExpired + detEvicted;
+    pending = 0;
+    for (int i = 0; i < MESH_DET_PENDING; i++) if (pendDet[i].used) pending++;
 }
 
 void meshSniffRssi(const uint8_t* id, int8_t rssi) {
@@ -467,9 +522,12 @@ static void meshPumpCommand() {
 // this every pass, so the delay is at most one phase (~2.2 s). A frame the
 // driver rejects (typically a BLE coexistence collision) gets exactly one
 // retry next flush instead of vanishing.
+static void meshPumpDetections(uint32_t now);
+
 void meshFlushTxNow() {
     if (!meshStarted || !meshParked) return;
     meshPumpCommand();
+    meshPumpDetections(millis());
     uint8_t bcast[6];
     memset(bcast, 0xFF, 6);
     static uint8_t retryBuf[MESH_PKT_MAX];
@@ -506,23 +564,110 @@ void meshSelfIdHex(char out[7]) {
     snprintf(out, 7, "%02X%02X%02X", baseMac[3], baseMac[4], baseMac[5]);
 }
 
+static bool meshHomeKnown(uint32_t now) {
+    for (int i = 0; i < MESH_ROSTER_SIZE; i++) {
+        if (roster[i].live && roster[i].role == 1 && now - roster[i].lastSeen < MESH_ROSTER_TIMEOUT) return true;
+    }
+    return false;
+}
+
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
                         int rssi, uint8_t dtype, bool wifiDomain) {
     if (!meshStarted) return;
-    uint8_t pkt[MESH_PKT_MAX];
-    uint8_t n = meshBuildHeader(pkt, MESH_T_DETECT, MESH_TTL);
-    n += meshBuildBodyId(pkt + n);
-    pkt[n++] = (uint8_t)(int8_t)rssi;
-    pkt[n++] = dtype;
-    pkt[n++] = wifiDomain ? 0x01 : 0x00;
-    memset(pkt + n, 0, 18 + 18 + 40);
-    memcpy(pkt + n, mac, min(strlen(mac) + 1, (size_t)18));    n += 18;
-    memcpy(pkt + n, ident, min(strlen(ident) + 1, (size_t)18)); n += 18;
-    memcpy(pkt + n, desc, min(strlen(desc) + 1, (size_t)40));   n += 40;
-
-    if (!meshTxPush(pkt, n) && isSerialConnected()) {
-        Serial.println("[MESH] TX queue full, detection not flooded");
+    uint32_t now = millis();
+    // Claim a pending slot; when every slot is busy, evict the entry that
+    // has been trying longest — it has had the most chances already.
+    int slot = -1;
+    uint32_t oldestAge = 0;
+    for (int i = 0; i < MESH_DET_PENDING; i++) {
+        if (!pendDet[i].used) { slot = i; break; }
+        uint32_t age = now - pendDet[i].firstAt;
+        if (slot < 0 || age > oldestAge) { oldestAge = age; slot = i; }
     }
+    if (pendDet[slot].used) {
+        detEvicted++;
+        if (isSerialConnected()) Serial.println("[MESH] delivery table full, oldest detection given up");
+    }
+    MeshPendDet& d = pendDet[slot];
+    uint8_t* b = d.body;
+    memcpy(b, selfId, 3);
+    b[3] = (uint8_t)(int8_t)rssi;
+    b[4] = dtype;
+    b[5] = wifiDomain ? 0x01 : 0x00;
+    memset(b + 6, 0, 18 + 18 + 40);
+    memcpy(b + 6,  mac,   min(strlen(mac) + 1, (size_t)18));
+    memcpy(b + 24, ident, min(strlen(ident) + 1, (size_t)18));
+    memcpy(b + 42, desc,  min(strlen(desc) + 1, (size_t)40));
+    d.detId = ++detCounter;
+    if (d.detId == 0) d.detId = ++detCounter;
+    b[82] = (uint8_t)(d.detId & 0xFF);
+    b[83] = (uint8_t)(d.detId >> 8);
+    d.firstAt = now;
+    d.nextAt = now;
+    d.tries = 0;
+    d.used = true;
+}
+
+// Push due detections into the TX queue (fresh header each time), keeping
+// MESH_TXQ_RESERVE slots free for announces, acks and relays.
+static void meshPumpDetections(uint32_t now) {
+    bool homeKnown = meshHomeKnown(now);
+    for (int i = 0; i < MESH_DET_PENDING; i++) {
+        MeshPendDet& d = pendDet[i];
+        if (!d.used || (int32_t)(now - d.nextAt) < 0) continue;
+        bool waitAck = homeKnown && !meshCfg.home;
+        if ((!waitAck && d.tries >= MESH_DET_BLIND) || now - d.firstAt > MESH_DET_GIVEUP_MS) {
+            if (waitAck) {
+                detExpired++;
+                if (isSerialConnected()) Serial.printf("[MESH] detection %u not acked by home in %lus, given up\n",
+                                                       d.detId, MESH_DET_GIVEUP_MS / 1000);
+            }
+            d.used = false;
+            continue;
+        }
+        if (txCount >= MESH_TXQ_SIZE - MESH_TXQ_RESERVE) return;
+        uint8_t pkt[MESH_PKT_MAX];
+        uint8_t n = meshBuildHeader(pkt, MESH_T_DETECT, MESH_TTL);
+        memcpy(pkt + n, d.body, sizeof(d.body));
+        n += sizeof(d.body);
+        meshTxPush(pkt, n);
+        if (d.tries == 0) detSent++; else detRetries++;
+        uint8_t k = d.tries < (sizeof(kDetRetryMs) / sizeof(kDetRetryMs[0]))
+                        ? d.tries : (sizeof(kDetRetryMs) / sizeof(kDetRetryMs[0])) - 1;
+        d.tries++;
+        d.nextAt = now + kDetRetryMs[k] + (uint32_t)random(0, 50);
+    }
+}
+
+// Home side: alert once per (origin, detId); remember it for re-acks.
+// Returns true the first time a detection is seen.
+static bool detSeenFirst(const uint8_t* origin, uint16_t detId, uint32_t now) {
+    int freeSlot = -1, oldest = -1;
+    uint32_t oldestAge = 0;
+    for (int i = 0; i < MESH_DET_SEEN; i++) {
+        if (!detSeen[i].live) { if (freeSlot < 0) freeSlot = i; continue; }
+        uint32_t age = now - detSeen[i].ts;
+        if (age >= MESH_DET_SEEN_TTL_MS) { if (freeSlot < 0) freeSlot = i; continue; }
+        if (detSeen[i].detId == detId && memcmp(detSeen[i].origin, origin, 3) == 0) return false;
+        if (age >= oldestAge) { oldestAge = age; oldest = i; }
+    }
+    int slot = (freeSlot >= 0) ? freeSlot : oldest;
+    if (slot < 0) return true;
+    memcpy(detSeen[slot].origin, origin, 3);
+    detSeen[slot].detId = detId;
+    detSeen[slot].ts = now;
+    detSeen[slot].live = true;
+    return true;
+}
+
+static void meshSendDetAck(const uint8_t* origin, uint16_t detId) {
+    uint8_t pkt[MESH_DETACK_LEN];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_DETACK, MESH_TTL);
+    n += meshBuildBodyId(pkt + n);
+    memcpy(pkt + n, origin, 3); n += 3;
+    pkt[n++] = (uint8_t)(detId & 0xFF);
+    pkt[n++] = (uint8_t)(detId >> 8);
+    meshTxPush(pkt, n);   // full queue: the origin simply retries
 }
 
 static void meshSendAnnounce() {
@@ -793,6 +938,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
     if (type == MESH_T_COMMAND && len < MESH_CMD_MIN) { meshRxShort++; return; }
     if (type == MESH_T_ACK && len < MESH_ACK_LEN) { meshRxShort++; return; }
     if (type == MESH_T_BYE && len < MESH_BYE_LEN) { meshRxShort++; return; }
+    if (type == MESH_T_DETACK && len < MESH_DETACK_LEN) { meshRxShort++; return; }
     if (memcmp(data + 6, selfMac, 6) == 0) { meshRxSelf++; return; }  // our own packet relayed back
 
     if (meshSeen(data + 6, data[5], millis())) { meshRxDup++; return; }
@@ -895,6 +1041,7 @@ void mesh_deinit() {
     meshStarted = false;
     meshParked = false;
     outActive = false;
+    memset(pendDet, 0, sizeof(pendDet));
     stageReset();
     burstRemaining = 0;
     esp_now_unregister_recv_cb();
@@ -973,8 +1120,31 @@ void meshTick() {
             char full[64];
             snprintf(full, sizeof(full), "%.40s [mesh %02X%02X%02X]",
                      desc, nodeId[0], nodeId[1], nodeId[2]);
-            meshReport(mac, ident, full, rssi, dtype, wifiDom);
+            if (len >= MESH_DETECT_ID_LEN) {
+                // Reliable path: alert once per (origin, detId); a home
+                // acks every copy (an earlier ack may have been lost).
+                uint16_t detId = body[82] | (body[83] << 8);
+                if (detSeenFirst(nodeId, detId, now)) meshReport(mac, ident, full, rssi, dtype, wifiDom);
+                if (meshCfg.home) meshSendDetAck(nodeId, detId);
+            } else {
+                meshReport(mac, ident, full, rssi, dtype, wifiDom);   // legacy sender
+            }
             meshRelay(pkt, len);
+            break;
+        }
+        case MESH_T_DETACK: {
+            const uint8_t* body = pkt + MESH_HDR_LEN;
+            if (memcmp(body + 3, selfId, 3) == 0) {
+                uint16_t detId = body[6] | (body[7] << 8);
+                for (int i = 0; i < MESH_DET_PENDING; i++) {
+                    if (pendDet[i].used && pendDet[i].detId == detId) {
+                        pendDet[i].used = false;
+                        detAcked++;
+                    }
+                }
+            } else {
+                meshRelay(pkt, len);   // carry it back toward its origin
+            }
             break;
         }
         case MESH_T_COMMAND:
