@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""OUI-SPY Home Dashboard: live mesh telemetry, map, history for the HOME node.
+
+    pip install -r requirements.txt
+    python app.py                     # serial auto-detect (+ MQTT if configured)
+    python app.py --demo              # simulated fleet, no hardware
+    python app.py --mqtt 192.168.1.10 --topic ouispy/detection
+    python app.py --replay capture.log
+
+Local only: binds 127.0.0.1 by default, data lives in SQLite next to this file.
+"""
+import argparse
+import hmac
+import ipaddress
+import os
+import secrets
+import socket
+import threading
+import time
+
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request
+from flask_socketio import SocketIO
+
+import filters as flt
+from commands import Commander, PlanError
+from fleet import Fleet
+from sources import (DemoSource, MqttSource, ReplaySource, SerialSource,
+                     list_serial_ports)
+from store import Store
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+DEFAULT_SETTINGS = {
+    "sound": True,
+    "flash": True,
+    "tiles": "osm-dark",            # osm-dark | osm | custom-dark | custom | none
+    "tiles_custom": "",
+    "notify": False,                # browser notifications on detections / node drops
+    "retention_days": 0,            # 0 = keep history forever
+    "links": True,                  # draw home-to-remote link lines on the map
+    "status_poll": 120,             # s between automatic settings reads (0 = off)
+    "map_view": None,               # [lat, lon, zoom]
+    "serial_port": "auto",          # auto | off | /dev/cu.usbmodemXXXX
+    "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
+             "topic": "+/detection"},
+}
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="OUI-SPY home node dashboard")
+    ap.add_argument("--host", default=os.environ.get("OUISPY_HOST", "0.0.0.0"),
+                    help="bind address (default all interfaces: LAN + Tailscale; 127.0.0.1 = this Mac only)")
+    ap.add_argument("--open", action="store_true",
+                    help="no access token from anywhere (not recommended: the dashboard can reboot the fleet)")
+    ap.add_argument("--require-token", action="store_true",
+                    help="require the token from every device except this Mac, LAN and Tailscale included")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("OUISPY_PORT", 5077)))
+    ap.add_argument("--serial", help="serial port, 'auto' (USB VID 0x303A) or 'off'")
+    ap.add_argument("--mqtt", help="MQTT broker host[:port] (enables MQTT)")
+    ap.add_argument("--mqtt-user")
+    ap.add_argument("--mqtt-pass")
+    ap.add_argument("--topic", help="MQTT detection topic filter (default +/detection)")
+    ap.add_argument("--demo", action="store_true", help="simulated fleet, separate database")
+    ap.add_argument("--replay", help="replay a recorded serial log")
+    ap.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
+    ap.add_argument("--record", help="append raw serial lines (with timestamps) to this file")
+    ap.add_argument("--db", help="SQLite path (default ouispy.db / ouispy-demo.db)")
+    return ap.parse_args()
+
+
+args = parse_args()
+offline_mode = bool(args.demo or args.replay)
+db_path = args.db or os.path.join(HERE, "ouispy-demo.db" if offline_mode else "ouispy.db")
+
+app = Flask(__name__)
+
+# ----------------------------------------------------------------------
+# Access control. The dashboard can reboot, re-channel and re-filter the
+# fleet, so anything that isn't this Mac needs a token: open the printed
+# link (?token=...) once and the browser keeps it in a cookie.
+# ----------------------------------------------------------------------
+TOKEN_FILE = os.path.join(HERE, "access_token")
+
+
+def _load_token():
+    try:
+        with open(TOKEN_FILE) as f:
+            t = f.read().strip()
+            if t:
+                return t
+    except OSError:
+        pass
+    t = secrets.token_urlsafe(18)
+    with open(TOKEN_FILE, "w") as f:
+        f.write(t + "\n")
+    os.chmod(TOKEN_FILE, 0o600)
+    return t
+
+
+ACCESS_TOKEN = _load_token()
+COOKIE = "ouispy_token"
+
+
+def _is_local():
+    return request.remote_addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+# Tailscale (CGNAT 100.64/10 and its IPv6 range) is already authenticated
+# to your own devices; private LAN ranges are your network. Both open the
+# dashboard without the token unless --require-token.
+TRUSTED_NETS = [ipaddress.ip_network(n) for n in
+                ("100.64.0.0/10", "fd7a:115c:a1e0::/48", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+
+
+def _is_trusted_net():
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return any(ip in n for n in TRUSTED_NETS)
+
+
+def _authorized():
+    if args.open or _is_local():
+        return True
+    if not args.require_token and _is_trusted_net():
+        return True
+    got = request.cookies.get(COOKIE) or request.args.get("token") or ""
+    return hmac.compare_digest(got, ACCESS_TOKEN)
+
+
+@app.before_request
+def _gate():
+    if request.path.startswith("/socket.io"):
+        return None   # checked in the connect handler
+    if not _authorized():
+        return Response("OUI-SPY dashboard: open the link with ?token=... printed on the Mac "
+                        "(or in home-dashboard/access_token).", 401, mimetype="text/plain")
+    if request.args.get("token") and request.path == "/":
+        # Trade the URL token for a long-lived cookie and drop it from the URL.
+        resp = redirect("/")
+        resp.set_cookie(COOKIE, ACCESS_TOKEN, max_age=365 * 86400, httponly=True, samesite="Strict")
+        return resp
+    return None
+socketio = SocketIO(app, async_mode="threading")  # same-origin only
+store = Store(db_path)
+
+
+def emit(event, payload):
+    socketio.emit(event, payload)
+
+
+fleet = Fleet(store, emit)
+sources = {}
+src_lock = threading.Lock()
+
+
+def command_sender():
+    """The feed that can carry console commands: live serial, or the demo."""
+    with src_lock:
+        ser = sources.get("serial")
+        if ser and ser.status().get("connected"):
+            return ser
+        return sources.get("demo")
+
+
+def _settings_for_commander():
+    return settings()
+
+
+commander = Commander(fleet, store, emit, command_sender, _settings_for_commander)
+fleet.on_line = commander.feed_line
+fleet.on_join = commander.node_joined
+
+
+def settings():
+    s = dict(DEFAULT_SETTINGS)
+    s.update(store.all_settings())
+    s["mqtt"] = {**DEFAULT_SETTINGS["mqtt"], **(s.get("mqtt") or {})}
+    return s
+
+
+def public_settings():
+    s = settings()
+    s["mqtt"] = {**s["mqtt"], "password": "********" if s["mqtt"].get("password") else ""}
+    return s
+
+
+def sources_status():
+    with src_lock:
+        return {k: v.status() for k, v in sources.items()}
+
+
+def on_source_status():
+    emit("sources", sources_status())
+
+
+def start_sources():
+    """(Re)start every feed from CLI flags + saved settings."""
+    with src_lock:
+        for s in sources.values():
+            s.stop()
+        sources.clear()
+    s = settings()
+    new = {}
+    if args.demo:
+        new["demo"] = DemoSource(fleet, on_source_status)
+        _seed_demo_positions()
+    elif args.replay:
+        new["replay"] = ReplaySource(fleet, on_source_status, args.replay, args.speed)
+    else:
+        port = args.serial or s["serial_port"]
+        if port != "off":
+            new["serial"] = SerialSource(fleet, on_source_status, port, record=args.record,
+                                         get_pref=lambda: store.get_setting("home_usb_serial"),
+                                         set_pref=lambda sn: store.set_setting("home_usb_serial", sn))
+        m = s["mqtt"]
+        if args.mqtt:
+            host, _, p = args.mqtt.partition(":")
+            m = {**m, "enabled": True, "host": host, "port": int(p or m["port"] or 1883)}
+            if args.mqtt_user:
+                m["user"] = args.mqtt_user
+            if args.mqtt_pass:
+                m["password"] = args.mqtt_pass
+            if args.topic:
+                m["topic"] = args.topic
+        if m.get("enabled") and m.get("host"):
+            new["mqtt"] = MqttSource(fleet, on_source_status, m["host"], m["port"],
+                                     m.get("user", ""), m.get("password", ""), m.get("topic"))
+    with src_lock:
+        sources.update(new)
+    for src in new.values():
+        src.start()
+    on_source_status()
+
+
+def _seed_demo_positions():
+    """Give the fake fleet a layout the first time demo mode runs."""
+    from sources import DEMO_HOME, DEMO_REMOTES
+    meta = store.nodes_meta()
+    base = (45.5231, -122.6765)
+    offsets = {DEMO_HOME: (0, 0), DEMO_REMOTES[0]: (0.0042, -0.0061),
+               DEMO_REMOTES[1]: (-0.0035, -0.0072), DEMO_REMOTES[2]: (0.0068, 0.0081),
+               DEMO_REMOTES[3]: (-0.0049, 0.0057)}
+    names = {DEMO_HOME: "Base", DEMO_REMOTES[0]: "North Gate",
+             DEMO_REMOTES[1]: "Overpass", DEMO_REMOTES[2]: "Ridge Relay",
+             DEMO_REMOTES[3]: "Lot B"}
+    for nid, (dlat, dlon) in offsets.items():
+        m = meta.get(nid) or {}
+        if m.get("lat") is None:
+            store.update_node(nid, lat=base[0] + dlat, lon=base[1] + dlon)
+        if not m.get("alias"):
+            store.update_node(nid, alias=names[nid])
+    _backfill_demo_history()
+
+
+def _backfill_demo_history():
+    """24 h of fake sightings + detections so charts and history have shape."""
+    import random
+    from sources import DEMO_HOME, DEMO_REMOTES, DEMO_TARGETS
+    if store.query_detections(limit=1)[0]:
+        return
+    now = time.time()
+    base_rssi = {"DE0B02": -58, "DE0C03": -71, "DE0D04": -84, "DE0E05": -66}
+    for nid in DEMO_REMOTES:
+        r, pkts = base_rssi[nid], 0
+        for i in range(144):
+            ts = now - 86400 + i * 600
+            r = max(-95, min(-45, r + random.randint(-3, 3) + (base_rssi[nid] - r) // 4))
+            pkts += random.randint(2500, 3500)
+            store.add_sighting(nid, "sample", r, pkts, ts)
+        if nid == "DE0D04":
+            for h in (20, 13, 5):
+                store.add_sighting(nid, "offline", None, None, now - h * 3600)
+                store.add_sighting(nid, "online", None, None, now - h * 3600 + 900)
+    nodes = [DEMO_HOME] + DEMO_REMOTES
+    for i in range(70):
+        oui, ftype, label, dom = random.choice(DEMO_TARGETS)
+        mac = oui + ":" + ":".join(f"{random.randint(0, 255):02X}" for _ in range(3))
+        store.add_detection({"ts": now - random.uniform(600, 86400), "node": random.choice(nodes),
+                             "mac": mac, "alias": "", "rssi": random.randint(-92, -48),
+                             "type": ftype, "match": oui.replace(":", ""), "descr": label,
+                             "dom": dom, "source": "demo", "is_new": random.random() < 0.3})
+
+
+def ticker():
+    last_prune = 0
+    while True:
+        time.sleep(1)
+        fleet.tick()
+        if time.time() - last_prune > 3600:
+            last_prune = time.time()
+            removed = store.prune(int(settings().get("retention_days") or 0))
+            if removed:
+                print(f"retention: pruned {removed} old rows")
+
+
+# ----------------------------------------------------------------------
+# HTTP
+# ----------------------------------------------------------------------
+@app.after_request
+def no_cache(resp):
+    if request.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/")
+def index():
+    return render_template("index.html", demo=args.demo, replay=bool(args.replay))
+
+
+def _filters():
+    a = request.args
+    return {"q": a.get("q") or None, "node": a.get("node") or None,
+            "dom": a.get("dom") or None, "mac": a.get("mac") or None,
+            "since": a.get("since") or None, "until": a.get("until") or None}
+
+
+@app.route("/api/state")
+def api_state():
+    total, recent = store.query_detections(limit=150)
+    return jsonify({"fleet": fleet.snapshot(), "sources": sources_status(),
+                    "settings": public_settings(), "stats": store.detection_stats(),
+                    "hourly": store.hourly(), "mac_aliases": store.mac_aliases(),
+                    "jobs": _jobs(None), "can_command": command_sender() is not None,
+                    "filter_meta": _filter_meta(),
+                    "recent": recent, "console": fleet.console_tail(),
+                    "mode": "demo" if args.demo else ("replay" if args.replay else "live")})
+
+
+@app.route("/api/detections")
+def api_detections():
+    limit = min(int(request.args.get("limit", 200)), 2000)
+    offset = int(request.args.get("offset", 0))
+    total, rows = store.query_detections(limit=limit, offset=offset, **_filters())
+    return jsonify({"total": total, "rows": rows})
+
+
+@app.route("/api/export/detections.<fmt>")
+def api_export_det(fmt):
+    if fmt not in ("csv", "json"):
+        abort(404)
+    body = store.export_detections(fmt, **_filters())
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return Response(body, mimetype="text/csv" if fmt == "csv" else "application/json",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=ouispy-detections-{stamp}.{fmt}"})
+
+
+@app.route("/api/export/sightings.<fmt>")
+def api_export_sig(fmt):
+    if fmt not in ("csv", "json"):
+        abort(404)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return Response(store.export_sightings(fmt),
+                    mimetype="text/csv" if fmt == "csv" else "application/json",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=ouispy-sightings-{stamp}.{fmt}"})
+
+
+@app.route("/api/detections/clear", methods=["POST"])
+def api_clear():
+    store.clear_detections()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stats")
+def api_stats():
+    return jsonify({**store.detection_stats(), "hourly": store.hourly()})
+
+
+@app.route("/api/devices")
+def api_devices():
+    f = _filters()
+    total, rows = store.devices(q=f["q"], node=f["node"], dom=f["dom"],
+                                limit=min(int(request.args.get("limit", 300)), 2000))
+    return jsonify({"total": total, "rows": rows})
+
+
+@app.route("/api/devices/<mac>", methods=["POST"])
+def api_device_alias(mac):
+    data = request.get_json(silent=True) or {}
+    mac = mac.upper()
+    store.set_mac_alias(mac, str(data.get("alias") or "")[:40].strip(),
+                        str(data.get("notes") or "")[:500] or None)
+    aliases = store.mac_aliases()
+    emit("mac_aliases", aliases)
+    return jsonify({"ok": True, "mac_aliases": aliases})
+
+
+@app.route("/api/nodes/<nid>", methods=["GET"])
+def api_node(nid):
+    nid = nid.upper()
+    snap = fleet.snapshot()
+    node = next((n for n in snap["nodes"] if n["id"] == nid), None)
+    if node is None:
+        abort(404)
+    hours = float(request.args.get("hours", 24))
+    _, dets = store.query_detections(limit=60, node=nid)
+    stats = store.detection_stats()["per_node"].get(nid, {"count": 0, "last": None})
+    return jsonify({"node": node, "sightings": store.node_sightings(nid, time.time() - hours * 3600),
+                    "detections": dets, "stats": stats})
+
+
+@app.route("/api/nodes/<nid>", methods=["POST"])
+def api_node_update(nid):
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    if "alias" in data:
+        fields["alias"] = str(data["alias"] or "")[:40].strip()
+    if "notes" in data:
+        fields["notes"] = str(data["notes"] or "")[:500]
+    for k in ("lat", "lon"):
+        if k in data:
+            v = data[k]
+            fields[k] = None if v is None else float(v)
+    store.update_node(nid.upper(), **fields)
+    emit("fleet", fleet.snapshot())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/nodes/<nid>", methods=["DELETE"])
+def api_node_forget(nid):
+    nid = nid.upper()
+    with fleet.lock:
+        st = fleet.nodes.get(nid)
+        if st and st["online"]:
+            return jsonify({"ok": False, "error": "node is online"}), 409
+        fleet.nodes.pop(nid, None)
+    store.forget_node(nid)
+    emit("fleet", fleet.snapshot())
+    return jsonify({"ok": True})
+
+
+def _jobs(node, include_auto=False):
+    live = {j["id"]: j for j in commander.recent(node, limit=100)}
+    merged = dict(live)
+    for j in store.recent_commands(node, limit=60, include_auto=include_auto):
+        merged.setdefault(j["id"], j)
+    rows = sorted(merged.values(), key=lambda j: j["created"], reverse=True)
+    if not include_auto:
+        rows = [j for j in rows if not j.get("auto")]
+    return rows[:60]
+
+
+def _filter_meta():
+    return {"types": flt.LABELS, "hex": flt.HEX_LEN,
+            "presets": {k: [{"t": t, "id": i, "d": d} for t, i, d in v] for k, v in flt.PRESETS.items()}}
+
+
+def _submit(op, target, args):
+    try:
+        return jsonify({"ok": True, "job": commander.submit(op, target, args)})
+    except PlanError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": f"bad arguments: {e}"}), 400
+
+
+@app.route("/api/nodes/<nid>/cmd", methods=["POST"])
+def api_node_cmd(nid):
+    data = request.get_json(silent=True) or {}
+    return _submit(str(data.get("op", "")), nid.upper(), data.get("args") or {})
+
+
+@app.route("/api/fleet/cmd", methods=["POST"])
+def api_fleet_cmd():
+    data = request.get_json(silent=True) or {}
+    return _submit(str(data.get("op", "")), "all", data.get("args") or {})
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    return jsonify(_jobs(request.args.get("node") or None,
+                         include_auto=request.args.get("auto") == "1"))
+
+
+@app.route("/api/filters/validate", methods=["POST"])
+def api_filters_validate():
+    lst = (request.get_json(silent=True) or {}).get("filters") or []
+    try:
+        buf = flt.encode(lst)
+        return jsonify({"ok": True, "crc": flt.crc(lst), "count": len(flt.decode(buf)), "bytes": len(buf)})
+    except flt.FilterError as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_settings():
+    return jsonify(public_settings())
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_set():
+    data = request.get_json(silent=True) or {}
+    restart = False
+    if "status_poll" in data:
+        data["status_poll"] = max(0, int(data["status_poll"] or 0))
+    if "retention_days" in data:
+        data["retention_days"] = max(0, int(data["retention_days"] or 0))
+    for k in ("sound", "flash", "tiles", "tiles_custom", "map_view", "notify",
+              "retention_days", "links", "status_poll"):
+        if k in data:
+            store.set_setting(k, data[k])
+    if "serial_port" in data:
+        store.set_setting("serial_port", str(data["serial_port"]) or "auto")
+        restart = True
+    if "mqtt" in data and isinstance(data["mqtt"], dict):
+        cur = settings()["mqtt"]
+        new = {**cur, **{k: v for k, v in data["mqtt"].items()
+                         if k in ("enabled", "host", "port", "user", "password", "topic")}}
+        if new.get("password") == "********":
+            new["password"] = cur.get("password", "")
+        new["port"] = int(new.get("port") or 1883)
+        store.set_setting("mqtt", new)
+        restart = True
+    if restart and not offline_mode:
+        start_sources()
+    return jsonify(public_settings())
+
+
+@app.route("/api/ports")
+def api_ports():
+    return jsonify(list_serial_ports())
+
+
+@app.route("/api/console", methods=["POST"])
+def api_console():
+    line = str((request.get_json(silent=True) or {}).get("line", "")).strip()
+    if not line:
+        return jsonify({"ok": False, "error": "empty"}), 400
+    with src_lock:
+        ser = sources.get("serial")
+    if not ser or not ser.send(line):
+        return jsonify({"ok": False, "error": "serial not connected"}), 409
+    fleet.feed_line(f"> {line}", "you")
+    return jsonify({"ok": True})
+
+
+@socketio.on("connect")
+def on_connect():
+    if not _authorized():
+        return False   # refuse the websocket
+    socketio.emit("sources", sources_status(), to=request.sid)
+
+
+def _addresses():
+    """LAN and Tailscale (100.x) addresses to print as ready-made links."""
+    out = []
+    try:
+        import subprocess
+        txt = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3).stdout
+        for line in txt.splitlines():
+            line = line.strip()
+            if line.startswith("inet ") and not line.startswith("inet 127."):
+                out.append(line.split()[1])
+    except Exception:
+        try:
+            out.append(socket.gethostbyname(socket.gethostname()))
+        except OSError:
+            pass
+    return out
+
+
+if __name__ == "__main__":
+    start_sources()
+    commander.start()
+    import atexit
+    import signal
+
+    def _close_feeds(*_):
+        # Close the serial port cleanly (one atomic line-state change) rather
+        # than leaving it to process teardown, then exit.
+        with src_lock:
+            for src in sources.values():
+                src.stop()
+                ser = getattr(src, "ser", None)
+                if ser:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+    atexit.register(_close_feeds)
+    signal.signal(signal.SIGTERM, lambda *a: (_close_feeds(), os._exit(0)))
+    threading.Thread(target=ticker, daemon=True).start()
+    mode = "DEMO" if args.demo else ("REPLAY" if args.replay else "LIVE")
+    print(f"OUI-SPY home dashboard [{mode}]  (db: {db_path})")
+    print(f"  this Mac:  http://127.0.0.1:{args.port}")
+    if args.host not in ("127.0.0.1", "localhost"):
+        q = f"/?token={ACCESS_TOKEN}" if args.require_token else ""
+        for ip in _addresses():
+            tag = "tailscale" if ip.startswith("100.") else "network"
+            print(f"  {tag:9s}  http://{ip}:{args.port}{q}")
+        if not args.require_token and not args.open:
+            print(f"  (LAN + Tailscale open; anything else needs ?token={ACCESS_TOKEN})")
+    socketio.run(app, host=args.host, port=args.port, allow_unsafe_werkzeug=True)
