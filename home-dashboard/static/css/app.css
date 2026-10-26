@@ -260,7 +260,18 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .rssi-v { color: var(--text); }
 
 /* ---------- tabs ---------- */
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -2px 0 12px; }
+.tabs {
+    display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: -2px 0 12px;
+    /* phones: the tab row scrolls sideways inside itself instead of spilling off-screen */
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: none; white-space: nowrap; }
+@media (max-width: 760px) {
+    /* phones: every tab visible, wrapped onto a second row if needed */
+    .tabs { gap: 0; flex-wrap: wrap; overflow: visible; }
+    .tab { padding: 8px 10px; letter-spacing: 1.2px; font-size: 10.5px; }
+}
 .tab {
     background: none; border: none; color: var(--muted); font-size: 11px; letter-spacing: 2px; font-weight: 700;
     text-transform: uppercase; padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
