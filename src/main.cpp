@@ -19,6 +19,7 @@
 #include "mqtt.h"
 #include "mesh.h"
 #include <rom/crc.h>
+#include <mbedtls/sha256.h>
 
 // ================================
 // 802.11 Header Definition
@@ -1429,8 +1430,26 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
 //   RFL {json}  a node's installed filter list (a FILTERS_REPORT, or "filters")
 //   CMD {json}  a console command was accepted and flooded; id = cmdId
 #define STATUS_FMT 1
-#define STATUS_LEN 52
+#define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
+#define STATUS_LEN 56        // + u8 keyFingerprint[4]
 static const char FW_BUILD[] = __DATE__ " " __TIME__;
+
+// Key fingerprint: SHA-256("OUISPY-KEY-FP" | fleet key)[0:4], all zeros
+// with no key. One-way and only 32 bits, so it can't recover the key, but
+// it tells the dashboard whether every node holds the SAME key.
+static void keyFingerprint(uint8_t out[4]) {
+    memset(out, 0, 4);
+    if (!meshKeySet()) return;
+    uint8_t h[32];
+    mbedtls_sha256_context sh;
+    mbedtls_sha256_init(&sh);
+    mbedtls_sha256_starts(&sh, 0);
+    mbedtls_sha256_update(&sh, (const unsigned char*)"OUISPY-KEY-FP", 13);
+    mbedtls_sha256_update(&sh, (const unsigned char*)meshCfg.key, strlen(meshCfg.key));
+    mbedtls_sha256_finish(&sh, h);
+    mbedtls_sha256_free(&sh);
+    memcpy(out, h, 4);
+}
 
 static void put16(uint8_t* d, uint8_t& n, uint16_t v) { memcpy(d + n, &v, 2); n += 2; }
 static void put32(uint8_t* d, uint8_t& n, uint32_t v) { memcpy(d + n, &v, 4); n += 4; }
@@ -1497,12 +1516,14 @@ static uint8_t buildStatus(uint8_t* d) {
     memset(d + n, 0, 16);
     strncpy((char*)d + n, FW_BUILD, 15);
     n += 16;
+    keyFingerprint(d + n);   // 0000 when no key: lets the dashboard check keys match
+    n += 4;
     return n;   // STATUS_LEN
 }
 
 static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
     if (!isSerialConnected()) return;
-    if (len < STATUS_LEN || d[0] != STATUS_FMT) {
+    if (len < STATUS_LEN_BASE || d[0] != STATUS_FMT) {
         Serial.printf("RST {\"node\":\"%s\",\"fmt\":%u}\n", id, len ? d[0] : 0);
         return;
     }
@@ -1511,16 +1532,20 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
     memcpy(fw, d + 36, 16);
     fw[16] = '\0';
     for (int i = 0; fw[i]; i++) if (fw[i] == '"' || fw[i] == '\\' || fw[i] < 0x20) fw[i] = ' ';
+    char kfp[24] = "";   // key fingerprint, from nodes that send it
+    if (len >= STATUS_LEN) {
+        snprintf(kfp, sizeof(kfp), ",\"kfp\":\"%02X%02X%02X%02X\"", d[52], d[53], d[54], d[55]);
+    }
     Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
                   "\"buzzer\":%d,\"led\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
                   "\"peers\":%u,\"lrssi\":%d,\"filters\":%u,\"fcrc\":\"%08lX\",\"up\":%lu,"
-                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"}\n",
+                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s}\n",
                   id, d[1] ? "home" : "remote", d[2] ? "scan" : "config", d[3],
                   (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
                   (f & 16) ? 1 : 0, (f & 32) ? 1 : 0, d[5], (int)(int8_t)d[6],
                   get16(d + 8), (unsigned long)get32(d + 10), (unsigned long)get32(d + 14),
                   (unsigned long)get32(d + 18), get16(d + 22), (unsigned long)get32(d + 24),
-                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw);
+                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw, kfp);
 }
 
 static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len) {
