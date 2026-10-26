@@ -1,4 +1,4 @@
-// OUI-SPY Home Dashboard client. Server pushes everything over Socket.IO:
+// OUI-SPY Mesh client. Server pushes everything over Socket.IO:
 //   fleet (roster + home stats), det (one detection), console (raw line),
 //   node_event (online/offline), sources (feed status), mac_aliases.
 (() => {
@@ -198,6 +198,12 @@ function renderHome() {
     if (h.dsent != null) {
         cells.push(["Dets sent", h.dsent], ["Acked", h.dack, h.dack ? "good" : ""],
                    ["Lost", h.dlost, h.dlost ? "bad" : ""], ["Retries", `${h.dretry}${h.dpend ? ` / ${h.dpend} pend` : ""}`]);
+    }
+    if (h.enc != null) {
+        cells.push(["Encryption", h.enc ? "AES-256 ON" : "OFF", h.enc ? "good" : "bad", true]);
+        if (h.enc && (h.eauth || h.ereplay || h.eplain)) {
+            cells.push(["Rejected", `${h.eauth || 0} auth / ${h.ereplay || 0} replay / ${h.eplain || 0} plain`, "warn", true]);
+        }
     }
     if (h.legacy) cells.push(["Firmware", "legacy (no TLM)", "warn", true]);
     if (h.strays && h.strays.length) {

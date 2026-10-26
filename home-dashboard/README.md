@@ -1,4 +1,4 @@
-# OUI-SPY Home Dashboard
+# OUI-SPY Mesh
 
 A local web dashboard for the OUI-SPY Detector **home node**. It shows the whole
 mesh fleet live, puts the nodes on a map, and keeps a searchable history of every
@@ -9,19 +9,19 @@ detection. It runs entirely on your machine: no cloud, no accounts, no telemetry
 ```bash
 cd home-dashboard
 pip install -r requirements.txt
-python app.py
+python ouispymesh.py
 ```
 
 Open http://127.0.0.1:5077.
 
 | Command | What it does |
 |---|---|
-| `python app.py` | Live mode: auto-detects the home node on USB (Espressif VID `0x303A`), plus MQTT if you set it up in Settings |
-| `python app.py --demo` | Simulated 5-node fleet with 24 h of backfilled history. Needs no hardware and uses its own database |
-| `python app.py --serial /dev/cu.usbmodem1101` | Use a specific serial port (`--serial off` turns serial off) |
-| `python app.py --mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
-| `python app.py --record capture.log` | Also append every raw serial line (with a timestamp) to a file |
-| `python app.py --replay capture.log --speed 4` | Replay a recorded capture through the dashboard |
+| `python ouispymesh.py` | Live mode: auto-detects the home node on USB (Espressif VID `0x303A`), plus MQTT if you set it up in Settings |
+| `python ouispymesh.py --demo` | Simulated 5-node fleet with 24 h of backfilled history. Needs no hardware and uses its own database |
+| `python ouispymesh.py --serial /dev/cu.usbmodem1101` | Use a specific serial port (`--serial off` turns serial off) |
+| `python ouispymesh.py --mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
+| `python ouispymesh.py --record capture.log` | Also append every raw serial line (with a timestamp) to a file |
+| `python ouispymesh.py --replay capture.log --speed 4` | Replay a recorded capture through the dashboard |
 | `--host 0.0.0.0 --port 5077` | Bind address and port (the default is localhost only) |
 
 ## Data path

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""OUI-SPY Home Dashboard: live mesh telemetry, map, history for the HOME node.
+"""OUI-SPY Mesh: live mesh telemetry, map, history and remote control for the detector fleet (via its HOME node).
 
     pip install -r requirements.txt
-    python app.py                     # serial auto-detect (+ MQTT if configured)
-    python app.py --demo              # simulated fleet, no hardware
-    python app.py --mqtt 192.168.1.10 --topic ouispy/detection
-    python app.py --replay capture.log
+    python ouispymesh.py                     # serial auto-detect (+ MQTT if configured)
+    python ouispymesh.py --demo              # simulated fleet, no hardware
+    python ouispymesh.py --mqtt 192.168.1.10 --topic ouispy/detection
+    python ouispymesh.py --replay capture.log
 
 Local only: binds 127.0.0.1 by default, data lives in SQLite next to this file.
 """
@@ -136,7 +136,7 @@ def _gate():
     if request.path.startswith("/socket.io"):
         return None   # checked in the connect handler
     if not _authorized():
-        return Response("OUI-SPY dashboard: open the link with ?token=... printed on the Mac "
+        return Response("OUI-SPY Mesh: open the link with ?token=... printed on the Mac "
                         "(or in home-dashboard/access_token).", 401, mimetype="text/plain")
     if request.args.get("token") and request.path == "/":
         # Trade the URL token for a long-lived cookie and drop it from the URL.
@@ -587,7 +587,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda *a: (_close_feeds(), os._exit(0)))
     threading.Thread(target=ticker, daemon=True).start()
     mode = "DEMO" if args.demo else ("REPLAY" if args.replay else "LIVE")
-    print(f"OUI-SPY home dashboard [{mode}]  (db: {db_path})")
+    print(f"OUI-SPY Mesh [{mode}]  (db: {db_path})")
     print(f"  this Mac:  http://127.0.0.1:{args.port}")
     if args.host not in ("127.0.0.1", "localhost"):
         q = f"/?token={ACCESS_TOKEN}" if args.require_token else ""

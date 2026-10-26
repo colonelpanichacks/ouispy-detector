@@ -39,7 +39,9 @@ HOME_STAT_KEYS = ("rx", "q", "dup", "self", "bad", "tx", "txf", "txcb", "pend",
                   # radio duty, rolling 10 s: % parked on the mesh channel, % of it shared with BLE
                   "park", "pble",
                   # ESP-NOW TX rate in force (lr250k / lr500k / 1m / lr-failed) and stray sightings
-                  "rate", "strays")
+                  "rate", "strays",
+                  # fleet-key encryption on/off + frames rejected: plaintext, failed auth, replay
+                  "enc", "eplain", "eauth", "ereplay")
 
 
 class Fleet:
@@ -56,7 +58,7 @@ class Fleet:
         self.last_sample = {}
         self.legacy = False              # True once we parse pre-TLM firmware
         self.console = []                # ring of recent raw lines
-        self.on_line = None              # Commander.feed_line, set by app.py
+        self.on_line = None              # Commander.feed_line, set by ouispymesh.py
         self.on_join = None              # Commander.node_joined
         meta = store.nodes_meta()
         for nid, m in meta.items():

@@ -1,4 +1,4 @@
-/* OUI-SPY Home Dashboard. Design tokens lifted from the device portal
+/* OUI-SPY Mesh. Design tokens lifted from the device portal
    (CONFIG_HTML <style> in src/main.cpp) so both read as one product. */
 :root {
     --bg: #06080b;
