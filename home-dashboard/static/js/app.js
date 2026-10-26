@@ -1018,7 +1018,31 @@ $("dAudio").onclick = async () => {
     S.audioDirty = null;
 };
 $("dIdent").onclick = () => command(S.selected, "identify", { secs: 15 });
-$("dPresetGo").onclick = () => twoTap($("dPresetGo"), () => command(S.selected, "preset", { name: $("dPreset").value }));
+// Install: firmware presets go straight to the node (it reboots); a
+// database vendor opens the editor on the node's list with it staged.
+$("dPresetGo").onclick = () => {
+    const v = $("dPreset").value;
+    if (v.startsWith("p:")) {
+        twoTap($("dPresetGo"), () => command(S.selected, "preset", { name: v.slice(2) }));
+        return;
+    }
+    const n = nodeById(S.selected);
+    const stage = () => {
+        const g = allGroups().find((x) => x.key === v);
+        if (!g || !S.editing) return;
+        const key = (r) => r.t + ":" + String(r.id).replace(/[:\-\s]/g, "").toUpperCase();
+        const have = new Set(S.editing.map(key));
+        const add = groupRows(g).filter((r) => !have.has(key(r)));
+        S.editing = S.editing.filter((f) => f.id).concat(add);
+        rerenderEditor();
+        $("dFilters").scrollIntoView({ block: "start", behavior: "smooth" });
+        toast("good", `Staged: +${add.length} filter${add.length === 1 ? "" : "s"}`, `${g.label} (press Push to apply)`);
+    };
+    if (S.editing && S.editFor === S.selected) { readEditor(); stage(); return; }
+    if (n && n.filters) { $("dFiltEdit").click(); stage(); return; }
+    S.stageAfterRead = v;          // read the node's list first, then stage
+    $("dFiltEdit").click();
+};
 $("dReboot").onclick = () => twoTap($("dReboot"), () => command(S.selected, "reboot"));
 $("dFiltRead").onclick = () => command(S.selected, "filters_get");
 $("dFiltEdit").onclick = () => {
@@ -1273,7 +1297,15 @@ function applyFleet(f) {
         if (en && en.filters) {
             const id = S.editAfterRead;
             S.editAfterRead = null;
-            if (S.selected === id && $("drawer").classList.contains("open")) $("dFiltEdit").click();
+            if (S.selected === id && $("drawer").classList.contains("open")) {
+                $("dFiltEdit").click();
+                if (S.stageAfterRead) {
+                    const v = S.stageAfterRead;
+                    S.stageAfterRead = null;
+                    $("dPreset").value = v;
+                    $("dPresetGo").click();
+                }
+            }
         }
     }
     const h = homeNode();
@@ -1295,7 +1327,7 @@ async function boot() {
     S.filterMeta = st.filter_meta;
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
-    presetOptions($("dPreset"));
+    vendorOptions($("dPreset"));
     presetOptions($("fPreset"));
     const badge = $("modeBadge");
     badge.textContent = st.mode.toUpperCase();
