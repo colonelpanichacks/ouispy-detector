@@ -636,7 +636,11 @@ def _addresses():
             pass
     seen = []
     for ip in out:
-        if ip and not ip.startswith("127.") and ip not in seen:
+        try:
+            a = ipaddress.ip_address(ip)   # drops anything that isn't an address (CLI error text)
+        except ValueError:
+            continue
+        if not a.is_loopback and ip not in seen:
             seen.append(ip)
     return seen
 
