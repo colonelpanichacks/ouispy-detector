@@ -3317,6 +3317,14 @@ R"html(
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Meta/Ray-Ban Smartglasses</div>
                     </details>
+                    <details>
+                    <summary><b>FLIPPER ZERO</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="80:E1:26" onclick="toggleOuiChip(this)">80:E1:26</code> <code data-oui="80:E1:27" onclick="toggleOuiChip(this)">80:E1:27</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="FLIPPER ZERO" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Pentest / Hacking Tool</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Flipper Zero (BLE address prefixes, community-reported; its BLE name also contains "Flipper")</div>
+                    </details>
                     <!-- OUI_DB_END -->
                     <!-- WIFI_OUI_DB_START -->
                     <details>
@@ -3342,6 +3350,22 @@ R"html(
                     <div class="oui-meta"><strong>Category:</strong> Security Cameras / Surveillance</div>
                     <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Verkada security cameras (CD/CM/CF series, WiFi models)</div>
+                    </details>
+                    <details>
+                    <summary><b>WiFi PINEAPPLE (Hak5)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="00:13:37" onclick="toggleOuiChip(this)">00:13:37</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="WiFi PINEAPPLE (Hak5)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Pentest / Hacking Tool (rogue access point)</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Beacon, Probe Request</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Hak5 WiFi Pineapple (address prefix community-reported)</div>
+                    </details>
+                    <details>
+                    <summary><b>PWNAGOTCHI</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="DE:AD:BE" onclick="toggleOuiChip(this)">DE:AD:BE</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="PWNAGOTCHI" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Pentest / Hacking Tool (WiFi handshake capture)</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Pwnagotchi (beacons from DE:AD:BE:EF:DE:AD)</div>
                     </details>
                     <!-- WIFI_OUI_DB_END -->
                 </div>

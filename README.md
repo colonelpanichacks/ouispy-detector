@@ -2,6 +2,8 @@
 
 ![OUI-SPY](ouispy.png)
 
+> **For research and educational purposes only.** Use it only where you are legally permitted to, and only on devices and networks you own or are authorized to test. You are responsible for complying with all applicable laws.
+
 Professional dual-domain (BLE + WiFi) scanning system that detects specific devices by MAC address or OUI with audio feedback. BLE advertisements and 802.11 management frames (probe requests / beacons) are detected on the shared 2.4 GHz radio via time-sliced scanning.
 
 ## Flash from your browser
