@@ -108,7 +108,8 @@ The header's USB indicator shows the data, not just the port:
 - **Remote settings (node drawer).**
   - **Readout:** each node's firmware build, scan/config mode, burned-in, fleet key, uptime, heap, delivery stats and filter count. The filter count carries a SAME AS HOME / DIFFERS badge, from the CRC of the node's list compared with the home's.
   - **Controls:** buzzer/LED switches, identify (beep + flash for 15 s, ignoring mute), install a preset, and reboot.
-  - **Filter editor:** read the node's filter list, edit it, copy the home's list, or add presets, then push it. Validation runs live: OUIs need 6 hex digits, company IDs and service UUIDs 4, full MACs 12, names 1-16 characters.
+  - **Filter editor:** read the node's filter list (it always starts from what's installed), edit it, copy the home's list, or add from the picker, then push it. Validation runs live: OUIs need 6 hex digits, company IDs and service UUIDs 4, full MACs 12, names 1-16 characters.
+  - **Picker:** the 4 firmware presets plus the portal's whole OUI database, read live from `BLEOUIs.md` / `WiFiOUIs.md`, so anything added there shows up in both the portal and the dashboard. BLE entries add each OUI as a BLE filter and/or a WiFi probe filter (the BLE/WiFi switches, like the portal's). WiFi entries add probe and/or beacon filters per their frame types.
   - **Commands:** every command shows its state (queued, waiting, done, failed) and each node's reply. Destructive actions take two taps.
 - **Fleet Control tab.** Fleet-wide versions of the same actions: read all settings/filters, identify all, buzzer/LED for all remotes, push the home's filters, install a preset on every remote, reboot all, and re-channel the whole fleet. A settings matrix lists every node, and the command log can include the automatic reads.
 - **Settings.** Serial port, MQTT broker/credentials/topic, map tiles,

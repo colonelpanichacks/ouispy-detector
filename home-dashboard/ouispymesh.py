@@ -447,8 +447,22 @@ def _jobs(node, include_auto=False):
 
 
 def _filter_meta():
+    vendors = [{"key": g["key"], "label": g["label"], "kind": g["kind"], "count": len(g["ouis"]),
+                "ouis": g["ouis"], "meta": g["meta"]} for g in flt.vendor_db()]
     return {"types": flt.LABELS, "hex": flt.HEX_LEN,
-            "presets": {k: [{"t": t, "id": i, "d": d} for t, i, d in v] for k, v in flt.PRESETS.items()}}
+            "presets": {k: [{"t": t, "id": i, "d": d} for t, i, d in v] for k, v in flt.PRESETS.items()},
+            "vendors": vendors}
+
+
+@app.route("/api/filters/vendor")
+def api_filters_vendor():
+    """Filter rows for one OUI-database entry (?key=ble:3&ble=1&wifi=1)."""
+    key = request.args.get("key", "")
+    g = next((g for g in flt.vendor_db() if g["key"] == key), None)
+    if not g:
+        abort(404)
+    return jsonify(flt.vendor_filters(g, request.args.get("ble", "1") == "1",
+                                      request.args.get("wifi", "1") == "1"))
 
 
 def _submit(op, target, args):

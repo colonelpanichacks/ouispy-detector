@@ -54,6 +54,29 @@ class FilterTest(unittest.TestCase):
         self.assertEqual(bytes.fromhex("".join(lines)), buf)
 
 
+class VendorDbTest(unittest.TestCase):
+    """The portal's OUI database (BLEOUIs.md / WiFiOUIs.md in the repo)."""
+
+    def test_parsed_like_the_portal(self):
+        db = flt.vendor_db()
+        labels = [g["label"] for g in db]
+        self.assertTrue(any(l.startswith("FLOCK SAFETY") for l in labels))
+        self.assertIn("ble", {g["kind"] for g in db})
+        for g in db:
+            self.assertTrue(g["ouis"])
+            self.assertTrue(all(len(o) == 6 for o in g["ouis"]))
+
+    def test_filter_rules(self):
+        ble = {"label": "X", "kind": "ble", "ouis": ["AABBCC"], "meta": {}}
+        self.assertEqual([r["t"] for r in flt.vendor_filters(ble)], ["OUI", "PROBE"])
+        self.assertEqual([r["t"] for r in flt.vendor_filters(ble, wifi=False)], ["OUI"])
+        wifi = {"label": "Y", "kind": "wifi", "ouis": ["AABBCC"], "meta": {"Frame Types": "Probe Request, Beacon"}}
+        self.assertEqual([r["t"] for r in flt.vendor_filters(wifi)], ["PROBE", "BEACON"])
+        # every database entry encodes as a valid list on its own
+        for g in flt.vendor_db():
+            flt.encode(flt.vendor_filters(g))
+
+
 class PlanTest(unittest.TestCase):
     def test_local_vs_remote(self):
         lines, expect, _ = commands.plan("audio", "A1B2C3", {"buzzer": 0, "led": 1}, "A1B2C3")

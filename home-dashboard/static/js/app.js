@@ -771,6 +771,18 @@ function renderJobs() {
 }
 $("fAuto").onchange = renderJobs;
 
+// The editor's picker: firmware presets plus the portal's whole OUI
+// database (BLEOUIs.md / WiFiOUIs.md), grouped like the portal shows them.
+function vendorOptions(sel) {
+    const p = (S.filterMeta && S.filterMeta.presets) || {};
+    const v = (S.filterMeta && S.filterMeta.vendors) || [];
+    const opt = (val, txt) => `<option value="${esc(val)}">${esc(txt)}</option>`;
+    sel.innerHTML =
+        `<optgroup label="Firmware presets">${Object.keys(p).map((k) => opt("p:" + k, `${k.toUpperCase()} preset (${p[k].length})`)).join("")}</optgroup>` +
+        `<optgroup label="OUI database - BLE">${v.filter((g) => g.kind === "ble").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>` +
+        `<optgroup label="OUI database - WiFi">${v.filter((g) => g.kind === "wifi").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>`;
+}
+
 function presetOptions(sel) {
     const p = (S.filterMeta && S.filterMeta.presets) || {};
     sel.innerHTML = Object.keys(p).map((k) => `<option value="${k}">${k.toUpperCase()} (${p[k].length})</option>`).join("");
@@ -827,16 +839,21 @@ function renderFilters(n) {
             <div class="ctl-row">
                 <button class="btn ghost" id="feAdd">Add row</button>
                 <button class="btn ghost" id="feHome">Copy home's list</button>
-                <select class="field" id="fePreset"></select>
-                <button class="btn ghost" id="fePresetAdd">Add preset</button>
             </div>
+            <div class="ctl-row">
+                <select class="field" id="fePreset"></select>
+                <label class="switch" title="Add each OUI as a BLE filter"><input type="checkbox" id="feBle" checked><span></span>BLE</label>
+                <label class="switch" title="Add each OUI as a WiFi probe filter"><input type="checkbox" id="feWifi" checked><span></span>WiFi</label>
+                <button class="btn ghost" id="fePresetAdd">Add</button>
+            </div>
+            <div class="help-text" id="feVendorInfo"></div>
             <div class="ctl-row">
                 <button class="btn" id="fePush">Push to ${esc(n.alias || n.id)}</button>
                 <button class="btn ghost" id="feCancel">Cancel</button>
             </div>
             <div class="help-text">Pushing replaces the node's whole filter list; it reboots to apply. CIDs and service UUIDs are 4 hex digits, OUIs 6, full MACs 12, names 1-16 characters.</div>
         </div>`;
-        presetOptions($("fePreset"));
+        vendorOptions($("fePreset"));
         wireEditor(n);
         validateEdit();
         return;
@@ -869,13 +886,41 @@ function wireEditor(n) {
         rerenderEditor();
     });
     $("feAdd").onclick = () => { readEditor(); S.editing.push({ t: "OUI", id: "", d: "" }); rerenderEditor(); };
-    $("fePresetAdd").onclick = () => {
+    const showVendor = () => {
+        const v = $("fePreset").value;
+        const g = v.startsWith("v:") ? (S.filterMeta.vendors || []).find((x) => x.key === v.slice(2)) : null;
+        $("feBle").parentElement.style.display = $("feWifi").parentElement.style.display =
+            g && g.kind === "ble" ? "" : "none";
+        const m = g ? g.meta : {};
+        $("feVendorInfo").textContent = g
+            ? [m["Category"], m["Common Devices"], m["Frame Types"] ? "Frames: " + m["Frame Types"] : "",
+               `${g.count} OUI${g.count === 1 ? "" : "s"}: ${g.ouis.slice(0, 8).map((o) => o.replace(/(..)(..)(..)/, "$1:$2:$3")).join(" ")}${g.count > 8 ? " ..." : ""}`]
+                .filter(Boolean).join(" | ")
+            : "Firmware preset: full vendor signature set (OUI, company ID, service UUID, WiFi frames as applicable).";
+    };
+    $("fePreset").onchange = showVendor;
+    showVendor();
+    $("fePresetAdd").onclick = async () => {
         readEditor();
-        const have = new Set(S.editing.map((f) => f.t + ":" + f.id.toUpperCase()));
-        for (const f of S.filterMeta.presets[$("fePreset").value] || []) {
-            if (!have.has(f.t + ":" + f.id.toUpperCase())) S.editing.push({ ...f });
+        const v = $("fePreset").value;
+        const label = $("fePreset").selectedOptions[0].textContent;
+        let rows = [];
+        if (v.startsWith("p:")) {
+            rows = S.filterMeta.presets[v.slice(2)] || [];
+        } else if (v.startsWith("v:")) {
+            const q = new URLSearchParams({ key: v.slice(2), ble: $("feBle").checked ? "1" : "0", wifi: $("feWifi").checked ? "1" : "0" });
+            rows = await api(`/api/filters/vendor?${q}`);
         }
+        const have = new Set(S.editing.map((f) => f.t + ":" + f.id.toUpperCase()));
+        let added = 0;
+        for (const f of rows) {
+            if (!have.has(f.t + ":" + f.id.toUpperCase())) { S.editing.push({ t: f.t, id: f.id, d: f.d }); added++; }
+        }
+        S.editing = S.editing.filter((f) => f.id);   // drop the empty starter row
         rerenderEditor();
+        $("fePreset").value = v;
+        $("fePreset").onchange();
+        toast("good", `Added ${added} filter${added === 1 ? "" : "s"}`, label);
     };
     $("feHome").onclick = () => {
         const h = homeNode();
@@ -930,6 +975,14 @@ $("dReboot").onclick = () => twoTap($("dReboot"), () => command(S.selected, "reb
 $("dFiltRead").onclick = () => command(S.selected, "filters_get");
 $("dFiltEdit").onclick = () => {
     const n = nodeById(S.selected);
+    if (n && !n.filters) {
+        // Never start from an empty list: a push replaces the node's whole
+        // list, so read what it has first and open the editor on that.
+        S.editAfterRead = S.selected;
+        command(S.selected, "filters_get");
+        toast("warn", "Reading the node's filters first", "The editor opens on its current list");
+        return;
+    }
     S.editFor = S.selected;
     S.editing = (n && n.filters ? n.filters : []).map((f) => ({ t: f.t, id: f.id, d: f.d }));
     if (!S.editing.length) S.editing.push({ t: "OUI", id: "", d: "" });
@@ -1167,6 +1220,14 @@ function applyFleet(f) {
     watchHealth();
     renderRemote();
     renderFleetCtl();
+    if (S.editAfterRead) {
+        const en = nodeById(S.editAfterRead);
+        if (en && en.filters) {
+            const id = S.editAfterRead;
+            S.editAfterRead = null;
+            if (S.selected === id && $("drawer").classList.contains("open")) $("dFiltEdit").click();
+        }
+    }
     const h = homeNode();
     if (S.loadHomePending && h && h.filters && S.editing) {
         S.loadHomePending = false;

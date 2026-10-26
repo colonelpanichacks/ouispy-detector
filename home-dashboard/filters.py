@@ -5,6 +5,8 @@ Validation mirrors filterRecordsValid() in src/main.cpp, and crc() equals
 the firmware's crc32_le(0, ...) over the same bytes (standard CRC-32), so a
 list's CRC here matches the `fcrc` a node reports in its RST status line.
 """
+import os
+import re
 import zlib
 
 # FilterType enum (src/main.cpp) <-> the codes the firmware prints.
@@ -102,3 +104,77 @@ def crc(filters):
 def chunks(buf, size=96):
     """Hex lines for the console's mfdata command (fits the USB RX buffer)."""
     return [buf[i:i + size].hex().upper() for i in range(0, len(buf), size)]
+
+
+# ----------------------------------------------------------------------
+# The portal's OUI database. Read live from BLEOUIs.md / WiFiOUIs.md in the
+# repo (the same files sync-oui-list.py turns into the device portal), so
+# the dashboard and the portal always offer the same vendors.
+# ----------------------------------------------------------------------
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_RE_SUMMARY = re.compile(r"<summary><b>(.*?)</b>")
+_RE_OUI = re.compile(r"^- `([0-9A-Fa-f:]{8})`")
+_RE_META = re.compile(r"^> \*\*(Category|Detection Range|Common Devices|Frame Types):\*\*\s*(.*?)\s*$")
+
+
+def _ascii(s):
+    return "".join(c if 0x20 <= ord(c) <= 0x7E else "-" for c in s).replace("--", "-").strip()
+
+
+def _parse_db(path, kind):
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    out, cur = [], None
+    for line in lines:
+        line = line.strip()
+        m = _RE_SUMMARY.search(line)
+        if m:
+            cur = {"label": _ascii(m.group(1)), "kind": kind, "ouis": [], "meta": {}}
+            continue
+        if cur is None:
+            continue
+        m = _RE_OUI.match(line)
+        if m:
+            o = m.group(1).replace(":", "").upper()
+            if o not in cur["ouis"]:
+                cur["ouis"].append(o)
+            continue
+        m = _RE_META.match(line)
+        if m:
+            cur["meta"][m.group(1)] = _ascii(m.group(2))
+            continue
+        if line.startswith("</details>"):
+            if cur["ouis"]:
+                cur["key"] = f"{kind}:{len(out)}"
+                out.append(cur)
+            cur = None
+    return out
+
+
+def vendor_db():
+    """[{key, label, kind: ble|wifi, ouis: [...], meta: {...}}] from the repo's OUI lists."""
+    return _parse_db(os.path.join(REPO, "BLEOUIs.md"), "ble") + \
+           _parse_db(os.path.join(REPO, "WiFiOUIs.md"), "wifi")
+
+
+def vendor_filters(group, ble=True, wifi=True):
+    """Filter rows for one database entry, exactly as the portal adds them:
+    BLE entries -> BLE OUI and/or WiFi probe per OUI (both by default);
+    WiFi entries -> probe and/or beacon per their Frame Types line."""
+    desc = group["label"][:32]
+    rows = []
+    for o in group["ouis"]:
+        if group["kind"] == "ble":
+            if ble:
+                rows.append({"t": "OUI", "id": o, "d": desc})
+            if wifi:
+                rows.append({"t": "PROBE", "id": o, "d": desc})
+        else:
+            frames = group["meta"].get("Frame Types", "Probe Request").lower()
+            if "probe" in frames:
+                rows.append({"t": "PROBE", "id": o, "d": desc})
+            if "beacon" in frames:
+                rows.append({"t": "BEACON", "id": o, "d": desc})
+    return rows
