@@ -284,7 +284,7 @@ static void serialConsoleTick() {
     // Locked-node fleet management from ANY mode (USB = full control):
     if (line.startsWith("meshrechan ")) {
         int ch = line.substring(11).toInt();
-        if (ch < 1 || ch > 13) { Serial.println("ERR channel 1-13"); return; }
+        if (ch < 1 || ch > 11) { Serial.println("ERR channel 1-11"); return; }
         if (currentMode == CONFIG_MODE) {
             // Config mode: flood and let the operator finish with
             // burnin/provisiondone — this node reboots on the new channel
@@ -318,6 +318,26 @@ static void serialConsoleTick() {
         }
         delay(300);
         ESP.restart();
+        return;
+    }
+
+    // Fleet key: "meshkey <secret>" sets it (8-63 chars, no spaces),
+    // "meshkey -" clears it. Same key on every node; with a key set this
+    // node signs its commands and only obeys commands signed with it.
+    if (line.startsWith("meshkey ")) {
+        String k = line.substring(8);
+        k.trim();
+        if (k == "-") {
+            meshSetKey("");
+            Serial.println("OK fleet key cleared — commands are unauthenticated");
+            return;
+        }
+        if (k.length() < 8 || k.length() > 63 || k.indexOf(' ') >= 0) {
+            Serial.println("ERR key must be 8-63 characters, no spaces (or - to clear)");
+            return;
+        }
+        meshSetKey(k.c_str());
+        Serial.println("OK fleet key set — set the same key on every node");
         return;
     }
 
@@ -1210,7 +1230,7 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         // Re-channel the whole mesh: save the new channel, ack, say
         // goodbye, reboot. Locked config is untouched — the node comes
         // back up on the new channel still burned in.
-        if (len < 1 || payload[0] < 1 || payload[0] > 13) {
+        if (len < 1 || payload[0] < 1 || payload[0] > 11) {
             meshSendAck(cmd, cmdId, 1, 0);
             return;
         }
@@ -2626,6 +2646,8 @@ R"html(
                         <input type="hidden" name="mesh_en">
                         <input type="hidden" name="mesh_role">
                         <input type="hidden" name="mesh_ch">
+                        <input type="hidden" name="mesh_key">
+                        <input type="hidden" name="mesh_key_clear">
                     </form>
 
         <form id="configForm" method="POST" action="/save" autocomplete="off">
@@ -2859,7 +2881,14 @@ R"html(
                 <div class="help-text" style="margin-bottom:12px">Exactly one home node should have MQTT configured — it is the mesh's gateway. Remote nodes ignore MQTT settings while meshing.</div>
                 <label style="display:block;margin-bottom:4px;font-weight:500;color:#fff">Mesh Channel</label>
                 <input type="number" name="mesh_ch" value="%MESH_CH%" min="1" max="11" class="field">
-                <div class="help-text">WiFi channel all nodes share (1–13). Must match on every node. The radio parks here between scans for mesh traffic; remote nodes with no filters at all become pure relays.</div>
+                <div class="help-text">WiFi channel all nodes share (1–11). Must match on every node. The radio parks here between scans for mesh traffic; remote nodes with no filters at all become pure relays.</div>
+                <label style="display:block;margin:12px 0 4px;font-weight:500;color:#fff">Fleet Key</label>
+                <input type="password" name="mesh_key" value="" minlength="8" maxlength="63" placeholder="%MESH_KEY_PH%" autocomplete="new-password" class="field">
+                <div class="toggle-item" style="margin:6px 0">
+                    <input type="checkbox" id="mesh_key_clear" name="mesh_key_clear">
+                    <label class="toggle-label" for="mesh_key_clear">Clear fleet key</label>
+                </div>
+                <div class="help-text">Shared secret (8–63 characters) that signs fleet commands: mute, filter push, reboot, re-channel. Set the same key on every node; a node with a key only obeys commands signed with it, and replayed commands are refused. Leave blank to keep the current key.</div>
             </div>
 
             %MESH_MGMT%
@@ -3495,6 +3524,8 @@ R"html(
                 set('mesh_en', checked('mesh_en') ? 'on' : null);
                 set('mesh_role', valByName('mesh_role'));
                 set('mesh_ch', valByName('mesh_ch'));
+                set('mesh_key', valByName('mesh_key'));
+                set('mesh_key_clear', checked('mesh_key_clear') ? 'on' : null);
                 f.submit();
             }
 
@@ -4072,6 +4103,7 @@ String configProcessor(const String& var) {
     if (var == "MESH_EN") return meshCfg.enabled ? "checked" : "";
     if (var == "MESH_CH") return String(meshCfg.channel);
     if (var == "MESH_HOME_SEL") return meshCfg.home ? "selected" : "";
+    if (var == "MESH_KEY_PH") return meshKeySet() ? "set (leave blank to keep)" : "not set: fleet commands are unauthenticated";
     if (var == "MESH_MGMT") {
         if (!meshCfg.enabled || !meshCfg.home) return "";
         return String(FPSTR(MESH_MGMT_HTML));
@@ -4347,6 +4379,13 @@ void startConfigMode() {
         if (request->hasParam("mesh_ch", true)) {
             int ch = request->getParam("mesh_ch", true)->value().toInt();
             if (ch >= 1 && ch <= 11) meshCfg.channel = (uint8_t)ch;
+        }
+        if (request->hasParam("mesh_key_clear", true)) {
+            meshSetKey("");
+        } else if (request->hasParam("mesh_key", true)) {
+            String k = request->getParam("mesh_key", true)->value();
+            k.trim();
+            if (k.length() >= 8 && k.length() <= 63) meshSetKey(k.c_str());
         }
         mesh_saveConfig();
 
@@ -4800,6 +4839,13 @@ a { display: inline-block; margin-top: 16px; padding: 11px 22px; border-radius: 
         if (request->hasParam("mesh_ch", true)) {
             int ch = request->getParam("mesh_ch", true)->value().toInt();
             if (ch >= 1 && ch <= 11) meshCfg.channel = (uint8_t)ch;
+        }
+        if (request->hasParam("mesh_key_clear", true)) {
+            meshSetKey("");
+        } else if (request->hasParam("mesh_key", true)) {
+            String k = request->getParam("mesh_key", true)->value();
+            k.trim();
+            if (k.length() >= 8 && k.length() <= 63) meshSetKey(k.c_str());
         }
         mesh_saveConfig();
 

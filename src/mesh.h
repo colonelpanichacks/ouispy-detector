@@ -10,19 +10,29 @@
 //   - home node:   receives mesh-wide detections and reports them via MQTT
 // Packets are flooded with an (origin, seq) duplicate cache and a TTL hop
 // limit, so any-to-any connectivity emerges without a peer table. ESP-NOW
-// frames are vendor-specific action frames sent at the proprietary LR rate;
-// both ends get ~1 km line-of-sight range at 1 Mbps-class sensitivity.
+// frames are vendor-specific action frames; every node enables the LR
+// protocol on its STA interface. ESP-NOW itself goes out at the driver's
+// default rate unless the build defines MESH_ESPNOW_LR_RATE (e.g.
+// WIFI_PHY_RATE_LORA_250K) — a fleet-wide setting, all nodes alike.
 
 struct MeshConfig {
     bool enabled;
     bool home;        // true = home node (MQTT uplink), false = remote node
-    uint8_t channel;  // 1-13, must match on every node
+    uint8_t channel;  // 1-11, must match on every node
+    char key[64];     // fleet key: signs commands (empty = unauthenticated)
 };
 
 extern MeshConfig meshCfg;
 
 void mesh_loadConfig();
 void mesh_saveConfig();
+
+// Fleet key. When set, every command this node sends is signed
+// (HMAC-SHA256, with a persisted counter against replays), and it only
+// obeys commands signed with the same key. Setting a new key forgets all
+// remembered counters. Persists to NVS.
+bool meshKeySet();
+void meshSetKey(const char* key);
 
 // Starts ESP-NOW on the mesh channel with the LR protocol enabled. Requires
 // WiFi STA mode to be started already. Returns false on init failure.
@@ -79,27 +89,30 @@ void meshSetHealAllowed(bool allowed);
 // The home node manages remotes over the same flood: commands are broadcast
 // packets every node applies and relays; a staged-chunk protocol carries
 // payloads larger than one ESP-NOW frame (filter lists), verified with a
-// CRC32 before applying. Remotes answer with direct (non-relayed) acks so
-// the home can count how many nodes applied a command.
+// CRC32 before applying. Nodes answer with flooded acks so the home can
+// count how many nodes applied a command, including ones it can't reach
+// directly. With a fleet key set, commands are signed and verified.
 //
 // Commands (home -> all nodes):
 #define MESH_CMD_AUDIO   1   // payload: u8 buzzerOn, u8 ledOn (live, persisted)
 #define MESH_CMD_FILTERS 2   // payload: binary TargetFilter records (reboot to apply)
 #define MESH_CMD_REBOOT  3   // payload: none
-#define MESH_CMD_SETCHAN 4   // payload: u8 channel 1-13 (NVS + reboot to apply)
+#define MESH_CMD_SETCHAN 4   // payload: u8 channel 1-11 (NVS + reboot to apply)
 // Ack body (remote -> home): u8 cmd, u16 cmdId, u8 status, u8 count
+// status: 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed
 
 uint16_t meshNewCmdId();
-// Splits payload into chunks and floods it. Returns false when the mesh is
-// down or the payload exceeds the staging buffer.
+// Floods payload in chunks, fed into the TX queue as it drains. Returns
+// false when the mesh is down, another command is still going out, or the
+// payload exceeds the staging buffer (4096 bytes, 4076 when signed).
 bool meshQueueCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint16_t len);
-// Queue a direct ack (ttl=1, never relayed).
+// Queue an ack (flooded like detections).
 void meshSendAck(uint8_t cmd, uint16_t cmdId, uint8_t status, uint8_t count);
-// Number of acks received for cmdId (0 when unknown).
+// Number of successful acks received for cmdId (0 when unknown).
 uint8_t meshCmdAckCount(uint16_t cmdId);
 // Roster snapshot as JSON: {"nodes":[{id,role,last,pkts}...]}
 void meshNodesJson(String& out);
-// Number of packets waiting in the TX queue.
+// Frames still to send: TX queue plus command chunks not yet queued.
 uint8_t meshTxPending();
 // This node's stable ID (factory eFuse MAC tail) as 6 hex chars + NUL.
 // Valid whether or not the mesh is running.
