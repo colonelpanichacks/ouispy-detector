@@ -27,8 +27,8 @@ py -m venv .venv
 .venv\Scripts\python ouispymesh.py
 ```
 
-Then open http://127.0.0.1:5077. The terminal also prints the LAN and
-Tailscale links.
+Then open http://127.0.0.1:5077. The terminal also prints this computer's
+network links.
 
 | Option | What it does |
 |---|---|
@@ -217,10 +217,12 @@ In Settings, under Fleet key:
   the home's USB console. It isn't offered for remotes: a key is never sent
   over the mesh.
 
-Who can see the key: this computer and your Tailscale devices, including
-through `tailscale serve`, where the real client is taken from the proxy.
-Never a plain-LAN device, and never anything that arrives through Tailscale
-Funnel. The reveal endpoint is POST-only and never cached.
+Who can see the key: this computer only, unless you list networks under
+Settings, Access, "Can view the fleet key" (e.g. your own VPN's range). That
+list can only be changed on this computer. Behind a reverse proxy, the real
+client is taken from `X-Forwarded-For` (trusted only from loopback), so a
+proxy that exposes the dashboard publicly never passes the check. The reveal
+endpoint is POST-only and never cached.
 
 ## Carry a node with your phone (GPS)
 
@@ -228,17 +230,19 @@ Off by default. Open a node and tap **Carry with this phone**: while the page
 stays open, the phone's GPS becomes that node's position. The marker moves
 live on every screen and leaves a trail. The **Trail** slider on the map
 sets how much is drawn (off, 5 min, up to 7 days, remembered per browser). **Stop carrying** ends it.
-Phones only share location with HTTPS pages, so open the dashboard through an
-`https://` address, e.g. Tailscale's `tailscale serve`.
+Phones only share location with HTTPS pages, so serve the dashboard over
+HTTPS for this: your own reverse proxy (Caddy, nginx, ...) or your VPN's HTTPS
+feature, pointed at port 5077.
 
 ## Privacy notes
 
-- The server listens on all interfaces. This computer, your LAN and Tailscale
-  open it directly; any other network needs the access token in
-  `home-dashboard/access_token` (`?token=...` once, then a cookie).
-  `--require-token` demands it from everything except this computer, and
-  `--host 127.0.0.1` keeps it local-only. Socket.IO only accepts same-origin
-  connections.
+- The server listens on all interfaces. This computer and the networks under
+  Settings, Access, "Open without a token" (default: the private LAN ranges)
+  open it directly. Anything else needs the access token in
+  `home-dashboard/access_token` (`?token=...` once, then a cookie). Add your own
+  VPN's range there if you use one. `--require-token` demands the token from
+  everything except this computer, and `--host 127.0.0.1` keeps it local-only.
+  Socket.IO only accepts same-origin connections.
 - Leaflet and the Socket.IO client are vendored in `static/vendor/`, so the page
   loads no third-party scripts.
 - Map tiles are the one thing that goes online. By default they come from

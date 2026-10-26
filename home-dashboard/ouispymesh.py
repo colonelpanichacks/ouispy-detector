@@ -39,6 +39,11 @@ DEFAULT_SETTINGS = {
     "retention_days": 0,            # 0 = keep history forever
     "links": True,                  # draw home-to-remote link lines on the map
     "status_poll": 120,             # s between automatic settings reads (0 = off)
+    # Access, as CIDR lists set per installation (Settings): who opens the
+    # dashboard without the token, and who besides this computer may view
+    # the fleet key. Add your own VPN's range to either if you use one.
+    "trusted_nets": "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12",
+    "key_nets": "",
     "map_view": None,               # [lat, lon, zoom]
     "serial_port": "auto",          # auto | off | a port: COM5, /dev/ttyACM0, /dev/cu.usbmodemXXXX
     "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
@@ -49,11 +54,11 @@ DEFAULT_SETTINGS = {
 def parse_args():
     ap = argparse.ArgumentParser(description="OUI-SPY home node dashboard")
     ap.add_argument("--host", default=os.environ.get("OUISPY_HOST", "0.0.0.0"),
-                    help="bind address (default all interfaces: LAN + Tailscale; 127.0.0.1 = this computer only)")
+                    help="bind address (default all interfaces; 127.0.0.1 = this computer only)")
     ap.add_argument("--open", action="store_true",
                     help="no access token from anywhere (not recommended: the dashboard can reboot the fleet)")
     ap.add_argument("--require-token", action="store_true",
-                    help="require the token from every device except this computer, LAN and Tailscale included")
+                    help="require the token from every device except this computer, trusted networks included")
     ap.add_argument("--port", type=int, default=int(os.environ.get("OUISPY_PORT", 5077)))
     ap.add_argument("--serial", help="serial port, 'auto' (USB VID 0x303A) or 'off'")
     ap.add_argument("--mqtt", help="MQTT broker host[:port] (enables MQTT)")
@@ -104,15 +109,34 @@ COOKIE = "ouispy_token"
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
-def _is_funnel():
-    """Tailscale Funnel (public internet) marks proxied requests with this."""
-    return bool(request.headers.get("Tailscale-Funnel-Request"))
+def parse_nets(text):
+    """'192.168.0.0/16, 10.0.0.0/8' -> ([networks], [entries that aren't CIDRs])."""
+    nets, bad = [], []
+    for part in str(text or "").replace(";", ",").replace("\n", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            bad.append(part)
+    return nets, bad
+
+
+ACCESS = {"trusted": [], "key": []}   # parsed from settings; refreshed when they change
+
+
+def refresh_access():
+    s = settings()
+    ACCESS["trusted"] = parse_nets(s.get("trusted_nets"))[0]
+    ACCESS["key"] = parse_nets(s.get("key_nets"))[0]
 
 
 def _client_ip():
-    """Who is really asking. Behind `tailscale serve` (or another local
-    reverse proxy) the direct peer is loopback; the real client is in
-    X-Forwarded-For, which is only trusted when the peer IS loopback."""
+    """Who is really asking. Behind a reverse proxy on this computer the
+    direct peer is loopback and the real client is in X-Forwarded-For, which
+    is only trusted when the peer IS loopback. A proxy that exposes the
+    dashboard publicly therefore forwards public addresses: never trusted."""
     peer = request.remote_addr or ""
     if peer in LOOPBACK:
         fwd = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
@@ -122,47 +146,31 @@ def _client_ip():
 
 
 def _is_local():
-    return not _is_funnel() and _client_ip() in LOOPBACK
+    return _client_ip() in LOOPBACK
 
 
-# Tailscale (CGNAT 100.64/10 and its IPv6 range) is already authenticated
-# to your own devices; private LAN ranges are your network. Both open the
-# dashboard without the token unless --require-token.
-TRUSTED_NETS = [ipaddress.ip_network(n) for n in
-                ("100.64.0.0/10", "fd7a:115c:a1e0::/48", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+def _in(nets):
+    try:
+        ip = ipaddress.ip_address(_client_ip())
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    return any(ip in n for n in nets)
 
 
 def _is_trusted_net():
-    if _is_funnel():
-        return False          # public internet via Funnel: never trusted
-    try:
-        ip = ipaddress.ip_address(_client_ip())
-    except ValueError:
-        return False
-    if getattr(ip, "ipv4_mapped", None):
-        ip = ip.ipv4_mapped
-    return any(ip in n for n in TRUSTED_NETS)
+    return _in(ACCESS["trusted"])
 
 
-# The fleet key (kept on this computer, outside the repo) can be shown as a QR
-# for provisioning a node from a phone. Only this computer and your Tailscale devices
-# may see it: the plain LAN reaches the dashboard without a token.
+# The fleet key (kept on this computer, outside the repo) can be shown as a
+# QR for provisioning a node from a phone: only to this computer, plus the
+# networks listed in the key_nets setting (empty by default).
 FLEET_KEY_FILE = os.path.expanduser("~/.config/ouispy/fleet_key")
-KEY_VIEW_NETS = [ipaddress.ip_network(n) for n in ("100.64.0.0/10", "fd7a:115c:a1e0::/48")]
 
 
 def _key_viewer_ok():
-    if _is_funnel():
-        return False
-    if _is_local():
-        return True
-    try:
-        ip = ipaddress.ip_address(_client_ip())
-    except ValueError:
-        return False
-    if getattr(ip, "ipv4_mapped", None):
-        ip = ip.ipv4_mapped
-    return any(ip in n for n in KEY_VIEW_NETS)
+    return _is_local() or _in(ACCESS["key"])
 
 
 def _fleet_key():
@@ -601,9 +609,9 @@ def _no_store(resp):
 @app.route("/api/fleetkey/reveal", methods=["POST"])
 def api_fleetkey_reveal():
     """The key itself: POST only (never prefetched or cached), this computer
-    and Tailscale devices only, never via Funnel."""
+    and the key_nets networks only."""
     if not _key_viewer_ok():
-        return _no_store(jsonify({"ok": False, "error": "the fleet key is only shown on the computer running OUI-SPY Mesh or your Tailscale devices"})), 403
+        return _no_store(jsonify({"ok": False, "error": "the fleet key is only shown on the computer running OUI-SPY Mesh (and networks allowed in Settings)"})), 403
     k = _fleet_key()
     if not k:
         return _no_store(jsonify({"ok": False, "error": "no fleet key saved on this computer yet"})), 404
@@ -615,7 +623,7 @@ def api_fleetkey_create():
     """Generate the fleet key if none exists. Never replaces one: a new key
     would cut off every node still holding the old one."""
     if not _key_viewer_ok():
-        return jsonify({"ok": False, "error": "only from this computer or your Tailscale devices"}), 403
+        return jsonify({"ok": False, "error": "only from this computer (or networks allowed in Settings)"}), 403
     if _fleet_key():
         return jsonify({"ok": False, "error": "a fleet key already exists"}), 409
     import string
@@ -638,7 +646,7 @@ def api_fleetkey_provision_home():
     this computer straight down the serial line: never through the browser,
     never over the radio (remotes get it by USB or their setup portal)."""
     if not _key_viewer_ok():
-        return jsonify({"ok": False, "error": "only from this computer or your Tailscale devices"}), 403
+        return jsonify({"ok": False, "error": "only from this computer (or networks allowed in Settings)"}), 403
     k = _fleet_key()
     if not k:
         return jsonify({"ok": False, "error": "no fleet key saved on this computer yet"}), 404
@@ -680,8 +688,16 @@ def api_settings_set():
         data["status_poll"] = max(0, int(data["status_poll"] or 0))
     if "retention_days" in data:
         data["retention_days"] = max(0, int(data["retention_days"] or 0))
+    for k in ("trusted_nets", "key_nets"):
+        if k in data:
+            nets, bad = parse_nets(data[k])
+            if bad:
+                return jsonify({"ok": False, "error": f"not a network (CIDR): {', '.join(bad)}"}), 400
+            data[k] = ", ".join(str(n) for n in nets)
+            if k == "key_nets" and not _is_local():
+                return jsonify({"ok": False, "error": "who may view the fleet key can only be changed on this computer"}), 403
     for k in ("sound", "flash", "tiles", "tiles_custom", "map_view", "notify",
-              "retention_days", "links", "status_poll"):
+              "retention_days", "links", "status_poll", "trusted_nets", "key_nets"):
         if k in data:
             store.set_setting(k, data[k])
     if "serial_port" in data:
@@ -696,6 +712,7 @@ def api_settings_set():
         new["port"] = int(new.get("port") or 1883)
         store.set_setting("mqtt", new)
         restart = True
+    refresh_access()
     if restart and not offline_mode:
         start_sources()
     return jsonify(public_settings())
@@ -727,16 +744,15 @@ def on_connect():
 
 
 def _addresses():
-    """LAN and Tailscale (100.x) addresses to print as ready-made links.
-    Portable: no ifconfig/ip/ipconfig parsing, works on Linux, macOS and
-    Windows. A UDP "connect" picks the outbound interface without sending
-    anything; Tailscale's own CLI reports its address when installed."""
+    """This computer's network addresses, to print as ready-made links.
+    Portable (Linux, macOS, Windows): no ifconfig/ip/ipconfig parsing. A UDP
+    "connect" picks the outbound interface without sending anything."""
     out = []
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("10.255.255.255", 1))          # private, unroutable: nothing is sent
-        out.append(s.getsockname()[0])
-        s.close()
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("10.255.255.255", 1))          # private, unroutable: nothing is sent
+        out.append(sk.getsockname()[0])
+        sk.close()
     except OSError:
         pass
     try:
@@ -744,21 +760,10 @@ def _addresses():
             out.append(info[4][0])
     except OSError:
         pass
-    import shutil
-    import subprocess
-    ts = shutil.which("tailscale") or next((p for p in (
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        r"C:\Program Files\Tailscale\tailscale.exe") if os.path.exists(p)), None)
-    if ts:
-        try:
-            r = subprocess.run([ts, "ip", "-4"], capture_output=True, text=True, timeout=3)
-            out += [l.strip() for l in r.stdout.splitlines() if l.strip()]
-        except (OSError, subprocess.SubprocessError):
-            pass
     seen = []
     for ip in out:
         try:
-            a = ipaddress.ip_address(ip)   # drops anything that isn't an address (CLI error text)
+            a = ipaddress.ip_address(ip)
         except ValueError:
             continue
         if not a.is_loopback and ip not in seen:
@@ -767,6 +772,7 @@ def _addresses():
 
 
 if __name__ == "__main__":
+    refresh_access()
     start_sources()
     commander.start()
     import atexit
@@ -793,8 +799,7 @@ if __name__ == "__main__":
     if args.host not in ("127.0.0.1", "localhost"):
         q = f"/?token={ACCESS_TOKEN}" if args.require_token else ""
         for ip in _addresses():
-            tag = "tailscale" if ip.startswith("100.") else "network"
-            print(f"  {tag:9s}  http://{ip}:{args.port}{q}")
+            print(f"  network        http://{ip}:{args.port}{q}")
         if not args.require_token and not args.open:
-            print(f"  (LAN + Tailscale open; anything else needs ?token={ACCESS_TOKEN})")
+            print(f"  (trusted networks open without a token; anything else needs ?token={ACCESS_TOKEN})")
     socketio.run(app, host=args.host, port=args.port, allow_unsafe_werkzeug=True)

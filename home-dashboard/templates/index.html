@@ -224,6 +224,15 @@
                     <div class="help-text">One small status request over the mesh. Nodes are also read when they join and after every change.</div>
                 </div>
                 <div class="set-block">
+                    <h4>Access</h4>
+                    <label>Open without a token (networks, CIDR, comma separated)</label>
+                    <input type="text" id="sTrusted" class="field mono" placeholder="192.168.0.0/16, 10.0.0.0/8">
+                    <div class="help-text">Devices on these networks open the dashboard directly; anything else needs the access token. Add your own VPN's range here if you use one.</div>
+                    <label>Can view the fleet key (besides this computer)</label>
+                    <input type="text" id="sKeyNets" class="field mono" placeholder="empty = this computer only">
+                    <div class="help-text">Leave empty unless you want to show the key on a trusted phone, e.g. over your own VPN. Only changeable on this computer.</div>
+                </div>
+                <div class="set-block">
                     <h4>Fleet key</h4>
                     <div class="help-text" id="fkStatus">Checking...</div>
                     <div class="ctl-row" style="margin-top:8px">

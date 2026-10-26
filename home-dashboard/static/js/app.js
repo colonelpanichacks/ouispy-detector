@@ -465,7 +465,7 @@ async function stopCarry(clearTrail) {
 }
 async function startCarry(node) {
     if (!window.isSecureContext) {
-        toast("warn", "Location needs HTTPS", "Open the dashboard through its https:// Tailscale address to share this phone's GPS");
+        toast("warn", "Location needs HTTPS", "Phones only share GPS with https:// pages: serve the dashboard over HTTPS (your own reverse proxy or VPN)");
         gpsInfo("needs the https:// address");
         return;
     }
@@ -1378,6 +1378,8 @@ async function loadSettingsForm() {
     $("sLinks").checked = s.links !== false;
     $("sRetention").value = s.retention_days || 0;
     $("sPoll").value = s.status_poll ?? 120;
+    $("sTrusted").value = s.trusted_nets || "";
+    $("sKeyNets").value = s.key_nets || "";
     $("sTilesCustom").value = s.tiles_custom || "";
     $("sTilesCustom").style.display = $("sTiles").value.startsWith("custom") ? "" : "none";
 }
@@ -1398,10 +1400,14 @@ $("saveSettings").onclick = async () => {
         notify: $("sNotify").checked, links: $("sLinks").checked,
         retention_days: Math.max(0, parseInt($("sRetention").value, 10) || 0),
         status_poll: Math.max(0, parseInt($("sPoll").value, 10) || 0),
+        trusted_nets: $("sTrusted").value.trim(),
+        key_nets: $("sKeyNets").value.trim(),
         mqtt: { enabled: $("mEn").checked, host: $("mHost").value.trim(), port: Number($("mPort").value) || 1883,
                 user: $("mUser").value, password: $("mPass").value, topic: $("mTopic").value.trim() || "+/detection" },
     };
-    S.settings = await api("/api/settings", { method: "POST", body });
+    const res = await api("/api/settings", { method: "POST", body });
+    if (res.ok === false) { toast("bad", "Settings not saved", res.error); return; }
+    S.settings = res;
     applyTiles();
     renderLinks();
     $("savedMsg").textContent = window.OUISPY_MODE === "live" ? "Saved. Feeds restarted." : "Saved (feeds are fixed in demo/replay mode).";
@@ -1425,7 +1431,7 @@ $("clearBtn").onclick = async () => {
 };
 
 // ------------------------------------------------------------------
-// fleet key as QR (this computer + Tailscale devices only; server enforces it)
+// fleet key as QR (this computer + the key_nets networks only; server enforces it)
 // ------------------------------------------------------------------
 // Per-node key state: compares the fingerprint each node reports with the
 // fingerprint of the key on this computer (neither reveals the key).
@@ -1442,7 +1448,7 @@ async function loadFleetKeyStatus() {
     S.keyFp = st.fp || null;
     const fp = st.fp ? `${st.fp.slice(0, 4)}-${st.fp.slice(4)}` : "";
     $("fkStatus").innerHTML = !st.present ? "No fleet key on this computer yet."
-        : `Key fingerprint <b class="mono">${esc(fp)}</b>${st.viewable ? "" : " (the key itself is viewable only on the computer running OUI-SPY Mesh or your Tailscale devices)"}`;
+        : `Key fingerprint <b class="mono">${esc(fp)}</b>${st.viewable ? "" : " (the key itself is viewable only on the computer running OUI-SPY Mesh, or networks allowed under Access)"}`;
     $("fkShow").style.display = st.present && st.viewable ? "" : "none";
     $("fkCreate").style.display = !st.present && st.viewable ? "" : "none";
     const h = homeNode();
