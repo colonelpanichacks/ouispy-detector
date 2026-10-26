@@ -2,8 +2,6 @@
 
 ![OUI-SPY](ouispy.png)
 
-> **WARNING - research and educational use only.** This firmware passively listens to Bluetooth and Wi-Fi traffic. Laws on receiving radio transmissions and on tracking people or their devices differ by country, state and city, and you alone are responsible for following them. Never use it to stalk, track, harass or identify people. Detections are not proof of anything. It is provided **AS IS, with no warranty**, and the authors accept **no liability** for how it is used. Read the full [Disclaimer](#disclaimer) before you flash it.
-
 Professional dual-domain (BLE + WiFi) scanning system that detects specific devices by MAC address or OUI with audio feedback. BLE advertisements and 802.11 management frames (probe requests / beacons) are detected on the shared 2.4 GHz radio via time-sliced scanning.
 
 ## Flash from your browser
@@ -380,16 +378,7 @@ OUI-SPY Detector is part of the OUI-SPY firmware family:
 
 ## Disclaimer
 
-**Read this before you build, flash or use OUI-SPY Detector. By doing any of those you accept it.**
-
-- **Research and education only.** This is a tool for studying which wireless devices are around you. It is not a consumer safety product, a security system, or a law-enforcement or forensic tool.
-- **Legal use is your responsibility.** Laws covering the reception, recording and use of radio transmissions, and the tracking of people or their devices, vary by country, state and city, and they change. You alone are responsible for knowing and obeying every law that applies where you use it. If you are not sure it is legal where you are, do not use it.
-- **Never use it against people.** Do not use it to stalk, follow, track, locate, harass, intimidate or identify any person, or to find someone who does not want to be found.
-- **Passive only, your own gear only.** It is meant to listen, not to transmit at, jam, deauthenticate, connect to or interfere with anything. Only test devices and networks you own or are explicitly authorized to test.
-- **Detections are not proof.** Many devices randomize their MAC addresses, one vendor prefix (OUI) can cover many unrelated products, and signatures go out of date. A match does not mean a particular device, company, agency or person is present, and silence does not mean nothing is there. Expect false positives and missed detections. Never rely on it for safety, security, legal or evidentiary decisions.
-- **Treat what it records as personal data.** MAC addresses, device names, locations and timestamps can identify people and may be personal data under laws such as the GDPR and CCPA. Collect as little as you need, keep it secure, do not publish it, and delete it when you are done.
-- **Networked features carry risk.** The node mesh, MQTT and the home dashboard move detection data over radio and over your network. Set a fleet key, keep it private, and never expose the dashboard or your MQTT broker to the internet.
-- **No warranty, no liability.** The firmware, web flasher, dashboard and hardware designs are provided **AS IS, without warranty of any kind**, express or implied, including fitness for a particular purpose. In no event shall the authors, contributors or sellers be liable for any claim, damages, data loss, legal consequence or other liability arising from the use or misuse of this project.
+For research purposes only. Use at your own risk: you assume all responsibility for how you use it, and the authors accept no liability. Provided as is, with no warranty. Follow your local laws, and don't do anything illegal or stupid.
 
 ## License
 
