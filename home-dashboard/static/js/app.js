@@ -392,10 +392,43 @@ function renderLinks() {
 // GPS: a phone carrying a node feeds its position; every viewer sees the
 // marker move and a breadcrumb trail.
 // ------------------------------------------------------------------
+// Trail length slider: steps in seconds (0 = off). Per viewer, remembered
+// in this browser; longer windows are fetched from the stored history.
+const TRAIL_STEPS = [0, 300, 900, 1800, 3600, 10800, 21600, 43200, 86400, 604800];
+const TRAIL_NAMES = ["Off", "5 min", "15 min", "30 min", "1 h", "3 h", "6 h", "12 h", "24 h", "7 days"];
+S.trailSeconds = 1800;
+S.trailLoaded = 1800;
+try {
+    const v = localStorage.getItem("ouispy.trail");
+    if (v !== null && TRAIL_STEPS.includes(Number(v))) S.trailSeconds = Number(v);
+} catch (e) { /* storage blocked: default */ }
+function syncTrailSlider() {
+    const i = Math.max(0, TRAIL_STEPS.indexOf(S.trailSeconds));
+    $("trailRange").value = i;
+    $("trailLabel").textContent = TRAIL_NAMES[i];
+}
+async function loadTrails(seconds) {
+    const tr = await api(`/api/tracks?seconds=${Math.max(seconds, 60)}`);
+    S.trails = tr.tracks || {};
+    S.trailLoaded = tr.seconds || seconds;
+    for (const [k, v] of Object.entries(tr.live || {})) S.gpsLive[k] = v.ts;
+    renderTrails();
+}
+$("trailRange").addEventListener("input", () => {
+    S.trailSeconds = TRAIL_STEPS[Number($("trailRange").value)];
+    $("trailLabel").textContent = TRAIL_NAMES[Number($("trailRange").value)];
+    try { localStorage.setItem("ouispy.trail", String(S.trailSeconds)); } catch (e) { /* ignore */ }
+    renderTrails();
+});
+$("trailRange").addEventListener("change", () => {
+    if (S.trailSeconds > S.trailLoaded) loadTrails(S.trailSeconds);   // need older points
+});
+
 function renderTrails() {
     if (!S.trailLayer) S.trailLayer = L.layerGroup().addTo(map);
     S.trailLayer.clearLayers();
-    const cutoff = now() - 1800;
+    if (!S.trailSeconds) return;
+    const cutoff = now() - S.trailSeconds;
     for (const [nid, pts] of Object.entries(S.trails)) {
         const ll = pts.filter((p) => p[0] >= cutoff).map((p) => [p[1], p[2]]);
         if (ll.length < 2) continue;
@@ -405,7 +438,7 @@ function renderTrails() {
 function onGps(g) {
     S.gpsLive[g.node] = g.ts;
     (S.trails[g.node] = S.trails[g.node] || []).push([g.ts, g.lat, g.lon, g.acc]);
-    if (S.trails[g.node].length > 2000) S.trails[g.node].splice(0, 500);
+    if (S.trails[g.node].length > 20000) S.trails[g.node].splice(0, 5000);
     const n = nodeById(g.node);
     if (n) { n.lat = g.lat; n.lon = g.lon; }
     renderMap();
@@ -1521,11 +1554,8 @@ async function boot() {
     S.hourly = st.hourly || [];
     S.macAliases = st.mac_aliases || {};
     S.filterMeta = st.filter_meta;
-    try {
-        const tr = await api("/api/tracks");
-        S.trails = tr.tracks || {};
-        for (const [k, v] of Object.entries(tr.live || {})) S.gpsLive[k] = v.ts;
-    } catch (e) { /* older server */ }
+    syncTrailSlider();
+    try { await loadTrails(Math.max(S.trailSeconds, 1800)); } catch (e) { /* older server */ }
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     vendorOptions($("dPreset"));

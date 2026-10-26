@@ -226,7 +226,8 @@ Funnel. The reveal endpoint is POST-only and never cached.
 
 Off by default. Open a node and tap **Carry with this phone**: while the page
 stays open, the phone's GPS becomes that node's position. The marker moves
-live on every screen and leaves a 30-minute trail. **Stop carrying** ends it.
+live on every screen and leaves a trail. The **Trail** slider on the map
+sets how much is drawn (off, 5 min, up to 7 days, remembered per browser). **Stop carrying** ends it.
 Phones only share location with HTTPS pages, so open the dashboard through an
 `https://` address, e.g. Tailscale's `tailscale serve`.
 

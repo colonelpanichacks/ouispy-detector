@@ -47,6 +47,11 @@
         <div class="panel-head">
             <h3>Map</h3>
             <span class="help" id="mapHint">Drag markers to move nodes. Select a node, then "Place on map".</span>
+            <label class="trailctl" title="How much GPS trail to draw for carried nodes">
+                <span>Trail</span>
+                <input type="range" id="trailRange" min="0" max="9" step="1" value="3">
+                <b id="trailLabel">30 min</b>
+            </label>
         </div>
         <div id="map"></div>
         <div class="unplaced" id="unplaced"></div>

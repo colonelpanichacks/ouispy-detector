@@ -516,7 +516,8 @@ def api_node_gps_stop(nid):
 
 @app.route("/api/tracks")
 def api_tracks():
-    return jsonify({"tracks": store.tracks(time.time() - TRAIL_SECONDS),
+    secs = max(60, min(int(request.args.get("seconds", TRAIL_SECONDS)), 7 * 86400))
+    return jsonify({"tracks": store.tracks(time.time() - secs), "seconds": secs,
                     "live": {k: v for k, v in GPS_STATE.items() if time.time() - v["ts"] < 60}})
 
 
