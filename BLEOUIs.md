@@ -185,6 +185,26 @@ A4:CF:12
 
 <details>
 
+<summary><b>AXON (BLE)</b> <code>1 OUI</code></summary>
+
+- `00:25:DF`
+
+**Copy OUIs:**
+
+```
+00:25:DF
+```
+
+> **Category:** Body Camera / Law Enforcement
+
+> **Detection Range:** BLE range — field-validated, stable non-randomised MAC in advertisements
+
+> **Common Devices:** Axon Body 3/4, Fleet dash cam, Taser 7/10 — same IEEE block as the WiFi side; BT SIG company ID `0x034D` and service UUID `0xFC81` complete the signature (AXON preset installs all five)
+
+</details>
+
+<details>
+
 <summary><b>DJI</b> <code>8 OUIs</code></summary>
 
 - `0C:9A:E6`

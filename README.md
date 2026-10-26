@@ -44,6 +44,13 @@ Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data c
 - No external libraries required (raw MQTT over TCP)
 - Clean socket teardown: MQTT disconnect packet sent before STA is dropped, so the broker sees an orderly disconnect rather than a timed-out session
 
+### Node Mesh (ESP-NOW Long Range)
+- **Mesh-style node linking:** any number of OUI-SPY nodes form a flood mesh over ESP-NOW LR — ~1 km line-of-sight range, no access point, no pairing. Every node repeats what it hears: a detection only needs a path, not direct reach to home
+- **Two roles, same firmware:** each node is configured as **home** (aggregates the mesh and publishes to MQTT) or **remote** (uplink is the mesh; MQTT ignored). Any node can hold either role
+- **Remote fleet management from the home portal:** live node roster, **mute/unmute all remotes** (buzzer, optionally LED — instant and persisted), **push the current filter list to every remote** (chunked transfer with CRC32; remotes save and reboot into the new list), and **reboot all remotes**, with live ack counts
+- **Unified alerts:** mesh-originated detections beep/flash on every node, appear in device history with a `[mesh xxxx]` provenance tag, and publish through the home node's MQTT exactly like local detections
+- **Presence:** nodes announce every 30 s; joins/leaves are logged on serial and counted in the heartbeat line
+
 ### Detection System
 - **Dual-domain time-slicing:** The 2.4 GHz radio alternates between WiFi promiscuous sweeps (channels 11→1, 200 ms dwell, ~2.2 s) and BLE active scans (~2.2 s). Each domain runs only if at least one filter of that type is configured; with no filters at all the device idles.
 - **WiFi promiscuous detection:** Matches the source OUI of 802.11 management frames — probe requests (subtype 0x04) and beacons (subtype 0x08) — with per-(MAC, frame type) 30 s de-duplication.
@@ -186,6 +193,79 @@ GND              →    GND (Ground)
 {"mac":"aa:bb:cc:dd:ee:ff","alias":"my-device","rssi":-65,"type":"PROBE","match":"0025DF","desc":"AXON (WiFi)"}
 ```
 
+## Node Mesh (ESP-NOW LR)
+
+Link multiple OUI-SPY nodes so a detection heard by any node alerts everywhere and reports through one gateway.
+
+1. On each node, open the config portal and scroll to **Node Mesh (ESP-NOW Long Range)**.
+2. Enable the mesh, pick the role, and set the **same channel (1–13) on every node**.
+3. On the **home node** also fill in **MQTT** — it is the mesh's gateway to your broker/Home Assistant.
+4. Save. Every node now floods its detections; each relay extends the mesh one more hop.
+
+**Roles**
+
+- **Remote node:** detects normally (beeps, LED, history) and uplinks every detection over ESP-NOW LR instead of MQTT. Its MQTT settings are ignored while meshing.
+- **Home node:** does everything a remote does, *plus* every mesh detection it hears — its own or relayed — is published to MQTT with the same JSON payload, now carrying a `[mesh xxxx]` suffix in `desc` naming the origin node's ID.
+
+**How it works**
+
+- Transport is ESP-NOW at the proprietary **LR PHY rate** (both ends always run this firmware, so capability is guaranteed). Frames are vendor-specific action frames broadcast to all nodes on the mesh channel.
+- Flooding uses a 3-hop TTL and a 60 s (origin, seq) duplicate cache, so every packet is relayed at most once per node and loops die naturally.
+- The mesh window is the BLE phase: the radio parks on the mesh channel there, so RX/TX works alongside BLE scanning. During WiFi sweeps the mesh goes quiet by design (the sweep owns the radio); TX still lands on the mesh channel because the broadcast peer is pinned there, so nothing is lost.
+- A node with **no filters at all** but mesh enabled becomes a pure relay — drop one on a hill between two others and the mesh extends itself.
+
+**Managing the fleet from the home node**
+
+Open the config portal on the home node (it keeps the mesh up while the portal is open — its AP shares the mesh channel, so remotes in the field stay reachable). The **Mesh Management** panel shows the live roster and provides:
+
+| Action | Behavior on remotes |
+|---|---|
+| **Mute / Unmute All Remotes** | Buzzer (and LED, if checked) disabled instantly, persisted across reboots |
+| **Push Current Filters to Mesh** | Takes the filter list currently in the form, floods it (chunked, CRC32-verified); remotes write it to NVS and reboot into the new list (~3 s). Ack count shows confirmations |
+| **Reboot All Remotes** | Remotes ack and reboot; they rejoin in a few seconds |
+
+Command acks are direct (not relayed), so the ack count covers nodes in direct reach of the home — nodes further out still apply the command, they just can't report back. Filters pushed this way replace the remote's whole user-managed list; preset-only rows on the home are not pushed (remotes keep whatever presets they already carry — push the expanded rows you want installed).
+
+**Serial provisioning console**
+
+While the config portal is open, the USB serial accepts one-line provisioning commands — handy for headless fleet setup from a cable instead of a browser:
+
+```
+mesh 1 remote 6                          → enable mesh, role, channel (applies live)
+filter 0025DF 0 1 probe AXON body cam    → add filter: <oui> <ble> <wifi> <probe|beacon> [desc]
+clearfilters                             → wipe the staged list
+provisiondone                            → save everything + switch to scanning
+burnin                                   → same as provisiondone, then lock config
+                                         (boots straight to scanning forever;
+                                          BOOT-hold at power-on to unlock)
+```
+
+Responses are `OK ...` / `ERR ...` per line. Filters staged this way persist like any saved config.
+
+**Serial output**
+
+```
+[MESH] ESP-NOW LR up: REMOTE node, channel 6, id 7A8B1C
+[MESH] node 3F2E91 joined (home)
+[MESH] audio changed by home (buzzer MUTED, LED on)
+[MESH] 12 filters pushed by home — rebooting to apply
+[MESH] link: 2 node(s) in roster
+[HEARTBEAT] phase=1 ch=6 dev=12 mesh=2
+```
+
+**Link indicator**
+
+With the mesh enabled, the onboard orange LED is a live link heartbeat: **solid ON while at least one other node is in the roster, OFF when the node is alone**. Detection blinks override it for the duration of the beep pattern, then the steady state comes back. The LED toggle in Audio & Visual settings governs it (mute everything = dark node), and in config mode the serial log adds a `[MESH] link: N node(s)` line every 10 s.
+
+**Notes & limits**
+
+- Requires ESP32-S3 (LR mode is not available on the original ESP32).
+- Mesh identity is the node's current WiFi MAC, which is randomized per boot unless MQTT is enabled — after a reboot the roster shows the node under a new ID. Detections are unaffected.
+- Fire-and-forget transport: a detection burst may drop an occasional mesh packet; the 3 s / 30 s re-alert timers re-transmit on the next cycle anyway.
+- In config mode only the **home** node keeps the mesh up (its portal AP shares the mesh channel); a remote in config mode is unreachable until it returns to scanning.
+- **Trust model:** mesh packets are unencrypted and commands are accepted from any node on the mesh — anyone within range running this firmware can mute or re-filter your remotes. Treat the mesh channel as a shared secret and stay on the latest firmware.
+- **Upgrade the fleet together:** the management protocol is v2; nodes running the first mesh build (v1) and current nodes can't interoperate. Flash all nodes in one session.
+
 ## Operation
 
 ### Startup Sequence
@@ -222,8 +302,12 @@ Configured Filters:
 - D42DC5 (PROBE): I-PRO body cam (WiFi probe)
 
 >> Match found! <<
-{"mac":"d4:2d:c5:ab:cd:ef","alias":"","rssi":-65,"type":"PROBE","match":"D42DC5","desc":"I-PRO body cam (WiFi probe)"}
+{"mac":"d4:2d:c5:ab:cd:ef","alias":"","rssi":-65,"type":"PROBE","match":"D42DC5","desc":"I-PRO body cam (WiFi probe)","node":"AD5484","dom":"wifi"}
 ```
+
+`node` is the stable ID of the node whose radio made the detection, and `dom` is
+`ble` or `wifi`. While scanning (and in config mode with the mesh on) the node also prints a `TLM {json}`
+telemetry line every 5 seconds (identity, mesh counters and the live roster).
 
 ## Troubleshooting
 

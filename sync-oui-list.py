@@ -37,12 +37,18 @@ def convert_ouis_md_to_html():
     in_code_block = False
     code_lines = []
     oui_entries = []  # Collect OUI list items for inline <code> display
+    current_vendor = ""  # <b>Name</b> from the card summary, for row labels
 
     def flush_oui_entries():
         nonlocal oui_entries
         if oui_entries:
-            codes = " ".join(f"<code>{oui}</code>" for oui in oui_entries)
-            output.append(f"<div class=\"oui-entries\">{codes}</div>")
+            # Chips are individually toggleable: clicking deselects (greys)
+            # an OUI so the Add button skips it.
+            codes = " ".join(
+                f'<code data-oui="{oui}" onclick="toggleOuiChip(this)">{oui}</code>'
+                for oui in oui_entries
+            )
+            output.append(f'<div class="oui-entries">{codes}</div>')
             oui_entries = []
 
     while i < len(lines):
@@ -59,12 +65,14 @@ def convert_ouis_md_to_html():
                 in_code_block = False
                 # Flush any collected OUI entries before the button
                 flush_oui_entries()
-                # Use \\n so it appears as literal \n in the C++ raw string,
-                # which JavaScript interprets as a newline character
-                oui_data = ",".join(code_lines)
+                # One click adds the SELECTED chips of this card only —
+                # addFilterCard reads the per-chip toggle state.
+                label = (current_vendor or "OUI Database").replace("'", "")
+                safe_label = label.replace('"', '')
                 output.append(
-                    '<button type="button" class="oui-add-btn" '
-                    "onclick=\"appendOUIs('" + oui_data + "')\">+ Add to filter list</button>"
+                    '<button type="button" class="oui-add-btn" data-ble="true" '
+                    f'data-wifi="true" data-label="{safe_label}" '
+                    'onclick="addFilterCard(this)">+ Add selected to filter list</button>'
                 )
                 i += 1
                 continue
@@ -75,7 +83,7 @@ def convert_ouis_md_to_html():
             i += 1
             continue
 
-        # Skip "**Copy OUIs:**" label 
+        # Skip "**Copy OUIs:**" label
         if stripped == "**Copy OUIs:**":
             i += 1
             continue
@@ -93,6 +101,8 @@ def convert_ouis_md_to_html():
 
         if stripped.startswith("<summary>"):
             flush_oui_entries()
+            m = re.search(r"<b>([^<]+)</b>", stripped)
+            current_vendor = m.group(1).strip() if m else ""
             output.append(stripped)
             i += 1
             continue

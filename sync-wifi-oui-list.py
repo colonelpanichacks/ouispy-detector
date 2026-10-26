@@ -74,7 +74,18 @@ def convert_wifi_ouis_md_to_html():
         entries = card["entries"]
         rep_oui = card["oui"] if card["oui"] else (entries[0] if entries else "")
         preset_key = VENDOR_PRESET_KEYS.get(vendor, slugify(vendor))
-        codes = " ".join(f"<code>{o}</code>" for o in entries) if entries else ""
+        if preset_key in VALID_PRESETS:
+            # Preset cards: chips are informational (the preset installs a
+            # fixed bundle), so they stay plain.
+            codes = " ".join(f"<code>{o}</code>" for o in entries) if entries else ""
+        else:
+            # Plain cards: every chip is individually deselectable — greyed
+            # chips are skipped by addFilterCard.
+            safe = [o.replace('"', '') for o in entries]
+            codes = " ".join(
+                f'<code data-oui="{o}" onclick="toggleOuiChip(this)">{o}</code>'
+                for o in safe
+            ) if entries else ""
         output.append("<details>")
         output.append(
             f'<summary><b>{vendor}</b> '
@@ -87,18 +98,16 @@ def convert_wifi_ouis_md_to_html():
             # bundle (FT_WIFI_PROBE/FT_WIFI_BEACON via /api/presets/apply).
             output.append(
                 '<button type="button" class="oui-add-btn" '
-                f"onclick=\"addVendor('{preset_key}','{vendor}','{rep_oui}')\">+ Add WiFi signatures</button>"
+                f"onclick=\"addVendor('{preset_key}','{vendor}','{rep_oui}')\">+ Add all signatures</button>"
             )
         else:
             # No preset for this vendor: add plain WiFi-domain filter rows
             # (ble=false, wifi=true) straight into the filter list.
-            row_calls = ";".join(
-                f"addFilterRow('{o.replace(':', '').upper()}',false,true,'{vendor}')"
-                for o in entries
-            )
+            safe_label = vendor.replace("'", "").replace('"', '')
             output.append(
-                '<button type="button" class="oui-add-btn" '
-                f"onclick=\"{row_calls}\">+ Add to filter list</button>"
+                '<button type="button" class="oui-add-btn" data-ble="false" '
+                f'data-wifi="true" data-label="{safe_label}" '
+                'onclick="addFilterCard(this)">+ Add selected to filter list</button>'
             )
         output.extend(card["meta"])
         output.extend(card["note"])
