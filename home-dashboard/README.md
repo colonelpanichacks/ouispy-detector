@@ -250,9 +250,11 @@ feature, pointed at port 5077.
   Socket.IO only accepts same-origin connections.
 - Leaflet and the Socket.IO client are vendored in `static/vendor/`, so the page
   loads no third-party scripts.
-- Map tiles are the one thing that goes online. By default they come from
-  OpenStreetMap, which tells the tile server roughly where you are looking. To
-  keep that private, choose a local tile server or the offline grid in Settings.
+- Map tiles are the one thing that goes online. Pick a layer from the picker on
+  the map (or in Settings): 15 free layers that need no account, in dark,
+  satellite (Esri, USGS) and street/terrain styles, each credited on the map.
+  Any online layer tells its provider roughly where you are looking. To keep
+  that private, choose a local tile server or the offline grid.
 
 ## Disclaimer
 
