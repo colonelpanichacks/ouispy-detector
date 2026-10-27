@@ -450,4 +450,4 @@ For research purposes only. Use at your own risk: you assume all responsibility 
 
 ## License
 
-Open source project. Modifications welcome.
+MIT, see [LICENSE](LICENSE).
