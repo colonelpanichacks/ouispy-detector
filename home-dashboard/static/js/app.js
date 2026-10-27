@@ -268,6 +268,20 @@ const MAP_MAX_ZOOM = 22;
 const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
+// Map toolbar on the map itself (top right): layer, lines, traffic, full
+// screen. In the panel header they got squeezed and clipped, and on phones
+// the labels collapsed to bare icons.
+(function () {
+    const tools = L.control({ position: "topright" });
+    tools.onAdd = () => {
+        const div = L.DomUtil.create("div", "map-tools");
+        ["mapLayer", "mapLinks", "mapTraffic", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        return div;
+    };
+    tools.addTo(map);
+})();
 // Free base maps that need no API key. Each keeps its provider's
 // attribution. `dark` runs the light OSM tiles through the CSS invert filter;
 // `labels` lays a transparent place-name layer over imagery.
@@ -550,7 +564,7 @@ function renderLinks() {
     if (b) {
         const mode = linkMode();
         b.dataset.mode = mode;
-        b.querySelector("span").textContent = mode === "mesh" ? "Mesh" : mode === "home" ? "Home" : "Off";
+        b.querySelector("span").textContent = mode === "mesh" ? "Lines: mesh" : mode === "home" ? "Lines: home" : "Lines: off";
         b.title = mode === "mesh" ? "Lines: every link nodes report hearing first-hand (tap: off)"
             : mode === "home" ? "Lines: home to each remote (tap: full mesh)" : "Lines: off (tap: home links)";
     }
@@ -610,6 +624,7 @@ $("mapTraffic").onclick = async () => {
 };
 function renderTrafficBtn() {
     $("mapTraffic").classList.toggle("on", trafficOn());
+    $("mapTraffic").querySelector("span").textContent = trafficOn() ? "Traffic: on" : "Traffic: off";
     $("mapTraffic").setAttribute("aria-pressed", trafficOn() ? "true" : "false");
 }
 

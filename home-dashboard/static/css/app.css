@@ -630,6 +630,13 @@ input[type="checkbox"]:checked::after {
 .map-layer { width: auto; max-width: 210px; padding: 3px 8px; font-size: 11px; margin-left: 12px; flex: none; }
 .panel-head .map-layer + .trailctl { margin-left: 10px; }
 
+/* Map toolbar: a Leaflet control in the map's top-right corner. */
+.map-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: calc(100vw - 80px); }
+.map-tools > * { margin: 0 !important; background: rgba(6,8,11,0.86) !important; backdrop-filter: blur(4px); }
+.map-tools .map-layer { max-width: 190px; height: 30px; }
+.map-tools .icon-btn { color: var(--soft); border-color: var(--line-strong); }
+.panel-head .help { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+
 /* Map lines toggle (home / mesh / off) */
 .map-links-btn { flex: none; margin-left: 10px; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;
     font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
@@ -700,7 +707,7 @@ body.map-maxed .toasts { z-index: 1700; }
     .toast:nth-child(n+4) { display: none; }
     .map-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
     .map-layer { max-width: 160px; margin-left: auto; }
-    .map-links-btn span, .map-traffic-btn span { display: none; }
+    .map-tools .map-layer { max-width: 130px; }
     .map-panel.map-max { height: 100dvh; }
     .fw-node { grid-template-columns: auto 1fr; }
     .fw-node .fw-cur, .fw-node .fw-bar, .fw-node .fw-st { grid-column: 2; }
