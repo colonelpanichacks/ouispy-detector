@@ -1168,6 +1168,23 @@ S.firmware = null;
 S.fwSel = new Set();
 S.fwRun = null;          // {queue: [ids], current, results: {id: text}}
 function fwBuildOf(n) { return (n.cfg && n.cfg.fw) || ""; }
+// A node's update as the home reports it (fleet "ota"): live while the home
+// is still sending (reports every 2 s), otherwise the last result.
+function otaLive(n) { const o = n && n.ota; return o && ["offered", "sending"].includes(o.state) && now() - o.ts < 20 ? o : null; }
+function otaText(n) {
+    const o = n && n.ota;
+    if (!o) return "";
+    if (otaLive(n)) return `${o.state === "offered" ? "starting" : "updating"} ${o.pct || 0}%${o.kbps ? " | " + o.kbps + " kbps" : ""}`;
+    if (o.state === "done") return `updated ${ago(o.finished || o.ts)}`;
+    if (o.state === "failed") return `failed ${ago(o.finished || o.ts)}: ${o.err || ""}`;
+    return `stalled at ${o.pct || 0}% (${ago(o.ts)})`;
+}
+// The node already runs the uploaded build? Nodes report the first 15
+// characters of their build stamp ("Oct 27 2026 18:").
+function fwCurrent(n) {
+    const f = fwBuildOf(n), m = S.firmware;
+    return !!(f && m && m.build && f.length >= 15 && m.build.startsWith(f));
+}
 function renderFirmware() {
     const m = S.firmware;
     $("fwInfo").innerHTML = m
@@ -1179,14 +1196,17 @@ function renderFirmware() {
     $("fwNodes").innerHTML = nodes.map((n) => {
         const j = job(n.id);
         const res = S.fwRun && S.fwRun.results[n.id];
-        const pct = j && j.progress != null ? j.progress : null;
-        const stage = j ? (j.op === "fw_stage" ? "staging on home" : j.ota && j.ota.state ? j.ota.state : j.state) : "";
+        const live = otaLive(n);
+        const pct = j && j.progress != null ? j.progress : live ? live.pct || 0 : null;
+        const stage = j ? (j.op === "fw_stage" ? "staging on home" : j.ota && j.ota.state ? j.ota.state : j.state)
+            : live ? otaText(n) : "";
+        const last = !j && !live && !res && n.ota ? otaText(n) : "";
         return `<label class="fw-node ${n.online ? "" : "off"}">
             <input type="checkbox" data-id="${esc(n.id)}" ${S.fwSel.has(n.id) ? "checked" : ""} ${n.online && !S.fwRun ? "" : "disabled"}>
             <span class="fw-name">${esc(n.alias || n.id)}${n.is_home ? " <i>home</i>" : ""}</span>
-            <span class="fw-cur" title="Firmware build it runs now">${esc(fwBuildOf(n) || "build unknown")}</span>
+            <span class="fw-cur" title="Firmware build it runs now">${esc(fwBuildOf(n) || "build unknown")}${fwCurrent(n) ? ` <b class="fw-ok">current</b>` : S.firmware && fwBuildOf(n) ? ` <b class="fw-old">older</b>` : ""}</span>
             ${pct != null || res ? `<span class="fw-bar"><i style="width:${pct != null ? pct : 100}%"></i></span>
-            <span class="fw-st">${esc(res || `${stage}${pct != null ? " " + pct + "%" : ""}${j && j.ota && j.ota.kbps ? " | " + j.ota.kbps + " kbps" : ""}`)}</span>` : ""}
+            <span class="fw-st">${esc(res || (j ? `${stage}${pct != null ? " " + pct + "%" : ""}${j.ota && j.ota.kbps ? " | " + j.ota.kbps + " kbps" : ""}` : stage))}</span>` : last ? `<span class="fw-st fw-last">${esc(last)}</span>` : ""}
         </label>`;
     }).join("");
     $("fwNodes").querySelectorAll("input[type=checkbox]").forEach((c) => c.onchange = () => {
@@ -1308,6 +1328,7 @@ function cfgCells(n) {
         ["Heap", c.heap ? `${Math.round(c.heap / 1024)}K` : "-"],
         ["Delivered", c.dsent != null ? `${c.dacked}/${c.dsent}${c.dexp ? ` (${c.dexp} lost)` : ""}` : "-"],
         ["Channel", c.ch ?? "-", homeNode() && homeNode().cfg && c.ch !== homeNode().cfg.ch ? "bad" : ""],
+        ["Update", otaText(n) || "-", otaLive(n) ? "warn" : n.ota && n.ota.state === "failed" ? "bad" : ""],
     ];
 }
 function renderRemote() {
@@ -1610,7 +1631,7 @@ function renderFleetCtl() {
         const c = n.cfg;
         const sync = syncState(n);
         if (!c) {
-            return `<tr data-id="${esc(n.id)}"><td class="v">${esc(n.alias || n.id)}</td><td colspan="11">${n.online ? "not read yet" : "offline"}</td></tr>`;
+            return `<tr data-id="${esc(n.id)}"><td class="v">${esc(n.alias || n.id)}</td><td colspan="12">${n.online ? "not read yet" : "offline"}</td></tr>`;
         }
         const yn = (v, goodWhen = 1) => `<td class="${v === goodWhen ? "on" : "off"}">${v ? "on" : "off"}</td>`;
         return `<tr data-id="${esc(n.id)}"><td class="v">${esc(n.alias || n.id)}${n.is_home ? ` <span class="cfg-age">home</span>` : ""}</td>
@@ -1618,7 +1639,8 @@ function renderFleetCtl() {
             ${yn(c.buzzer)}${yn(c.led)}<td class="key-${keyState(n).cls}" title="${esc(keyState(n).tip || "")}">${keyState(n).txt}</td>
             <td>${c.filters}${sync ? `<span class="sync ${sync}">${sync === "ok" ? "SAME" : "DIFFERS"}</span>` : ""}</td>
             <td>${uptime(c.up)}</td><td>${c.heap ? Math.round(c.heap / 1024) + "K" : ""}</td>
-            <td>${c.dsent != null ? `${c.dacked}/${c.dsent}` : ""}</td><td>${ago(n.cfg_ts)}</td></tr>`;
+            <td>${c.dsent != null ? `${c.dacked}/${c.dsent}` : ""}</td>
+            <td class="ota-cell">${otaLive(n) ? `<span class="fw-bar mini"><i style="width:${otaLive(n).pct || 0}%"></i></span> ${otaLive(n).pct || 0}%` : esc(otaText(n) || "-")}</td><td>${ago(n.cfg_ts)}</td></tr>`;
     }).join("");
     $("fBody").querySelectorAll("tr[data-id]").forEach((tr) => tr.onclick = () => selectNode(tr.dataset.id, true));
     const ch = $("fChan");

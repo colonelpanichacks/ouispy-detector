@@ -64,6 +64,10 @@ class Fleet:
         for nid, m in meta.items():
             self.nodes[nid] = self._blank(nid, m.get("role"))
             self.nodes[nid]["last_seen"] = m.get("last_seen") or 0
+        # Last firmware update per node (the live one comes from OTA lines).
+        for nid, rec in (store.get_setting("ota_last") or {}).items():
+            if nid in self.nodes:
+                self.nodes[nid]["ota"] = rec
 
     @staticmethod
     def _blank(nid, role=None):
@@ -84,6 +88,9 @@ class Fleet:
         self.emit("console", {"ts": time.time(), "source": source, "line": line})
         if self.on_line and line.split(" ", 1)[0] in ("OK", "ERR", "CMD", "ACK", "RST", "RFL", "OTA"):
             self.on_line(line)
+        if line.startswith("OTA "):
+            self._ota_line(line)
+            return
 
         if line.startswith(("RST ", "RFL ")):
             try:
@@ -256,6 +263,35 @@ class Fleet:
         if nid != self.home_id:
             # A status reply is a frame from that node: it is alive.
             self._node_seen(nid, cfg.get("role"), 0, None, None, now, from_det=True)
+        self._broadcast()
+
+    def _ota_line(self, line):
+        """OTA {node, state, pct, ...} from the home: track each node's update,
+        however it was started (dashboard, console, another browser), and
+        keep the last result across restarts."""
+        try:
+            o = json.loads(line[4:])
+        except ValueError:
+            return
+        nid = str(o.get("node", "")).upper()
+        if len(nid) != 6:
+            return
+        now = time.time()
+        with self.lock:
+            st = self.nodes.get(nid)
+            if st is None:
+                return
+            prev = st.get("ota") or {}
+            started = prev.get("started") if prev.get("state") in ("offered", "sending") else now
+            rec = {k: o.get(k) for k in ("state", "pct", "bytes", "size", "kbps", "direct", "proto", "err")}
+            rec.update(ts=now, started=started or now)
+            if rec["state"] in ("done", "failed"):
+                rec["finished"] = now
+            st["ota"] = rec
+        if rec["state"] in ("done", "failed"):
+            last = self.store.get_setting("ota_last") or {}
+            last[nid] = rec
+            self.store.set_setting("ota_last", last)
         self._broadcast()
 
     def _node_filters(self, obj):

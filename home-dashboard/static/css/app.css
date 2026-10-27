@@ -680,6 +680,11 @@ body.map-maxed .toasts { z-index: 1700; }
 .fw-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--sky)); box-shadow: 0 0 10px rgba(78,205,196,0.6); transition: width .4s; }
 .fw-st { font-family: var(--mono); font-size: 11px; color: var(--soft); white-space: nowrap; }
 .fw-note { margin: 0; }
+.fw-ok { font-weight: 600; color: var(--accent); font-size: 10px; letter-spacing: 1px; }
+.fw-old { font-weight: 600; color: var(--amber); font-size: 10px; letter-spacing: 1px; }
+.fw-last { color: var(--muted); grid-column: 4 / span 2; }
+.fw-bar.mini { display: inline-block; width: 60px; vertical-align: middle; }
+.ota-cell { font-family: var(--mono); font-size: 11px; white-space: nowrap; }
 
 /* ---------- phones and touchscreens ----------
    Last in the file on purpose: these override the base rules above. */
