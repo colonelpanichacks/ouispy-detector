@@ -1530,7 +1530,10 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
 #define STATUS_FMT 1
 #define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
 #define STATUS_LEN 56        // + u8 keyFingerprint[4]
-#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5)   // + u8 count, up to 8 neighbors x 5 bytes
+#define ALIAS_MAX 32
+// + u8 count, up to 8 neighbors x 5 bytes, then u8 alias length + alias
+#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX)
+static String nodeAlias();
 static const char FW_BUILD[] = __DATE__ " " __TIME__;
 
 // Key fingerprint: SHA-256("OUISPY-KEY-FP" | fleet key)[0:4], all zeros
@@ -1622,7 +1625,32 @@ static uint8_t buildStatus(uint8_t* d) {
     uint8_t cnt = meshCfg.enabled ? meshNeighbors(d + n + 1, 8) : 0;
     d[n] = cnt;
     n += 1 + cnt * 5;
+    // Then the node's alias (set by the web flasher): u8 length, ASCII.
+    String a = nodeAlias();
+    uint8_t al = (uint8_t)min((unsigned)a.length(), (unsigned)ALIAS_MAX);
+    d[n++] = al;
+    memcpy(d + n, a.c_str(), al);
+    n += al;
     return n;
+}
+
+// The name this node goes by on the dashboard, stored on the node itself so
+// it travels with it (the web flasher sets it while provisioning).
+static String nodeAlias() {
+    Preferences p;
+    p.begin("ouispy", true);
+    String a = p.getString("alias", "");
+    p.end();
+    return a;
+}
+
+static bool aliasValid(const String& a) {
+    if (a.length() > ALIAS_MAX) return false;
+    for (size_t i = 0; i < a.length(); i++) {
+        char c = a[i];
+        if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') return false;
+    }
+    return true;
 }
 
 static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
@@ -1653,16 +1681,28 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
         }
         snprintf(nbr + w, sizeof(nbr) - w, "]");
     }
+    // The node's alias, after the neighbors: "alias":"North Gate"
+    String aliasJson;
+    if (len > STATUS_LEN && d[STATUS_LEN] <= 8) {
+        uint16_t at = STATUS_LEN + 1 + d[STATUS_LEN] * 5;
+        if (at < len && d[at] <= ALIAS_MAX && at + 1 + d[at] <= len) {
+            char tmp[ALIAS_MAX + 1];
+            memcpy(tmp, d + at + 1, d[at]);
+            tmp[d[at]] = '\0';
+            aliasJson = ",\"alias\":\"" + jsonEsc(String(tmp)) + "\"";
+        }
+    }
     Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
                   "\"buzzer\":%d,\"led\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
                   "\"peers\":%u,\"lrssi\":%d,\"filters\":%u,\"fcrc\":\"%08lX\",\"up\":%lu,"
-                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s%s}\n",
+                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s%s%s}\n",
                   id, d[1] ? "home" : "remote", d[2] ? "scan" : "config", d[3],
                   (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
                   (f & 16) ? 1 : 0, (f & 32) ? 1 : 0, d[5], (int)(int8_t)d[6],
                   get16(d + 8), (unsigned long)get32(d + 10), (unsigned long)get32(d + 14),
                   (unsigned long)get32(d + 18), get16(d + 22), (unsigned long)get32(d + 24),
-                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw, kfp, nbr);
+                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw, kfp, nbr,
+                  aliasJson.c_str());
 }
 
 static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len) {
@@ -1869,6 +1909,17 @@ static bool remoteConsoleCommand(const String& line) {
         Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
         return true;
     }
+    if (verb == "nodealias") {      // nodealias <name> | nodealias - (clear)
+        String a = rest == "-" ? String("") : rest;
+        if (!aliasValid(a)) { Serial.println("ERR nodealias: up to 32 plain ASCII characters, no quotes or backslashes"); return true; }
+        Preferences p;
+        p.begin("ouispy", false);
+        p.putString("alias", a);
+        p.end();
+        Serial.printf("OK nodealias %s\n", a.length() ? a.c_str() : "(cleared)");
+        Serial.flush();
+        return true;
+    }
     if (verb == "reboot") { localReboot("reboot"); return true; }
     if (verb == "ident") {          // local identify: ident [secs]
         int secs = arg[0].length() ? arg[0].toInt() : 10;
@@ -1887,6 +1938,9 @@ static bool remoteConsoleCommand(const String& line) {
             sendMgmt("rstatus", t, all, MESH_CMD_STATUS, nullptr, 0);
         } else if (verb == "rfilters") {
             sendMgmt("rfilters", t, all, MESH_CMD_GETFILTERS, nullptr, 0);
+            // The report is multi-chunk and trails the request by up to ~7 s:
+            // stay on the mesh channel to catch it instead of sweeping.
+            meshHoldRadio(15000);
         } else if (verb == "rreboot") {
             sendMgmt("rreboot", t, all, MESH_CMD_REBOOT, nullptr, 0);
         } else if (verb == "raudio") {

@@ -66,6 +66,7 @@ extern bool isSerialConnected();
 #define MESH_T_DETACK   7    // 6 is the esp-lr-mesh library's DATA_TO
 #define MESH_T_STATUS   8
 #define MESH_T_OTA      9    // firmware update session (mesh_ota.cpp)
+#define MESH_T_NACK     10   // chunks a command transfer is missing (receiver -> sender)
 #define MESH_SEAL_NONCE 12
 #define MESH_SEAL_TAG   8
 #define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
@@ -81,6 +82,9 @@ static const uint8_t kSealSizes[] = { 64, 128, 192, 250 };   // padded frame siz
 #define MESH_CMD_MIN    (MESH_HDR_LEN + 3 + 1 + 2 + 2 + 1 + 4)
 #define MESH_ACK_LEN    (MESH_HDR_LEN + 3 + 1 + 2 + 1 + 1)
 #define MESH_BYE_LEN    (MESH_HDR_LEN + 3 + 1)
+#define MESH_NACK_LEN   (MESH_HDR_LEN + 3 + 3 + 2 + 4)   // requester, sender, cmdId, missing mask
+#define MESH_NACK_QUIET_MS 1200   // transfer silent this long with holes: ask for them
+#define MESH_NACK_TRIES    6
 #define MESH_CMD_CHUNK  180
 #define MESH_STAGE_MAX  4096
 #define MESH_STAGE_CHUNKS ((MESH_STAGE_MAX + MESH_CMD_CHUNK - 1) / MESH_CMD_CHUNK)   // 23
@@ -228,6 +232,13 @@ static uint16_t outLen = 0, outOff = 0, outCmdId = 0;
 static uint8_t  outCmd = 0;
 static uint32_t outCrc = 0;
 static bool     outActive = false;
+// Selective repeat: a receiver missing chunks after the rounds names them in
+// a NACK, and the sender (which still holds outBuf) sends just those.
+// Broadcast frames have no link-layer retry and a burst loses random chunks
+// (BLE coexistence, a busy loop pass), so rounds alone often never filled
+// every gap of a big transfer (a 33-filter report is 8 chunks).
+static uint32_t outResendMask = 0;
+static uint32_t outDoneAt = 0;          // last round finished (NACKs honored for 30 s)
 
 // Command repeat rounds. Every node time-slices its radio (WiFi sweep, BLE
 // scan, mesh window), so a command sent once only lands if the receiver is
@@ -323,7 +334,7 @@ void meshStats(uint32_t& rxAll, uint32_t& rxQueued, uint32_t& rxDup,
 static bool meshRelaysPending();
 bool meshUrgent() {
     if (!meshStarted) return false;
-    if (txCount > 0 || outActive || outRepeatLeft || meshRelaysPending()) return true;
+    if (txCount > 0 || outActive || outRepeatLeft || outResendMask || meshRelaysPending()) return true;
     if ((int32_t)(listenUntil - millis()) > 0) return true;
     uint32_t now = millis();
     for (int i = 0; i < MESH_DET_PENDING; i++) {
@@ -746,6 +757,7 @@ static bool meshTxPush(const uint8_t* pkt, uint8_t len) {
 // Feed the next chunks of the outgoing command into the TX queue, leaving
 // MESH_TXQ_RESERVE slots for announces, acks and relays. Chunk k carries
 // bytes [180k, 180k+180); the final chunk carries the CRC of the payload.
+static uint16_t meshPushChunk(uint16_t off);
 static void meshPumpCommand() {
     if (!outActive && outRepeatLeft && (int32_t)(millis() - outRepeatAt) >= 0) {
         outOff = 0;            // next round: the whole transfer again
@@ -753,29 +765,75 @@ static void meshPumpCommand() {
         outRepeatLeft--;
     }
     while (outActive && txCount < MESH_TXQ_SIZE - MESH_TXQ_RESERVE) {
-        uint16_t chunkLen = min((uint16_t)MESH_CMD_CHUNK, (uint16_t)(outLen - outOff));
+        uint16_t chunkLen = meshPushChunk(outOff);
         bool more = (outOff + chunkLen) < outLen;
-        uint8_t pkt[MESH_PKT_MAX];
-        uint8_t n = meshBuildHeader(pkt, MESH_T_COMMAND, MESH_TTL);
-        n += meshBuildBodyId(pkt + n);
-        pkt[n++] = outCmd;
-        pkt[n++] = (uint8_t)(outCmdId & 0xFF);
-        pkt[n++] = (uint8_t)(outCmdId >> 8);
-        pkt[n++] = (uint8_t)(outOff & 0xFF);
-        pkt[n++] = (uint8_t)(outOff >> 8);
-        pkt[n++] = more ? 1 : 0;
-        uint32_t crc = more ? 0 : outCrc;
-        memcpy(pkt + n, &crc, 4); n += 4;
-        if (chunkLen > 0) { memcpy(pkt + n, outBuf + outOff, chunkLen); n += chunkLen; }
-        meshTxPush(pkt, n);
         outOff += chunkLen;
         if (!more) {
             outActive = false;
             if (outRepeatLeft) {
                 outRepeatAt = millis() + kCmdRoundGapMs[min((int)outRoundIdx, 6)] + random(0, 80);
                 outRoundIdx++;
+            } else {
+                outDoneAt = millis();
             }
         }
+    }
+    // Rounds done: resend only the chunks a receiver said it is missing.
+    while (!outActive && !outRepeatLeft && outResendMask &&
+           txCount < MESH_TXQ_SIZE - MESH_TXQ_RESERVE) {
+        uint8_t k = (uint8_t)__builtin_ctz(outResendMask);
+        outResendMask &= ~(1UL << k);
+        uint32_t off = (uint32_t)k * MESH_CMD_CHUNK;
+        if (off < outLen) meshPushChunk((uint16_t)off);
+    }
+}
+
+// Chunk at `off` of the outgoing transfer into the TX queue; returns its length.
+static uint16_t meshPushChunk(uint16_t off) {
+    uint16_t chunkLen = min((uint16_t)MESH_CMD_CHUNK, (uint16_t)(outLen - off));
+    bool more = (off + chunkLen) < outLen;
+    uint8_t pkt[MESH_PKT_MAX];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_COMMAND, MESH_TTL);
+    n += meshBuildBodyId(pkt + n);
+    pkt[n++] = outCmd;
+    pkt[n++] = (uint8_t)(outCmdId & 0xFF);
+    pkt[n++] = (uint8_t)(outCmdId >> 8);
+    pkt[n++] = (uint8_t)(off & 0xFF);
+    pkt[n++] = (uint8_t)(off >> 8);
+    pkt[n++] = more ? 1 : 0;
+    uint32_t crc = more ? 0 : outCrc;
+    memcpy(pkt + n, &crc, 4); n += 4;
+    if (chunkLen > 0) { memcpy(pkt + n, outBuf + off, chunkLen); n += chunkLen; }
+    meshTxPush(pkt, n);
+    return chunkLen;
+}
+
+// Receiver side: ask `sender` for the chunks of transfer `cmdId` in `mask`.
+static void meshSendNack(const uint8_t* sender, uint16_t cmdId, uint32_t mask) {
+    uint8_t pkt[MESH_NACK_LEN];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_NACK, MESH_TTL);
+    n += meshBuildBodyId(pkt + n);
+    memcpy(pkt + n, sender, 3); n += 3;
+    pkt[n++] = (uint8_t)(cmdId & 0xFF);
+    pkt[n++] = (uint8_t)(cmdId >> 8);
+    memcpy(pkt + n, &mask, 4); n += 4;
+    meshTxPush(pkt, n);
+}
+
+// Sender side: a NACK for our last transfer.
+static void meshOnNack(const uint8_t* body) {
+    uint16_t id = body[6] | (body[7] << 8);
+    uint32_t mask;
+    memcpy(&mask, body + 8, 4);
+    if (id != outCmdId || outLen == 0 || outActive || outRepeatLeft ||
+        (int32_t)(millis() - outDoneAt) > 30000) return;
+    uint16_t chunks = (outLen + MESH_CMD_CHUNK - 1) / MESH_CMD_CHUNK;
+    if (chunks < 32) mask &= (1UL << chunks) - 1;
+    if (!mask) return;
+    outResendMask |= mask;
+    meshHoldRadio(3000);
+    if (isSerialConnected()) {
+        Serial.printf("[MESH] resending chunks %08lX of transfer %u on request\n", (unsigned long)mask, id);
     }
 }
 
@@ -1053,8 +1111,12 @@ bool meshQueueCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
     outOff = 0;
     outCmdId = cmdId;
     uint16_t chunks = (len + MESH_CMD_CHUNK - 1) / MESH_CMD_CHUNK;
-    outRepeatLeft = (chunks <= 2) ? 7 : (chunks <= 6) ? 3 : 1;   // 8 / 4 / 2 rounds
+    // 8 / 4 / 3 rounds. The receiver keeps every chunk it got across rounds,
+    // so a big transfer (a 30+ filter report is ~10 chunks) needs a third
+    // pass less to fill gaps than to survive a weak link at all.
+    outRepeatLeft = (chunks <= 2) ? 7 : (chunks <= 6) ? 3 : 2;
     outRoundIdx = 0;
+    outResendMask = 0;
     meshHoldRadio(8000);   // rounds take ~4 s; replies trail them by a few more
     outCrc = crc32_le(0, outBuf, outLen);
     outActive = true;
@@ -1258,6 +1320,16 @@ static void meshHandleCommand(const uint8_t* pkt, uint8_t pktLen) {
 
     if (!stageActive || stageCmdId != cmdId || memcmp(stageOrigin, origin, 3) != 0 ||
         now - stageLastChunk > MESH_STAGE_GAP_MS) {
+        if (stageActive && isSerialConnected()) {
+            // Diagnosable instead of silent: which chunks a lost transfer had.
+            Serial.printf("[MESH] transfer %02X%02X%02X/%u (cmd %u) abandoned incomplete: chunks %08lX%s\n",
+                          stageOrigin[0], stageOrigin[1], stageOrigin[2], stageCmdId, stageCmd & 0x7F,
+                          (unsigned long)stageChunks, stageHaveFinal ? " (final seen)" : "");
+        }
+        if (more && isSerialConnected()) {
+            Serial.printf("[MESH] receiving %02X%02X%02X/%u (cmd %u), first chunk @%u\n",
+                          origin[0], origin[1], origin[2], cmdId, cmd & 0x7F, offset);
+        }
         stageReset();
         stageActive = true;
         stageCmdId = cmdId;
@@ -1268,6 +1340,9 @@ static void meshHandleCommand(const uint8_t* pkt, uint8_t pktLen) {
 
     if (len) memcpy(stageBuf + offset, data, len);
     stageChunks |= (1UL << (offset / MESH_CMD_CHUNK));
+    // Mid-transfer: stay parked on the mesh channel for the rest of it. A
+    // sweep now would miss chunks that every following round must refill.
+    meshHoldRadio(2500);
     if (!more) {
         stageHaveFinal = true;
         stageTotal = offset + len;
@@ -1307,6 +1382,7 @@ static bool meshLenOk(uint8_t type, int len) {
         case MESH_T_BYE:      return len >= MESH_BYE_LEN;
         case MESH_T_DETACK:   return len >= MESH_DETACK_LEN;
         case MESH_T_STATUS:   return len >= MESH_MIN_LEN + 1;
+        case MESH_T_NACK:     return len >= MESH_NACK_LEN;
         case MESH_T_OTA:      return len >= MESH_MIN_LEN + 6;
         default:              return len >= MESH_MIN_LEN;
     }
@@ -1349,6 +1425,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
     if (type == MESH_T_BYE && len < MESH_BYE_LEN) { meshRxShort++; return; }
     if (type == MESH_T_DETACK && len < MESH_DETACK_LEN) { meshRxShort++; return; }
     if (type == MESH_T_STATUS && len < MESH_MIN_LEN + 1) { meshRxShort++; return; }
+    if (type == MESH_T_NACK && len < MESH_NACK_LEN) { meshRxShort++; return; }
     if (memcmp(data + 6, selfMac, 6) == 0) { meshRxSelf++; return; }  // our own packet relayed back
 
     if (meshSeen(data + 6, data[5], millis())) { meshRxDup++; return; }
@@ -1525,7 +1602,7 @@ void meshNoteRadioChannel(uint8_t ch) { radioCh = ch; }
 bool meshNeedsAir() {
     if (!meshStarted) return false;
     uint32_t now = millis();
-    if (outActive || outRepeatLeft || (int32_t)(listenUntil - now) > 0) return true;
+    if (outActive || outRepeatLeft || outResendMask || (int32_t)(listenUntil - now) > 0) return true;
     for (int i = 0; i < MESH_DET_PENDING; i++) {
         if (pendDet[i].used && now - pendDet[i].firstAt < MESH_URGENT_MS) return true;
     }
@@ -1862,6 +1939,13 @@ void meshTick() {
             else meshRelayNow(pkt, len);
             break;
         }
+        case MESH_T_NACK: {
+            // Body: requester[3], sender[3], cmdId(2), missing mask(4).
+            const uint8_t* body = pkt + MESH_HDR_LEN;
+            if (memcmp(body + 3, selfId, 3) == 0) meshOnNack(body);
+            else meshRelay(pkt, len, rxHop);
+            break;
+        }
         case MESH_T_ANNOUNCE:
         default:
             break;  // announces carry ttl=1 and are never relayed
@@ -1877,6 +1961,40 @@ void meshTick() {
     // to ~4e9, read as "stale", and threw away every partly-received
     // multi-chunk command (filter reports from remotes never arrived).
     if (stageActive && (int32_t)(millis() - stageLastChunk) > (int32_t)MESH_STAGE_GAP_MS) stageReset();
+    // Selective repeat: rounds over and still holes? Name them to the sender.
+    static uint16_t nackFor = 0;
+    static uint8_t  nackTries = 0;
+    static uint32_t nackAt = 0;
+    if (stageActive && stageChunks) {
+        if (nackFor != stageCmdId) { nackFor = stageCmdId; nackTries = 0; nackAt = 0; }
+        uint32_t t = millis();
+        if ((int32_t)(t - stageLastChunk) > MESH_NACK_QUIET_MS && nackTries < MESH_NACK_TRIES &&
+            (!nackAt || (int32_t)(t - nackAt) > MESH_NACK_QUIET_MS)) {
+            uint32_t want;
+            if (stageHaveFinal) {
+                uint16_t lastIdx = stageTotal == 0 ? 0 : (stageTotal - 1) / MESH_CMD_CHUNK;
+                uint32_t need = (lastIdx >= 31) ? 0xFFFFFFFFUL : ((1UL << (lastIdx + 1)) - 1);
+                want = need & ~stageChunks;
+            } else {
+                want = ~stageChunks;   // the tail too: the sender trims to its length
+            }
+            if (want) {
+                meshSendNack(stageOrigin, stageCmdId, want);
+                meshHoldRadio(3000);
+                nackTries++;
+                nackAt = t;
+            }
+        }
+    }
+    static uint16_t stalledLogged = 0;
+    if (stageActive && stalledLogged != stageCmdId && (int32_t)(millis() - stageLastChunk) > 8000) {
+        stalledLogged = stageCmdId;
+        if (isSerialConnected()) {
+            Serial.printf("[MESH] transfer %02X%02X%02X/%u stalled 8 s: chunks %08lX%s\n",
+                          stageOrigin[0], stageOrigin[1], stageOrigin[2], stageCmdId,
+                          (unsigned long)stageChunks, stageHaveFinal ? " (final seen)" : "");
+        }
+    }
 
     // Channel auto-heal: silent too long while meshing → walk the mesh
     // channels (1-11, the same range the config allows), listening on each.
