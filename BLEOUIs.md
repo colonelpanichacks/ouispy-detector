@@ -298,7 +298,7 @@ A0:14:3D
 
 <details>
 
-<summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
+<summary><b>META/RAYBAN SMARTGLASSES</b> <code>7 OUIs</code></summary>
 
 *sourced from [glass-detect repository](https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21)*
 
@@ -309,6 +309,8 @@ Last one from Luxottica Group S.P.A. detected by @konradit.
 - `F4:03:43`
 - `5C:E9:1E`
 - `98:59:49`
+- `80:AA:1C`
+- `38:47:12`
 
 **Copy OUIs:**
 
@@ -318,6 +320,8 @@ CC:66:0A
 F4:03:43
 5C:E9:1E
 98:59:49
+80:AA:1C
+38:47:12
 ```
 
 > **Category:** Smartglasses  

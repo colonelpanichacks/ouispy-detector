@@ -26,8 +26,25 @@ PRESETS = {
              ("SVC", "FC81", "Axon Enterprise service UUID"),
              ("PROBE", "0025DF", "Axon body cam (WiFi probe)"),
              ("BEACON", "0025DF", "Axon AP beacon (WiFi)")],
-    "meta": [("META", "0x0D53+0xFD5F",
-              "Composite: Luxottica CID + Meta svc UUID, or Ray-Ban/Wayfarer/Oakley Meta name")],
+    # Ray-Ban / Oakley Meta smart glasses: every Bluetooth SIG company ID and
+    # 16-bit service UUID registered to Luxottica and Meta, the glasses'
+    # BLE names, and Luxottica's IEEE OUIs. The composite is the precise
+    # one; 01AB / FEB7 / FEB8 also match other Meta hardware (Quest, Portal).
+    "meta": [
+        ("META", "0x0D53+0xFD5F", "Luxottica CID + Meta svc, or glasses name"),
+        ("CID", "0D53", "Luxottica CID (Ray-Ban / Oakley Meta glasses)"),
+        ("SVC", "FD5F", "Meta Reality Labs svc UUID (glasses, Quest)"),
+        ("CID", "058E", "Meta Platforms Technologies CID (glasses, Quest)"),
+        ("CID", "01AB", "Meta Platforms CID (any Meta device)"),
+        ("SVC", "FEB7", "Meta Platforms svc UUID (any Meta device)"),
+        ("SVC", "FEB8", "Meta Platforms svc UUID (any Meta device)"),
+        ("NAME", "Ray-Ban", "Ray-Ban Meta glasses (BLE name)"),
+        ("NAME", "Oakley", "Oakley Meta glasses (BLE name)"),
+        ("NAME", "Wayfarer", "Ray-Ban Meta Wayfarer (BLE name)"),
+        ("OUI", "985949", "Luxottica Group OUI (IEEE)"),
+        ("OUI", "80AA1C", "Luxottica Tristar OUI (IEEE, glasses plant)"),
+        ("OUI", "384712", "Luxottica Tristar OUI (IEEE, glasses plant)"),
+    ],
     "ipro": [("OUI", "D42DC5", "I-PRO body cam (BLE OUI)"),
              ("PROBE", "D42DC5", "I-PRO body cam (WiFi probe)")],
     "verkada": [("PROBE", "E0A700", "Verkada camera (WiFi probe)"),
