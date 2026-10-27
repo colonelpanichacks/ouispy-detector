@@ -1566,7 +1566,8 @@ uint32_t meshRelaySent = 0, meshRelaySuppressed = 0;
 static int8_t meshNeighborRssi(const uint8_t* mac) {
     uint32_t now = millis();
     for (int i = 0; i < MESH_SNIFF_SLOTS; i++) {
-        if (sniffTs[i] && now - sniffTs[i] < 60000 && memcmp(sniffMac[i], mac, 6) == 0) return sniffRssi[i];
+        // Signed: the sniffer callback can stamp sniffTs after `now` was read.
+        if (sniffTs[i] && (int32_t)(now - sniffTs[i]) < 60000 && memcmp(sniffMac[i], mac, 6) == 0) return sniffRssi[i];
     }
     return 0;
 }
@@ -1806,10 +1807,15 @@ void meshTick() {
         }
     }
 
-    dutyTick(now);
+    dutyTick(millis());   // park/unpark in the drain stamped dutyAt later than `now`
 
     // Stale partial transfer cleanup.
-    if (stageActive && now - stageLastChunk > MESH_STAGE_GAP_MS) stageReset();
+    // Signed and against the clock now: `now` was read at the top of this
+    // tick, and a chunk handled in the drain above stamps stageLastChunk
+    // with a later millis(). Unsigned `now - stageLastChunk` then wrapped
+    // to ~4e9, read as "stale", and threw away every partly-received
+    // multi-chunk command (filter reports from remotes never arrived).
+    if (stageActive && (int32_t)(millis() - stageLastChunk) > (int32_t)MESH_STAGE_GAP_MS) stageReset();
 
     // Channel auto-heal: silent too long while meshing → walk the mesh
     // channels (1-11, the same range the config allows), listening on each.
