@@ -737,7 +737,11 @@ def api_settings_set():
     refresh_access()
     if restart and not offline_mode:
         start_sources()
-    emit("settings", public_settings())   # every open dashboard picks it up
+    # Every open dashboard picks it up, except a bare map_view save: that is
+    # this screen's pan/zoom (saved on every move), and broadcasting it made
+    # every map reload its tiles, a black flash on each pan.
+    if set(data) - {"map_view"}:
+        emit("settings", public_settings())
     return jsonify(public_settings())
 
 

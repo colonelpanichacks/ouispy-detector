@@ -1771,8 +1771,13 @@ async function boot() {
         if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
     });
     sock.on("settings", (s) => {
-        S.settings = s;
-        applyTiles(); renderLinks(); renderToggles();
+        // Reload tiles only when the layer itself changed (re-adding the tile
+        // layer blanks the map until the tiles come back), and keep this
+        // screen's own map position.
+        const layerChanged = s.tiles !== S.settings.tiles || s.tiles_custom !== S.settings.tiles_custom;
+        S.settings = { ...s, map_view: S.settings.map_view };
+        if (layerChanged) applyTiles();
+        renderLinks(); renderToggles();
         // Refill the form unless someone is typing in it right now.
         if (!$("tab-settings").contains(document.activeElement)) loadSettingsForm();
     });
