@@ -264,8 +264,112 @@
     padding-top: 20px;
     border-top: 1px dashed rgba(255,43,158,0.12);
   }
+  footer a { overflow-wrap: anywhere; }
+
+  /* ─── MESH NODE SETUP ─── */
+  .meshform {
+    width: 100%;
+    max-width: 560px;
+    margin: 10px auto 0;
+    text-align: left;
+    display: grid;
+    gap: 14px;
+  }
+  .meshform .row { display: grid; gap: 6px; }
+  .meshform label.lbl {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 11px;
+  }
+  .meshform .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .seg { display: flex; gap: 0; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label {
+    flex: 1;
+    text-align: center;
+    padding: 8px 10px;
+    border: 1px solid rgba(255,43,158,0.35);
+    color: var(--text);
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-size: 13px;
+  }
+  .seg label + input + label { border-left: none; }
+  .seg input:checked + label {
+    background: rgba(255,43,158,0.14);
+    border-color: var(--green);
+    color: var(--white);
+    box-shadow: 0 0 10px rgba(255,43,158,0.35) inset;
+  }
+  .seg input:focus-visible + label { outline: 1px solid var(--cyan); }
+  .meshform select, .meshform input[type=text] {
+    background: #050208;
+    color: var(--white);
+    border: 1px solid rgba(255,43,158,0.35);
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 10px;
+    width: 100%;
+    min-width: 0;
+  }
+  .meshform select:focus, .meshform input[type=text]:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 8px rgba(0,229,255,0.35); }
+  .keyrow { display: flex; gap: 8px; }
+  .keyrow input { flex: 1; letter-spacing: 1px; }
+  .mbtn {
+    background: #050f08;
+    color: var(--green);
+    border: 1px solid var(--green);
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .mbtn:hover:not(:disabled) { background: var(--green); color: #050f08; }
+  .mbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .mbtn.big { display: block; margin: 6px auto 0; padding: 12px 26px; font-size: 14px; letter-spacing: 3px; }
+  .fp { font-size: 12px; color: var(--muted); }
+  .fp b { color: var(--cyan); text-shadow: 0 0 6px rgba(0,229,255,0.5); letter-spacing: 1px; }
+  .keywarn { color: var(--amber); font-size: 12px; line-height: 1.5; }
+  .checks { display: grid; gap: 6px; font-size: 13px; }
+  .checks label { cursor: pointer; }
+  .checks input { accent-color: var(--green); margin-right: 8px; }
+  .meshstat {
+    min-height: 1.5em;
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 10px 12px;
+    border: 1px dashed rgba(255,43,158,0.25);
+    display: none;
+  }
+  .meshstat.show { display: block; }
+  .meshstat.ok   { border: 1px solid var(--lime); color: var(--lime); text-shadow: 0 0 6px rgba(168,255,62,0.35); }
+  .meshstat.warn { border: 1px solid var(--amber); color: var(--amber); }
+  .meshstat.err  { border: 1px solid var(--magenta); color: var(--magenta); }
+  .meshstat.busy { border-color: var(--cyan); color: var(--cyan); }
+  .meshstat b { color: var(--white); }
+  details.meshlog summary { cursor: pointer; color: var(--muted); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; }
+  details.meshlog pre {
+    margin: 8px 0 0;
+    max-height: 220px;
+    overflow: auto;
+    background: #040106;
+    border: 1px solid rgba(255,43,158,0.15);
+    padding: 8px 10px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
 
   @media (max-width: 520px) {
+    .keyrow { flex-wrap: wrap; }
+    .keyrow input { flex-basis: 100%; }
     .banner { font-size: 5.5px; }
     .subtitle { letter-spacing: 3px; font-size: 11px; }
   }
@@ -295,7 +399,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
 <main>
 
 <section class="panel">
-  <header><span>Install</span><span class="right">3 steps</span></header>
+  <header><span>Install</span><span class="right">3 steps + mesh</span></header>
   <div class="body">
 
     <div class="step">
@@ -326,6 +430,56 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
         <dt>Password</dt><dd>astheysnoopuntous</dd>
         <dt>Open</dt><dd class="url">http://192.168.4.1</dd>
       </dl>
+      <p>Building a mesh? Skip the portal and go straight to step 4.</p>
+    </div>
+
+    <div class="step" id="meshStep">
+      <div class="n">4</div>
+      <h3>Mesh node (optional)</h3>
+      <p>Sets the node up over USB right after flashing so it boots straight into the ESP-NOW long-range mesh. <b>No filters are installed</b>: the node ships empty, and you add filters later from the OUI-SPY Mesh dashboard, live over the mesh.</p>
+      <p class="hint" style="color:var(--muted);font-size:12px">Close the flasher dialog first so the serial port is free. Leave the board plugged in.</p>
+
+      <form class="meshform" id="meshForm" autocomplete="off" onsubmit="return false">
+        <div class="row">
+          <label class="lbl">Role</label>
+          <div class="seg">
+            <input type="radio" name="meshRole" id="roleRemote" value="remote" checked><label for="roleRemote">Remote</label>
+            <input type="radio" name="meshRole" id="roleHome" value="home"><label for="roleHome">Home</label>
+          </div>
+          <div class="hint" id="roleHint">Remote: a field node. It relays detections hop by hop to the home node and follows the home's channel.</div>
+        </div>
+
+        <div class="row">
+          <label class="lbl" for="meshCh">Mesh channel</label>
+          <select id="meshCh"></select>
+          <div class="hint">Wi-Fi channel 1 to 11. Use the same channel on every node; the home anchors it and remotes that drift find it again.</div>
+        </div>
+
+        <div class="row">
+          <label class="lbl" for="meshKey">Fleet key</label>
+          <div class="keyrow">
+            <input type="text" id="meshKey" spellcheck="false" autocapitalize="off" maxlength="63" placeholder="Generate one, or paste your fleet's key">
+            <button type="button" class="mbtn" id="keyGen">Generate</button>
+            <button type="button" class="mbtn" id="keyCopy" disabled>Copy</button>
+          </div>
+          <div class="fp" id="keyFp">8 to 63 characters, no spaces. Generate makes a 32-character random key in this browser; it never leaves this page except over USB to the node.</div>
+          <div class="keywarn">Every node in the fleet needs this exact key. Copy it somewhere safe before you close this page. A node with a different key can't see or talk to the rest of the mesh.</div>
+        </div>
+
+        <div class="row">
+          <label class="lbl">Options</label>
+          <div class="checks">
+            <label><input type="checkbox" id="optBuzzer" checked>Buzzer on</label>
+            <label><input type="checkbox" id="optLed" checked>LED on</label>
+            <label><input type="checkbox" id="optLock" checked>Lock: boot straight into mesh on every power-up (hold <span class="kbd">BOOT</span> 1.5 s at power-on to unlock)</label>
+          </div>
+        </div>
+
+        <button type="button" class="mbtn big" id="meshGo">&gt;&gt; SET UP MESH NODE &lt;&lt;</button>
+        <div class="meshstat" id="meshStat" role="status" aria-live="polite"></div>
+        <details class="meshlog"><summary>Serial log</summary><pre id="meshLog"></pre></details>
+      </form>
+      <span class="unsupported" id="meshUnsupported" hidden>Mesh setup needs Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
     </div>
 
   </div>
@@ -426,5 +580,288 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
 </main>
 
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<script>
+// Mesh node setup over Web Serial, using the firmware's USB console:
+//   status                         -> RST {json} (mode, role, ch, kfp, filters)
+//   mesh 1 <home|remote> <ch>      -> OK mesh on ...   (config mode only)
+//   meshkey - / meshkey <key>      -> OK fleet key ...  (saves the mesh settings too)
+//   audio <buzzer> <led>           -> OK audio ...
+//   burnin | provisiondone         -> OK ... | ERR no filters installed
+// No filters are ever sent. The port is opened with the browser's default
+// signals and DTR/RTS are never touched on their own (XIAO S3 rule).
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const enc = new TextEncoder();
+
+  if (!("serial" in navigator)) {
+    $("meshForm").hidden = true;
+    $("meshUnsupported").hidden = false;
+    return;
+  }
+
+  for (let c = 1; c <= 11; c++) {
+    const o = document.createElement("option");
+    o.value = c;
+    o.textContent = "Channel " + c;
+    if (c === 6) o.selected = true;
+    $("meshCh").appendChild(o);
+  }
+
+  const ROLE_HINT = {
+    remote: "Remote: a field node. It relays detections hop by hop to the home node and follows the home's channel.",
+    home: "Home: one per fleet, plugged into the computer running the OUI-SPY Mesh dashboard. It anchors the mesh channel.",
+  };
+  document.querySelectorAll('input[name="meshRole"]').forEach((r) =>
+    r.addEventListener("change", () => { $("roleHint").textContent = ROLE_HINT[role()]; }));
+  const role = () => document.querySelector('input[name="meshRole"]:checked').value;
+
+  // Same alphabet and length as the dashboard's "Create fleet key".
+  // Rejection sampling keeps every character equally likely.
+  function genKey(n) {
+    const out = [];
+    const buf = new Uint8Array(64);
+    while (out.length < n) {
+      crypto.getRandomValues(buf);
+      for (const b of buf) if (b < 248 && out.length < n) out.push(ALNUM[b % 62]);
+    }
+    return out.join("");
+  }
+
+  function keyProblem(k) {
+    if (!k) return "Generate or paste a fleet key first.";
+    if (k.length < 8 || k.length > 63) return "The key must be 8 to 63 characters.";
+    if (!/^[\x21-\x7e]+$/.test(k)) return "The key may only use printable ASCII characters, no spaces.";
+    return "";
+  }
+
+  // The firmware's fingerprint: SHA-256("OUISPY-KEY-FP" | key), first 4 bytes.
+  async function fingerprint(k) {
+    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode("OUISPY-KEY-FP" + k)));
+    return Array.from(h.slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  const fpText = (fp) => fp.slice(0, 4) + "-" + fp.slice(4);
+
+  async function keyChanged() {
+    const k = $("meshKey").value.trim();
+    const bad = keyProblem(k);
+    $("keyCopy").disabled = !k;
+    if (!k) return;
+    $("keyFp").innerHTML = bad
+      ? '<span style="color:var(--magenta)">' + bad + "</span>"
+      : "Fingerprint <b>" + fpText(await fingerprint(k)) + "</b>. The dashboard shows the same fingerprint for every node holding this key.";
+  }
+  $("meshKey").addEventListener("input", keyChanged);
+  $("keyGen").addEventListener("click", () => {
+    const cur = $("meshKey").value.trim();
+    if (cur && !confirm("Replace the key in the box with a new one? Nodes already set up with the current key won't talk to nodes on the new one.")) return;
+    $("meshKey").value = genKey(32);
+    keyChanged();
+  });
+  $("keyCopy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("meshKey").value.trim());
+      $("keyCopy").textContent = "Copied";
+    } catch (e) {
+      $("meshKey").select();
+      $("keyCopy").textContent = "Press Ctrl+C";
+    }
+    setTimeout(() => { $("keyCopy").textContent = "Copy"; }, 1800);
+  });
+
+  // ─── serial log (the key is masked) ───
+  let secret = "";
+  function log(dir, line) {
+    if (secret) line = line.split(secret).join("********");
+    const pre = $("meshLog");
+    pre.textContent += (dir ? dir + " " : "   ") + line + "\n";
+    if (pre.textContent.length > 60000) pre.textContent = pre.textContent.slice(-40000);
+    pre.scrollTop = pre.scrollHeight;
+  }
+  function status(cls, html) {
+    const s = $("meshStat");
+    s.className = "meshstat show " + cls;
+    s.innerHTML = html;
+  }
+
+  // ─── line-oriented link to the node ───
+  class Link {
+    constructor(port) {
+      this.port = port;
+      this.waiters = [];
+      this.buf = "";
+      this.closed = false;
+    }
+    async open() {
+      await this.port.open({ baudRate: 115200 });
+      this.writer = this.port.writable.getWriter();
+      this.reader = this.port.readable.getReader();
+      this.pump();
+    }
+    async pump() {
+      const dec = new TextDecoder();
+      try {
+        for (;;) {
+          const { value, done } = await this.reader.read();
+          if (done) break;
+          this.buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = this.buf.indexOf("\n")) >= 0) {
+            const line = this.buf.slice(0, i).replace(/\r$/, "");
+            this.buf = this.buf.slice(i + 1);
+            if (line.trim()) this.onLine(line);
+          }
+        }
+      } catch (e) {
+        // A rebooting node drops off USB: expected after burnin.
+      }
+      this.closed = true;
+      this.waiters.splice(0).forEach((w) => w.done(null));
+    }
+    onLine(line) {
+      if (!/^TLM /.test(line)) log("<", line);   // TLM every 5 s would bury the log
+      for (const w of this.waiters.slice()) {
+        if (w.re.test(line)) w.done(line);
+      }
+    }
+    // Resolves with the first line matching re, or null on timeout/close.
+    expect(re, ms) {
+      return new Promise((resolve) => {
+        const w = {
+          re,
+          done: (line) => {
+            clearTimeout(w.t);
+            const i = this.waiters.indexOf(w);
+            if (i >= 0) this.waiters.splice(i, 1);
+            resolve(line);
+          },
+        };
+        w.t = setTimeout(() => w.done(null), ms);
+        if (this.closed) return w.done(null);
+        this.waiters.push(w);
+      });
+    }
+    async send(line) {
+      log(">", line);
+      await this.writer.write(enc.encode(line + "\n"));
+    }
+    // Send a command and wait for its OK/ERR answer (null = no answer).
+    async cmd(line, okRe, ms = 3000) {
+      const p = this.expect(new RegExp(okRe.source + "|^ERR"), ms);
+      await this.send(line);
+      return p;
+    }
+    async close() {
+      try { await this.reader.cancel(); } catch (e) {}
+      try { this.reader.releaseLock(); } catch (e) {}
+      try { this.writer.releaseLock(); } catch (e) {}
+      try { await this.port.close(); } catch (e) {}
+    }
+  }
+
+  async function nodeStatus(link) {
+    const line = await link.cmd("status", /^RST \{/, 2500);
+    if (!line || !line.startsWith("RST ")) return null;
+    try { return JSON.parse(line.slice(4)); } catch (e) { return null; }
+  }
+
+  const REFUSED = {
+    home: "The mesh settings and key are saved, but this firmware refuses to lock a node that has no filters. " +
+          "The home node will start in config mode on every power-up: its portal and the mesh both run, so it already works with the dashboard over USB. " +
+          "To lock it, flash a release that supports mesh-only nodes and run setup again.",
+    remote: "The mesh settings and key are saved, but this firmware refuses to lock or start scanning a node that has no filters, " +
+            "and a remote only joins the mesh while it is scanning. Flash a release that supports mesh-only nodes and run setup again, " +
+            "or add one filter in the portal (192.168.4.1) and press Burn In.",
+  };
+
+  let busy = false;
+  $("meshGo").addEventListener("click", async () => {
+    if (busy) return;
+    const key = $("meshKey").value.trim();
+    const bad = keyProblem(key);
+    if (bad) { status("err", bad); $("meshKey").focus(); return; }
+    const r = role(), ch = +$("meshCh").value;
+    const buzzer = $("optBuzzer").checked ? 1 : 0, led = $("optLed").checked ? 1 : 0;
+    const lock = $("optLock").checked;
+    const fp = await fingerprint(key);
+
+    let port;
+    try {
+      port = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a }] });
+    } catch (e) {
+      return;   // picker dismissed
+    }
+    busy = true;
+    $("meshGo").disabled = true;
+    secret = key;
+    $("meshLog").textContent = "";
+    const link = new Link(port);
+    try {
+      status("busy", "Connecting...");
+      try {
+        await link.open();
+      } catch (e) {
+        throw new Error("Couldn't open the serial port. Close the flasher dialog (or anything else using the board, like the dashboard) and try again.");
+      }
+
+      status("busy", "Reading the node...");
+      const st = await nodeStatus(link);
+      if (st && st.mode === "scan") {
+        throw new Error("This node is " + (st.locked ? "locked in" : "running in") + " scanning mode, so it won't take mesh settings. " +
+          (st.locked ? "Unplug it, hold BOOT while plugging it back in until it beeps three times, then run setup again. "
+                     : "Unplug it and plug it back in, then run setup again. ") +
+          "Or reflash and choose erase.");
+      }
+      if (st && st.filters > 0) {
+        log("", "note: node already has " + st.filters + " filter(s); setup leaves them as they are");
+      }
+
+      status("busy", "Setting mesh: " + r + ", channel " + ch + "...");
+      let a = await link.cmd("mesh 1 " + r + " " + ch, /^OK mesh/);
+      if (!a) throw new Error("The node didn't answer the mesh command. Make sure it just finished flashing (or was just plugged in) and is in config mode, then try again.");
+      if (!/^OK mesh on/.test(a)) throw new Error("The node refused the mesh settings: " + a);
+
+      // Clear first so a re-provisioned node also resets its command counters.
+      status("busy", "Setting the fleet key...");
+      a = await link.cmd("meshkey -", /^OK fleet key/);
+      if (!a || a.startsWith("ERR")) throw new Error("The node didn't take the key: " + (a || "no answer"));
+      a = await link.cmd("meshkey " + key, /^OK fleet key/);
+      if (!a || a.startsWith("ERR")) throw new Error("The node didn't take the key: " + (a || "no answer"));
+
+      a = await link.cmd("audio " + buzzer + " " + led, /^OK audio/);
+      const audioOk = a && a.startsWith("OK");
+      if (!audioOk && !(buzzer && led)) log("", "note: this firmware has no audio command; set buzzer/LED in the portal");
+
+      const v = await nodeStatus(link);
+      if (v) {
+        if (v.kfp && v.kfp !== fp) throw new Error("Key check failed: the node reports fingerprint " + fpText(v.kfp) + ", expected " + fpText(fp) + ". Run setup again.");
+        if (v.role !== r || v.ch !== ch) throw new Error("Setting check failed: the node reports " + v.role + " on channel " + v.ch + ". Run setup again.");
+      }
+
+      status("busy", lock ? "Locking..." : "Starting the mesh...");
+      a = await link.cmd(lock ? "burnin" : "provisiondone", /^OK/, 4000);
+      const summary = "<b>" + r.toUpperCase() + "</b> on channel <b>" + ch + "</b>, key <b>" + fpText(fp) + "</b>, no filters";
+      if (a && a.startsWith("OK")) {
+        status("ok", "Mesh node ready: " + summary + ". " +
+          (lock ? "It's rebooting into the mesh and will come up that way every time. "
+                : "It's in the mesh now; after a power cycle it starts in config mode again (not locked). ") +
+          (r === "home" ? "Leave it plugged in and start the OUI-SPY Mesh dashboard." : "Unplug it and deploy it.") +
+          " Add filters from the dashboard.");
+      } else if (a && /no filters/i.test(a)) {
+        status("warn", "Partly done: " + summary + ". " + REFUSED[r]);
+      } else {
+        throw new Error("The node didn't confirm: " + (a || "no answer") + ". Its mesh settings and key are saved; run setup again to finish.");
+      }
+    } catch (e) {
+      status("err", (e && e.message) || String(e));
+    } finally {
+      await link.close();
+      secret = "";
+      busy = false;
+      $("meshGo").disabled = false;
+    }
+  });
+})();
+</script>
 </body>
 </html>
