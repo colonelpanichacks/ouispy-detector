@@ -658,6 +658,7 @@ def api_fleetkey_create():
     fd = os.open(FLEET_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(k + "\n")
+    emit("fleetkey", {"fp": key_fingerprint(k)})   # status only, never the key
     return jsonify({"ok": True, "fp": key_fingerprint(k)})
 
 
@@ -736,6 +737,7 @@ def api_settings_set():
     refresh_access()
     if restart and not offline_mode:
         start_sources()
+    emit("settings", public_settings())   # every open dashboard picks it up
     return jsonify(public_settings())
 
 

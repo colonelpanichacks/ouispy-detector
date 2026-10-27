@@ -1635,7 +1635,19 @@ async function boot() {
     sock.on("det", onDetection);
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); });
-    sock.on("mac_aliases", (m) => { S.macAliases = m; });
+    sock.on("mac_aliases", (m) => {
+        S.macAliases = m;
+        renderFeed();
+        if ($("tab-devices").classList.contains("active")) loadDevices();
+        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+    });
+    sock.on("settings", (s) => {
+        S.settings = s;
+        applyTiles(); renderLinks(); renderToggles();
+        // Refill the form unless someone is typing in it right now.
+        if (!$("tab-settings").contains(document.activeElement)) loadSettingsForm();
+    });
+    sock.on("fleetkey", () => loadFleetKeyStatus());
     sock.on("job", onJob);
     sock.on("dets_cleared", (e) => {
         S.dets = S.dets.filter((d) => (e.node && d.node !== e.node) || (e.mac && d.mac !== e.mac));
@@ -1657,9 +1669,22 @@ async function boot() {
         if (S.selected === e.id && $("drawer").classList.contains("open")) openDrawer(e.id);
     });
     sock.on("disconnect", () => { S.sources = { ui: { kind: "dashboard", connected: false, detail: "server connection lost" } }; renderSources(); });
+    // (Re)connect: catch up on everything that happened while the socket
+    // was down (phone asleep, Wi-Fi blip, server restart), not just the fleet.
     sock.on("connect", async () => {
         const st2 = await api("/api/state");
         S.sources = st2.sources; renderSources(); applyFleet(st2.fleet);
+        S.dets = st2.recent; S.statsBase = st2.stats; S.hourly = st2.hourly || [];
+        S.macAliases = st2.mac_aliases || {};
+        S.settings = st2.settings;
+        (st2.jobs || []).forEach((j) => { S.jobState[j.id] = j.state; });
+        S.jobs = st2.jobs || S.jobs;
+        renderFeed(); renderKpis(); renderNodes(); renderJobs(); renderFleetCtl();
+        loadHistory(false);
+        if ($("tab-devices").classList.contains("active")) loadDevices();
+        if (S.selected && $("drawer").classList.contains("open")) openDrawer(S.selected);
+        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+        loadFleetKeyStatus();
     });
 }
 

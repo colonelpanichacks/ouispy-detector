@@ -1,5 +1,13 @@
 /* OUI-SPY Mesh. Design tokens lifted from the device portal
    (CONFIG_HTML <style> in src/main.cpp) so both read as one product. */
+/* Zen Dots (SIL OFL 1.1, fonts/ZenDots-OFL.txt), served locally: the
+   dashboard works offline. Latin subset only (the wordmark is ASCII). */
+@font-face {
+    font-family: "Zen Dots";
+    src: url("../fonts/zen-dots.woff2") format("woff2");
+    font-weight: 400; font-style: normal; font-display: swap;
+}
+
 :root {
     --bg: #06080b;
     --panel: #0c0f14;
@@ -19,7 +27,7 @@
     --sky: #7dd3fc;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --brand-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --brand-font: "Zen Dots", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --glow-accent: 0 0 6px rgba(78, 205, 196, 0.9), 0 0 16px rgba(78, 205, 196, 0.45);
     --glow-red: 0 0 6px rgba(248, 113, 113, 0.95), 0 0 18px rgba(248, 113, 113, 0.5);
     --glow-amber: 0 0 6px rgba(251, 191, 36, 0.9), 0 0 16px rgba(251, 191, 36, 0.4);
@@ -53,7 +61,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
    accent teal, top to bottom) with a soft neon glow. */
 .brand { display: flex; align-items: baseline; gap: 14px; }
 .brand h1, .brand-sub {
-    margin: 0; font-family: var(--brand-font); font-size: 24px; font-weight: 800;
+    margin: 0; font-family: var(--brand-font); font-size: 24px; font-weight: 400;
     letter-spacing: 5px; text-transform: uppercase; line-height: 1;
     background: linear-gradient(180deg, #c8ecff 0%, var(--sky) 38%, var(--accent) 100%);
     -webkit-background-clip: text; background-clip: text;
