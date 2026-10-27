@@ -53,7 +53,7 @@ Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data c
 - **Remote fleet management from the home portal:** live node roster, **mute/unmute all remotes** (buzzer, optionally LED — instant and persisted), **push the current filter list to every remote** (chunked transfer with CRC32; remotes save and reboot into the new list), and **reboot all remotes**, with live ack counts
 - **Unified alerts:** mesh-originated detections beep/flash on every node, appear in device history with a `[mesh xxxx]` provenance tag, and publish through the home node's MQTT exactly like local detections
 - **Presence:** nodes announce in short bursts every 1.5 s; joins/leaves are logged on serial and counted in the heartbeat line
-- **Fleet key (optional):** a shared secret signs every fleet command (HMAC-SHA256 with a replay counter); keyed nodes ignore unsigned, wrongly signed and replayed commands
+- **Fleet key (optional, recommended):** one shared secret encrypts the whole mesh (AES-256-GCM: every packet sealed, nothing readable on air) and signs every fleet command (HMAC-SHA256 with a replay counter). Keyed nodes ignore anything they can't decrypt, plus unsigned, forged and replayed commands
 
 ### Detection System
 - **Dual-domain time-slicing:** The 2.4 GHz radio alternates between WiFi promiscuous sweeps (channels 11→1, 200 ms dwell, ~2.2 s) and BLE active scans (~2.2 s). Each domain runs only if at least one filter of that type is configured; with no filters at all the device idles.
@@ -208,7 +208,7 @@ The **OUI-SPY Mesh** dashboard in [`home-dashboard/`](home-dashboard/) plugs int
 
 1. On each node, open the config portal and scroll to **Node Mesh (ESP-NOW Long Range)**.
 2. Enable the mesh, pick the role, and set the **same channel (1–11) on every node**.
-   Optionally set the same **Fleet Key** on every node (see Security below).
+   Set the same **Fleet Key** on every node: it encrypts the whole mesh (optional but recommended, see Security below).
 3. On the **home node** also fill in **MQTT** — it is the mesh's gateway to your broker/Home Assistant.
 4. Save. Every node now floods its detections; each relay extends the mesh one more hop.
 
@@ -299,7 +299,14 @@ With the mesh enabled, the onboard orange LED is a live link heartbeat: **solid 
 - Mesh identity is the node's current WiFi MAC, which is randomized per boot unless MQTT is enabled — after a reboot the roster shows the node under a new ID. Detections are unaffected.
 - Fire-and-forget transport: a detection burst may drop an occasional mesh packet; the 3 s / 30 s re-alert timers re-transmit on the next cycle anyway.
 - In config mode only the **home** node keeps the mesh up (its portal AP shares the mesh channel); a remote in config mode is unreachable until it returns to scanning.
-- **Security:** mesh packets are not encrypted, so detections can be read by anyone in range. Without a fleet key, any node on the channel can mute, reboot, re-channel or re-filter your remotes. With a fleet key set on every node, commands are signed (HMAC-SHA256) and carry a counter: keyed nodes refuse unsigned commands, wrong signatures and replays. Setting a new key resets the counters, so if the home node's flash is wiped, re-enter the key on the remotes too. Nodes without a key refuse signed commands, so set the key on the whole fleet together.
+- **Security (fleet key):** with the same fleet key on every node, the mesh is encrypted end to end over the air:
+  - **Everything is sealed.** Every frame (announces, detections, acks, commands, status replies) is AES-256-GCM encrypted whole. No magic bytes, packet type, sequence number or node ID go out in the clear; a node recognises fleet traffic only by authenticating it.
+  - **No patterns on air.** Each transmission gets a fresh 12-byte random nonce (relays re-seal, so a relayed copy shares no bytes with the original), and frames are padded to 64, 128, 192 or 250 bytes so heartbeats and detections look alike.
+  - **No replays.** Frames carry the origin's boot count and frame counter and pass a per-sender replay window. Commands are additionally signed (HMAC-SHA256) with their own persistent counter: keyed nodes refuse unsigned commands, wrong signatures and replays.
+  - **The key never goes over the radio.** Set it over USB (`meshkey <secret>`, or *Set on home (USB)* in the [dashboard](home-dashboard/README.md#fleet-key)) or in each node's setup portal; the dashboard can show it as a QR code for a phone. Each node reports a one-way fingerprint of its key, so you can check the fleet matches without revealing it.
+  - **Keep in mind:** use a long random key (the dashboard's *Create fleet key* makes one), since the encryption key is derived directly from it and a short passphrase could be guessed from recorded traffic. The key is stored unencrypted in each node's flash and on the dashboard computer, so anyone holding a node can read it. USB serial and MQTT are not covered (secure your broker separately).
+  - **Changing keys:** a new key resets the replay counters and cuts off every node still on the old one, so re-key the whole fleet together. If the home node's flash is wiped, re-enter the key on the remotes too (re-entering it resets their counters, so they accept the fresh home).
+  - **Without a fleet key** the mesh is plain: anyone in range can read detections, and any node on the channel can mute, reboot, re-channel or re-filter your remotes.
 - **Upgrade the fleet together:** the management protocol is v2; nodes running the first mesh build (v1) and current nodes can't interoperate. Flash all nodes in one session.
 
 ## Operation
