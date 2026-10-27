@@ -456,6 +456,12 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
         </div>
 
         <div class="row">
+          <label class="lbl" for="meshAlias">Node alias (optional)</label>
+          <input type="text" id="meshAlias" spellcheck="false" maxlength="32" placeholder="e.g. North Gate">
+          <div class="hint" id="aliasHint">A name for this node in the OUI-SPY Mesh dashboard. Up to 32 characters: letters, digits, spaces and basic punctuation.</div>
+        </div>
+
+        <div class="row">
           <label class="lbl" for="meshKey">Fleet key</label>
           <div class="keyrow">
             <input type="text" id="meshKey" spellcheck="false" autocapitalize="off" maxlength="63" placeholder="Generate one, or paste your fleet's key">
@@ -586,6 +592,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
 //   mesh 1 <home|remote> <ch>      -> OK mesh on ...   (config mode only)
 //   meshkey - / meshkey <key>      -> OK fleet key ...  (saves the mesh settings too)
 //   audio <buzzer> <led>           -> OK audio ...
+//   nodealias <name>               -> OK nodealias ... (newer firmware; older answers ERR)
 //   burnin | provisiondone         -> OK ... | ERR no filters installed
 // No filters are ever sent. The port is opened with the browser's default
 // signals and DTR/RTS are never touched on their own (XIAO S3 rule).
@@ -632,6 +639,15 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
     if (!k) return "Generate or paste a fleet key first.";
     if (k.length < 8 || k.length > 63) return "The key must be 8 to 63 characters.";
     if (!/^[\x21-\x7e]+$/.test(k)) return "The key may only use printable ASCII characters, no spaces.";
+    return "";
+  }
+
+  // Printable ASCII without quotes or backslashes, so it survives the
+  // firmware's JSON status line unchanged.
+  function aliasProblem(a) {
+    if (a.length > 32) return "The alias can be at most 32 characters.";
+    if (a && !/^[\x20-\x7e]+$/.test(a)) return "The alias may only use plain ASCII letters, digits, spaces and punctuation.";
+    if (/["\\]/.test(a)) return "The alias can't contain quotes or backslashes.";
     return "";
   }
 
@@ -780,6 +796,9 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
     const key = $("meshKey").value.trim();
     const bad = keyProblem(key);
     if (bad) { status("err", bad); $("meshKey").focus(); return; }
+    const alias = $("meshAlias").value.trim().replace(/\s+/g, " ");
+    const badAlias = aliasProblem(alias);
+    if (badAlias) { status("err", badAlias); $("meshAlias").focus(); return; }
     const r = role(), ch = +$("meshCh").value;
     const buzzer = $("optBuzzer").checked ? 1 : 0, led = $("optLed").checked ? 1 : 0;
     const lock = $("optLock").checked;
@@ -832,23 +851,35 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
       const audioOk = a && a.startsWith("OK");
       if (!audioOk && !(buzzer && led)) log("", "note: this firmware has no audio command; set buzzer/LED in the portal");
 
+      let aliasNote = "";
+      if (alias) {
+        a = await link.cmd("nodealias " + alias, /^OK nodealias/);
+        if (!a || !a.startsWith("OK")) {
+          aliasNote = " This firmware can't store a node alias yet, so name the node <b>" + alias.replace(/[<>&]/g, "") +
+                      "</b> in the dashboard instead.";
+          log("", "note: no nodealias command on this firmware; alias not stored");
+        }
+      }
+
       const v = await nodeStatus(link);
       if (v) {
+        if (alias && !aliasNote && "alias" in v && v.alias !== alias) throw new Error("Alias check failed: the node reports \"" + v.alias + "\". Run setup again.");
         if (v.kfp && v.kfp !== fp) throw new Error("Key check failed: the node reports fingerprint " + fpText(v.kfp) + ", expected " + fpText(fp) + ". Run setup again.");
         if (v.role !== r || v.ch !== ch) throw new Error("Setting check failed: the node reports " + v.role + " on channel " + v.ch + ". Run setup again.");
       }
 
       status("busy", lock ? "Locking..." : "Starting the mesh...");
       a = await link.cmd(lock ? "burnin" : "provisiondone", /^OK/, 4000);
-      const summary = "<b>" + r.toUpperCase() + "</b> on channel <b>" + ch + "</b>, key <b>" + fpText(fp) + "</b>, no filters";
+      const summary = (alias && !aliasNote ? "<b>" + alias.replace(/[<>&]/g, "") + "</b>, " : "") +
+                      "<b>" + r.toUpperCase() + "</b> on channel <b>" + ch + "</b>, key <b>" + fpText(fp) + "</b>, no filters";
       if (a && a.startsWith("OK")) {
         status("ok", "Mesh node ready: " + summary + ". " +
           (lock ? "It's rebooting into the mesh and will come up that way every time. "
                 : "It's in the mesh now; after a power cycle it starts in config mode again (not locked). ") +
           (r === "home" ? "Leave it plugged in and start the OUI-SPY Mesh dashboard." : "Unplug it and deploy it.") +
-          " Add filters from the dashboard.");
+          " Add filters from the dashboard." + aliasNote);
       } else if (a && /no filters/i.test(a)) {
-        status("warn", "Partly done: " + summary + ". " + REFUSED[r]);
+        status("warn", "Partly done: " + summary + ". " + REFUSED[r] + aliasNote);
       } else {
         throw new Error("The node didn't confirm: " + (a || "no answer") + ". Its mesh settings and key are saved; run setup again to finish.");
       }
