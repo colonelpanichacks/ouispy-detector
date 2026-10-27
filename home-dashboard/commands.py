@@ -33,6 +33,16 @@ LABELS = {
 }
 
 
+# Console verbs that prefix their own ERR lines ("ERR rstatus: ..."). A
+# line's answer may also come under the mesh op it floods (mfend -> filters
+# / fadd / fdel).
+KNOWN_VERBS = {"status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
+               "rreboot", "rident", "rpreset", "mfbegin", "mfadd", "mfdel", "mfdata", "mfend",
+               "fadd", "fdel", "meshpush", "meshrechan", "fwbegin", "fwdata", "fwend", "fwsend",
+               "fwself", "fwabort", "preset", "meshkey"}
+ERR_VERBS = {"mfend": {"mfend", "filters", "fadd", "fdel"}}
+
+
 class PlanError(ValueError):
     pass
 
@@ -201,7 +211,7 @@ class Commander(threading.Thread):
                     self.answers.clear()
                 if not sender.send(line):
                     return self._finish(job, "failed", "serial write failed")
-                ans = self._await(kind)
+                ans = self._await(kind, line)
                 if ans is None:
                     return self._finish(job, "failed", f"no answer from the home to '{line.split(' ')[0]}'")
                 if ans.startswith("ERR"):
@@ -228,14 +238,22 @@ class Commander(threading.Thread):
         self.waiting.append(job)
         self._publish(job)
 
-    def _await(self, kind):
-        """Wait for the answer to the line in flight."""
+    def _await(self, kind, line=""):
+        """Wait for the answer to the line in flight. An ERR naming another
+        console command (a late "ERR rstatus: mesh busy" from an earlier
+        poll) is not this line's answer: taking it as one re-sent upload
+        lines and broke filter pushes."""
+        verb = line.split(" ", 1)[0]
+        mine = ERR_VERBS.get(verb, {verb})
         deadline = time.time() + LINE_TIMEOUT
         with self.cv:
             while True:
                 while self.answers:
                     a = self.answers.popleft()
                     if a.startswith("ERR"):
+                        named = a[4:].split(":", 1)[0].strip() if ":" in a else ""
+                        if named in KNOWN_VERBS and named not in mine:
+                            continue
                         return a
                     if kind == "CMD" and a.startswith("CMD "):
                         return a
