@@ -100,6 +100,10 @@ void meshStats(uint32_t& rxAll, uint32_t& rxQueued, uint32_t& rxDup,
                uint32_t& rxSelf, uint32_t& rxBad,
                uint32_t& txSent, uint32_t& txFail, uint32_t& txCbFail);
 
+// Managed-flood relays: frames this node re-broadcast vs ones it held back
+// because other nodes had already carried them.
+extern uint32_t meshRelaySent, meshRelaySuppressed;
+
 // Called from the promiscuous callback when an air frame carries our mesh
 // magic — records RSSI for range testing (driver context, keep it cheap).
 void meshSniffRssi(const uint8_t* mac, int8_t rssi);

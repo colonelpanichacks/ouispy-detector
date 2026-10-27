@@ -40,7 +40,7 @@ extern bool isSerialConnected();
 // Ack body:       {u8 nodeId[3], u8 cmd, u16 cmdId, u8 status, u8 count}
 // Bye body:       {u8 nodeId[3], u8 reason}
 // Status body:    {u8 nodeId[3], data[]}  (management reply, layout owned
-//                  by main.cpp; flooded, ttl 3)
+//                  by main.cpp; flooded, ttl MESH_TTL)
 //
 // Encryption (fleet key set): EVERY frame is sealed whole — nothing of the
 // layout above is visible on air:
@@ -68,7 +68,7 @@ extern bool isSerialConnected();
 #define MESH_SEAL_TAG   8
 #define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
 static const uint8_t kSealSizes[] = { 64, 128, 192, 250 };   // padded frame sizes
-#define MESH_TTL        3
+#define MESH_TTL        5    // hop budget: origin + up to 4 relays
 #define MESH_HDR_LEN    12
 #define MESH_MIN_LEN    (MESH_HDR_LEN + 3)   // header + nodeId: every packet has both
 #define MESH_PKT_MAX    250
@@ -150,7 +150,7 @@ static uint8_t meshSeq = 0;
 // (origin, seq) duplicate cache — drops re-flooded copies within the TTL
 // window. Our own packets never need an entry: the receive path drops
 // anything carrying our origin MAC before the cache is consulted.
-struct MeshSeen { uint8_t origin[6]; uint8_t seq; uint32_t ts; bool live; };
+struct MeshSeen { uint8_t origin[6]; uint8_t seq; uint32_t ts; bool live; volatile uint8_t copies; };
 static MeshSeen seenCache[MESH_SEEN_SIZE];
 
 // TX queue: loop-context only (meshQueueDetection / command pump / relay /
@@ -164,6 +164,7 @@ static uint8_t txHead = 0, txTail = 0, txCount = 0;
 static uint8_t rxQ[MESH_RXQ_SIZE][MESH_PKT_MAX];
 static uint8_t rxLen[MESH_RXQ_SIZE];
 static uint8_t rxChan[MESH_RXQ_SIZE];   // radio channel when each frame arrived
+static uint8_t rxFrom[MESH_RXQ_SIZE][6];  // transmitter: the neighbor (origin or relay) we heard
 
 // The channel the radio is on right now (0 = unknown, e.g. an MQTT STA
 // window). Frames heard on any OTHER channel than the mesh's come from a
@@ -316,9 +317,10 @@ void meshStats(uint32_t& rxAll, uint32_t& rxQueued, uint32_t& rxDup,
 // it is set, so the frame meets the receiver's next mesh visit instead of
 // waiting for this node's own schedule to come round.
 #define MESH_URGENT_MS 1500UL
+static bool meshRelaysPending();
 bool meshUrgent() {
     if (!meshStarted) return false;
-    if (txCount > 0 || outActive || outRepeatLeft) return true;
+    if (txCount > 0 || outActive || outRepeatLeft || meshRelaysPending()) return true;
     if ((int32_t)(listenUntil - millis()) > 0) return true;
     uint32_t now = millis();
     for (int i = 0; i < MESH_DET_PENDING; i++) {
@@ -446,7 +448,10 @@ static bool meshSeen(const uint8_t* origin, uint8_t seq, uint32_t now) {
         if (!seenCache[i].live) { if (freeSlot < 0) freeSlot = i; continue; }
         uint32_t age = now - seenCache[i].ts;   // wrap-safe
         if (age >= MESH_SEEN_TTL_MS) { if (freeSlot < 0) freeSlot = i; continue; }
-        if (seenCache[i].seq == seq && memcmp(seenCache[i].origin, origin, 6) == 0) return true;
+        if (seenCache[i].seq == seq && memcmp(seenCache[i].origin, origin, 6) == 0) {
+            if (seenCache[i].copies < 255) seenCache[i].copies++;   // another node relayed it
+            return true;
+        }
         if (age >= oldestAge) { oldestAge = age; oldest = i; }
     }
     int slot = (freeSlot >= 0) ? freeSlot : oldest;
@@ -454,8 +459,18 @@ static bool meshSeen(const uint8_t* origin, uint8_t seq, uint32_t now) {
     memcpy(seenCache[slot].origin, origin, 6);
     seenCache[slot].seq = seq;
     seenCache[slot].ts = now;
+    seenCache[slot].copies = 0;
     seenCache[slot].live = true;
     return false;
+}
+
+// How many other copies of a frame have been heard (0 = only the first).
+static uint8_t meshSeenCopies(const uint8_t* origin, uint8_t seq) {
+    for (int i = 0; i < MESH_SEEN_SIZE; i++) {
+        if (seenCache[i].live && seenCache[i].seq == seq &&
+            memcmp(seenCache[i].origin, origin, 6) == 0) return seenCache[i].copies;
+    }
+    return 0;
 }
 
 // Returns true only when the ID claimed a NEW roster slot (a genuine join) —
@@ -747,12 +762,14 @@ static void meshPumpCommand() {
 // retry next flush instead of vanishing.
 static void meshPumpDetections(uint32_t now);
 static void meshAckRepeatTick(uint32_t now);
+static void meshRelayTick(uint32_t now);
 
 void meshFlushTxNow() {
     if (!meshStarted || !meshParked) return;
     meshPumpCommand();
     meshAckRepeatTick(millis());   // here, not in meshTick: pre-reboot flush loops only call this
     meshPumpDetections(millis());
+    meshRelayTick(millis());
     uint8_t bcast[6];
     memset(bcast, 0xFF, 6);
     // One frame on the air at a time: the next goes out after the driver's
@@ -1266,6 +1283,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
             memcpy(rxQ[rxHead], data, len);
             rxLen[rxHead] = (uint8_t)len;
             rxChan[rxHead] = radioCh;
+            memcpy(rxFrom[rxHead], senderMac, 6);
             rxHead = (rxHead + 1) % MESH_RXQ_SIZE;
             rxCount++;
             meshRxQueued++;
@@ -1295,6 +1313,7 @@ static void meshRecvCb(const uint8_t* senderMac, const uint8_t* data, int len) {
         memcpy(rxQ[rxHead], data, l);
         rxLen[rxHead] = l;
         rxChan[rxHead] = radioCh;
+        memcpy(rxFrom[rxHead], senderMac, 6);
         rxHead = (rxHead + 1) % MESH_RXQ_SIZE;
         rxCount++;
         meshRxQueued++;
@@ -1515,12 +1534,93 @@ static void strayRecord(const uint8_t* id, uint8_t ch, uint8_t role, uint32_t no
     }
 }
 
-static void meshRelay(uint8_t* pkt, uint8_t len) {
+static void meshRelayNow(uint8_t* pkt, uint8_t len) {
     if (pkt[4] > 1 && txCount < MESH_TXQ_SIZE) {
         pkt[4]--;
         sealRelay = true;    // keep the origin's boot/ctr (replay windows key on it)
         if (!meshTxPush(pkt, len)) pkt[4]++;  // no slot: don't burn the ttl
         sealRelay = false;
+    }
+}
+
+// Managed flood: every node is a repeater, but not every node has to
+// speak. A relay waits briefly, and the wait follows the link the frame
+// arrived on: heard WEAKLY means it came from far away, so this node
+// extends it furthest and goes first; heard strongly means it came from
+// next door, so it waits. Once MESH_RELAY_ENOUGH other nodes have carried
+// the same frame, ours is dropped. The first copy to reach any node rides
+// the longest working hops (fewest hops to the far end), and nobody keeps
+// routes: a node that dies or moves just means the next copy goes another
+// way. Detections and acks keep their own end-to-end retries on top.
+#define MESH_RELAY_SLOTS   12
+#define MESH_RELAY_ENOUGH  2       // keep redundancy: two carriers, not one
+#define MESH_RELAY_MAX_MS  4000UL  // a relay older than this is stale
+struct MeshRelayPend {
+    uint8_t pkt[MESH_PKT_MAX]; uint8_t len; uint32_t dueAt, at; bool used;
+    uint16_t boot; uint32_t ctr;   // origin's seal counters, carried into the re-seal
+};
+static MeshRelayPend relayPend[MESH_RELAY_SLOTS];
+uint32_t meshRelaySent = 0, meshRelaySuppressed = 0;
+
+// Link signal from the sniff table (sweep phases only); 0 when unknown.
+static int8_t meshNeighborRssi(const uint8_t* mac) {
+    uint32_t now = millis();
+    for (int i = 0; i < MESH_SNIFF_SLOTS; i++) {
+        if (sniffTs[i] && now - sniffTs[i] < 60000 && memcmp(sniffMac[i], mac, 6) == 0) return sniffRssi[i];
+    }
+    return 0;
+}
+
+// -95 dBm (edge of range) -> ~0 ms, -40 dBm (next door) -> ~110 ms,
+// unknown -> the middle; plus jitter so equal links don't collide.
+static uint32_t meshRelayDelayMs(int8_t rssi) {
+    int r = rssi ? rssi : -70;
+    if (r < -95) r = -95;
+    if (r > -40) r = -40;
+    return (uint32_t)((r + 95) * 2) + (esp_random() % 25);
+}
+
+static void meshRelay(uint8_t* pkt, uint8_t len, const uint8_t* fromMac) {
+    if (pkt[4] <= 1) return;
+    uint32_t now = millis();
+    for (int i = 0; i < MESH_RELAY_SLOTS; i++) {
+        if (relayPend[i].used) continue;
+        memcpy(relayPend[i].pkt, pkt, len);
+        relayPend[i].len = len;
+        relayPend[i].at = now;
+        relayPend[i].boot = curBoot;
+        relayPend[i].ctr = curCtr;
+        relayPend[i].dueAt = now + meshRelayDelayMs(meshNeighborRssi(fromMac));
+        relayPend[i].used = true;
+        return;
+    }
+    meshRelayNow(pkt, len);   // table full: plain flood
+}
+
+static bool meshRelaysPending() {
+    for (int i = 0; i < MESH_RELAY_SLOTS; i++) if (relayPend[i].used) return true;
+    return false;
+}
+
+// Radio parked: move due relays into the TX queue, or drop the ones
+// enough other nodes have already carried.
+static void meshRelayTick(uint32_t now) {
+    for (int i = 0; i < MESH_RELAY_SLOTS; i++) {
+        MeshRelayPend& r = relayPend[i];
+        if (!r.used) continue;
+        if (now - r.at > MESH_RELAY_MAX_MS) { r.used = false; continue; }
+        if ((int32_t)(now - r.dueAt) < 0) continue;
+        if (meshSeenCopies(r.pkt + 6, r.pkt[5]) >= MESH_RELAY_ENOUGH) {
+            r.used = false;
+            meshRelaySuppressed++;
+            continue;
+        }
+        if (txCount >= MESH_TXQ_SIZE) return;   // try again next flush
+        curBoot = r.boot;
+        curCtr = r.ctr;
+        meshRelayNow(r.pkt, r.len);
+        r.used = false;
+        meshRelaySent++;
     }
 }
 
@@ -1540,12 +1640,14 @@ void meshTick() {
     // Drain RX ring.
     while (true) {
         uint8_t pkt[MESH_PKT_MAX];
+        uint8_t rxHop[6];
         uint8_t len = 0, ch = 0;
         portENTER_CRITICAL(&rxMux);
         if (rxCount > 0) {
             memcpy(pkt, rxQ[rxTail], rxLen[rxTail]);
             len = rxLen[rxTail];
             ch = rxChan[rxTail];
+            memcpy(rxHop, rxFrom[rxTail], 6);
             rxTail = (rxTail + 1) % MESH_RXQ_SIZE;
             rxCount--;
         }
@@ -1648,7 +1750,7 @@ void meshTick() {
             } else {
                 meshReport(mac, ident, full, rssi, dtype, wifiDom);   // legacy sender
             }
-            meshRelay(pkt, len);
+            meshRelay(pkt, len, rxHop);
             break;
         }
         case MESH_T_DETACK: {
@@ -1662,12 +1764,12 @@ void meshTick() {
                     }
                 }
             } else {
-                meshRelay(pkt, len);   // carry it back toward its origin
+                meshRelay(pkt, len, rxHop);   // carry it back toward its origin
             }
             break;
         }
         case MESH_T_COMMAND:
-            meshRelay(pkt, len);   // relay first: a reboot command still spreads
+            meshRelayNow(pkt, len);   // relay first, at once: a reboot command still spreads
             meshHandleCommand(pkt, len);
             break;
         case MESH_T_ACK: {
@@ -1677,12 +1779,12 @@ void meshTick() {
                 meshOnAck(nodeId, pkt[MESH_HDR_LEN + 3], ackId,
                           pkt[MESH_HDR_LEN + 6], pkt[MESH_HDR_LEN + 7]);
             }
-            meshRelay(pkt, len);
+            meshRelay(pkt, len, rxHop);
             break;
         }
         case MESH_T_STATUS:
             meshOnStatus(nodeId, pkt + MESH_HDR_LEN + 3, len - (MESH_HDR_LEN + 3));
-            meshRelay(pkt, len);
+            meshRelay(pkt, len, rxHop);
             break;
         case MESH_T_BYE:
             // Controlled shutdown: drop the origin right now so the link

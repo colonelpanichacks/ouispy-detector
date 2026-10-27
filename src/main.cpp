@@ -6330,7 +6330,7 @@ void loop() {
             lastHeartbeat = currentMillis;
             uint32_t rxAll=0, rxQ=0, rxDup=0, rxSelf=0, rxBad=0, txS=0, txF=0, txC=0;
             if (meshCfg.enabled) meshStats(rxAll, rxQ, rxDup, rxSelf, rxBad, txS, txF, txC);
-            if (isSerialConnected()) Serial.printf("[HEARTBEAT] phase=%d ch=%d dev=%zu mesh=%d rx=%lu q=%lu dup=%lu self=%lu bad=%lu tx=%lu/%lu/%lu led=%d flag=%d idle=%lu lrssi=%d\n",
+            if (isSerialConnected()) Serial.printf("[HEARTBEAT] phase=%d ch=%d dev=%zu mesh=%d rx=%lu q=%lu dup=%lu self=%lu bad=%lu tx=%lu/%lu/%lu led=%d flag=%d idle=%lu lrssi=%d relay=%lu/%lu\n",
                 g_radioPhase, g_wifiChannel, devices.size(),
                 meshCfg.enabled ? meshNodeCount() : 0,
                 (unsigned long)rxAll, (unsigned long)rxQ, (unsigned long)rxDup,
@@ -6338,7 +6338,8 @@ void loop() {
                 (unsigned long)txS, (unsigned long)txF, (unsigned long)txC,
                 digitalRead(LED_PIN), ledEnabled ? 1 : 0,
                 (unsigned long)(millis() - lastLedActivity),
-                meshCfg.enabled ? (int)meshLinkRssi() : 0);
+                meshCfg.enabled ? (int)meshLinkRssi() : 0,
+                (unsigned long)meshRelaySent, (unsigned long)meshRelaySuppressed);
             emitTelemetry();
         }
 
