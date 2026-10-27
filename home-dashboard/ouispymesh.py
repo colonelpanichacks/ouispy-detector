@@ -66,6 +66,8 @@ def parse_args():
     ap.add_argument("--mqtt-pass")
     ap.add_argument("--topic", help="MQTT detection topic filter (default +/detection)")
     ap.add_argument("--demo", action="store_true", help="simulated fleet, separate database")
+    ap.add_argument("--demo-center", metavar="LAT,LON", help="where the demo fleet sits (default Portland, OR)")
+    ap.add_argument("--demo-showcase", action="store_true", help="screenshot-safe demo data: no police/ALPR vendors, synthetic MACs")
     ap.add_argument("--replay", help="replay a recorded serial log")
     ap.add_argument("--speed", type=float, default=1.0, help="replay speed factor")
     ap.add_argument("--record", help="append raw serial lines (with timestamps) to this file")
@@ -272,6 +274,9 @@ def start_sources():
     s = settings()
     new = {}
     if args.demo:
+        if args.demo_showcase:
+            import sources as _src
+            _src.use_showcase()
         new["demo"] = DemoSource(fleet, on_source_status)
         _seed_demo_positions()
     elif args.replay:
@@ -306,7 +311,7 @@ def _seed_demo_positions():
     """Give the fake fleet a layout the first time demo mode runs."""
     from sources import DEMO_HOME, DEMO_REMOTES
     meta = store.nodes_meta()
-    base = (45.5231, -122.6765)
+    base = tuple(float(v) for v in args.demo_center.split(",")) if args.demo_center else (45.5231, -122.6765)
     offsets = {DEMO_HOME: (0, 0), DEMO_REMOTES[0]: (0.0042, -0.0061),
                DEMO_REMOTES[1]: (-0.0035, -0.0072), DEMO_REMOTES[2]: (0.0068, 0.0081),
                DEMO_REMOTES[3]: (-0.0049, 0.0057)}
@@ -325,7 +330,7 @@ def _seed_demo_positions():
 def _backfill_demo_history():
     """24 h of fake sightings + detections so charts and history have shape."""
     import random
-    from sources import DEMO_HOME, DEMO_REMOTES, DEMO_TARGETS
+    from sources import DEMO_HOME, DEMO_REMOTES, DEMO_TARGETS, demo_mac
     if store.query_detections(limit=1)[0]:
         return
     now = time.time()
@@ -344,7 +349,7 @@ def _backfill_demo_history():
     nodes = [DEMO_HOME] + DEMO_REMOTES
     for i in range(70):
         oui, ftype, label, dom = random.choice(DEMO_TARGETS)
-        mac = oui + ":" + ":".join(f"{random.randint(0, 255):02X}" for _ in range(3))
+        mac = demo_mac(oui)
         store.add_detection({"ts": now - random.uniform(600, 86400), "node": random.choice(nodes),
                              "mac": mac, "alias": "", "rssi": random.randint(-92, -48),
                              "type": ftype, "match": oui.replace(":", ""), "descr": label,
