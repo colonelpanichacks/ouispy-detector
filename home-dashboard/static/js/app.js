@@ -441,13 +441,17 @@ function patchMarker(m, n) {
 // around their shared spot for display (stored positions are untouched;
 // a faint leader shows each true spot), and lines and traffic are drawn
 // between the displayed positions, so they work at any zoom.
-const SPREAD_PX = 54;
+const SPREAD_PX = 44;
 S.disp = {};
-function computeSpread() {
+// For a given zoom (the one a zoom animation is heading to, or the current
+// one): pixel math in world coordinates at that zoom, so the fan is right
+// the moment the animation starts instead of ballooning until it ends.
+function computeSpread(zoom) {
     S.disp = {};
     if (!map._loaded) return;
+    const z = zoom == null ? map.getZoom() : zoom;
     const pts = S.fleet.nodes.filter((n) => n.lat != null)
-        .map((n) => ({ n, p: map.latLngToContainerPoint([n.lat, n.lon]) }));
+        .map((n) => ({ n, p: map.project([n.lat, n.lon], z) }));
     const used = new Set();
     for (let i = 0; i < pts.length; i++) {
         if (used.has(i)) continue;
@@ -459,11 +463,11 @@ function computeSpread() {
         group.forEach((k) => used.add(k));
         const cx = group.reduce((a, k) => a + pts[k].p.x, 0) / group.length;
         const cy = group.reduce((a, k) => a + pts[k].p.y, 0) / group.length;
-        const r = Math.max(34, 16 * group.length);
+        const r = Math.max(24, 11 * group.length);
         const members = group.map((k) => pts[k].n).sort((a, b) => (b.is_home - a.is_home) || a.id.localeCompare(b.id));
         members.forEach((n, k) => {
             const ang = -Math.PI / 2 + (k * 2 * Math.PI) / members.length;
-            const ll = map.containerPointToLatLng([cx + r * Math.cos(ang), cy + r * Math.sin(ang)]);
+            const ll = map.unproject([cx + r * Math.cos(ang), cy + r * Math.sin(ang)], z);
             S.disp[n.id] = [ll.lat, ll.lng];
         });
     }
@@ -481,9 +485,9 @@ function renderLeaders() {
     }
 }
 
-function renderMap() {
+function renderMap(zoom) {
     const seen = new Set();
-    computeSpread();
+    computeSpread(zoom);
     for (const n of S.fleet.nodes) {
         if (n.lat == null || n.lon == null) continue;
         seen.add(n.id);
@@ -608,7 +612,6 @@ function renderLinks() {
     for (const id of Object.keys(S.linkLines)) {
         if (!keep.has(id)) { S.links.removeLayer(S.linkLines[id]); delete S.linkLines[id]; }
     }
-    renderMeshGraph();
     const b = $("mapLinks");
     if (b) {
         const mode = linkMode();
@@ -675,60 +678,6 @@ function renderTrafficBtn() {
     $("mapTraffic").classList.toggle("on", trafficOn());
     $("mapTraffic").querySelector("span").textContent = trafficOn() ? "Traffic: on" : "Traffic: off";
     $("mapTraffic").setAttribute("aria-pressed", trafficOn() ? "true" : "false");
-}
-
-// Mesh diagram (map corner, Lines: mesh): who hears whom, independent of
-// where nodes are placed (placed close together, map lines are only a few
-// pixels long). Home in the middle, the rest around it; each link colored
-// by its best signal with the dBm on it, dashed when only one side hears.
-const meshGraphCtl = L.control({ position: "bottomleft" });
-meshGraphCtl.onAdd = () => {
-    const div = L.DomUtil.create("div", "mesh-graph");
-    L.DomEvent.disableClickPropagation(div);
-    return div;
-};
-meshGraphCtl.addTo(map);
-function renderMeshGraph() {
-    const box = meshGraphCtl.getContainer();
-    if (!box) return;
-    const nodes = S.fleet.nodes;
-    if (linkMode() !== "mesh" || nodes.length < 2) { box.style.display = "none"; return; }
-    box.style.display = "";
-    const W = 230, H = 190, cx = W / 2, cy = H / 2 + 6, R = 64;
-    const home = nodes.find((n) => n.is_home);
-    const ring = nodes.filter((n) => n !== home);
-    const pos = {};
-    if (home) pos[home.id] = [cx, cy];
-    ring.forEach((n, i) => {
-        const a = -Math.PI / 2 + (i * 2 * Math.PI) / ring.length;
-        pos[n.id] = [cx + R * 1.35 * Math.cos(a), cy + R * Math.sin(a)];
-    });
-    // Merge both directions of each pair.
-    const pairs = {};
-    for (const n of nodes) for (const [id, rssi, age] of (n.cfg && n.cfg.nbr) || []) {
-        if (!pos[id]) continue;
-        const k = [n.id, id].sort().join("-");
-        (pairs[k] = pairs[k] || { a: k.slice(0, 6), b: k.slice(7), seen: {} }).seen[n.id] = { rssi, age };
-    }
-    let edges = "", labels = "";
-    for (const p of Object.values(pairs)) {
-        const [x1, y1] = pos[p.a], [x2, y2] = pos[p.b];
-        const rs = Object.values(p.seen).map((x) => x.rssi).filter(Boolean);
-        const r = rs.length ? Math.max(...rs) : 0;
-        const both = p.seen[p.a] && p.seen[p.b];
-        const up = nodeById(p.a) && nodeById(p.a).online && nodeById(p.b) && nodeById(p.b).online;
-        edges += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${rssiColor(r)}" stroke-width="2.2" stroke-dasharray="${both ? "" : "3 5"}" opacity="${up ? 0.9 : 0.35}"/>`;
-        if (r) labels += `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 3}" class="mg-db">${r}</text>`;
-    }
-    const dots = nodes.filter((n) => pos[n.id]).map((n) => {
-        const [x, y] = pos[n.id];
-        const st = nodeState(n);
-        const col = st === "offline" ? "#f87171" : st === "stale" ? "#fbbf24" : nodeColor(n) || (n.is_home ? "#f0abfc" : "#4ecdc4");
-        return `<circle cx="${x}" cy="${y}" r="${n.is_home ? 8 : 6.5}" fill="#06080b" stroke="${col}" stroke-width="2.4"/>` +
-            `<text x="${x}" y="${y + (y < cy ? -12 : 20)}" class="mg-name">${esc(n.alias || n.id)}</text>`;
-    }).join("");
-    box.innerHTML = `<div class="mg-head">Mesh links <span>dBm, best side</span></div>
-        <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Mesh link diagram">${edges}${labels}${dots}</svg>`;
 }
 
 // Links toggle on the map: home -> mesh -> off. Saved, so every open
@@ -882,7 +831,9 @@ function declutterLabels() {
         placed.push(lab.getBoundingClientRect());
     }
 }
-// Zoom changes which markers overlap (spread); a pan only moves everything.
+// Zoom changes which markers overlap (spread): re-fan for the target zoom as
+// the animation starts, and once more when it ends. A pan only moves everything.
+map.on("zoomanim", (e) => renderMap(e.zoom));
 map.on("zoomend", () => renderMap());
 map.on("moveend", () => { renderLinks(); declutterLabels(); });
 
