@@ -641,10 +641,6 @@ input[type="checkbox"]:checked::after {
 .map-tools .icon-btn { color: var(--soft); border-color: var(--line-strong); }
 .panel-head .help { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
 
-/* Spread markers: faint leader to each node's true spot */
-path.leader { stroke: rgba(219,228,238,0.45); stroke-dasharray: 2 3; fill: none; }
-path.leader-dot { stroke: rgba(219,228,238,0.7); fill: rgba(219,228,238,0.7); }
-
 /* Map lines toggle (home / mesh / off) */
 .map-links-btn { flex: none; margin-left: 10px; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;
     font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }

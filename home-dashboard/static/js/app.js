@@ -209,8 +209,16 @@ function renderHome() {
         }
     }
     if (h.legacy) cells.push(["Firmware", "legacy (no TLM)", "warn", true]);
-    if (h.strays && h.strays.length) {
-        cells.push(["Wrong channel", h.strays.map((x) => `${esc(nodeName(x.id))} on ${x.ch}`).join(", "), "bad", true]);
+    // A strong node next door leaks into the channels beside its own, so the
+    // home's sweep can "hear" it elsewhere. Trust the node's own fresh
+    // report: it's only stray if it doesn't say it's on the fleet channel.
+    const strays = (h.strays || []).filter((x) => {
+        const n = nodeById(x.id);
+        const c = n && n.cfg;
+        return !(c && n.online && c.ch === h.ch && now() - (n.cfg_ts || 0) < 120);
+    });
+    if (strays.length) {
+        cells.push(["Wrong channel", strays.map((x) => `${esc(nodeName(x.id))} on ${x.ch}`).join(", "), "bad", true]);
     }
     $("homeStats").innerHTML = cells.map(([k, v, cls, wide]) =>
         `<div class="hs${wide ? " wide" : ""}"><div class="k">${k}</div><div class="v ${cls || ""}">${v}</div></div>`).join("");
@@ -436,64 +444,14 @@ function patchMarker(m, n) {
     const label = root.querySelector(".label");
     if (label && label.innerHTML !== p.label) label.innerHTML = p.label;
 }
-// Nodes placed close together overlap on screen, and their links shrink to
-// nothing. Markers closer than SPREAD_PX are fanned out on a small circle
-// around their shared spot for display (stored positions are untouched;
-// a faint leader shows each true spot), and lines and traffic are drawn
-// between the displayed positions, so they work at any zoom.
-const SPREAD_PX = 44;
-S.disp = {};
-// For a given zoom (the one a zoom animation is heading to, or the current
-// one): pixel math in world coordinates at that zoom, so the fan is right
-// the moment the animation starts instead of ballooning until it ends.
-function computeSpread(zoom) {
-    S.disp = {};
-    if (!map._loaded) return;
-    const z = zoom == null ? map.getZoom() : zoom;
-    const pts = S.fleet.nodes.filter((n) => n.lat != null)
-        .map((n) => ({ n, p: map.project([n.lat, n.lon], z) }));
-    const used = new Set();
-    for (let i = 0; i < pts.length; i++) {
-        if (used.has(i)) continue;
-        const group = [i];
-        for (let j = i + 1; j < pts.length; j++) {
-            if (!used.has(j) && group.some((k) => pts[k].p.distanceTo(pts[j].p) < SPREAD_PX)) group.push(j);
-        }
-        if (group.length < 2) continue;
-        group.forEach((k) => used.add(k));
-        const cx = group.reduce((a, k) => a + pts[k].p.x, 0) / group.length;
-        const cy = group.reduce((a, k) => a + pts[k].p.y, 0) / group.length;
-        const r = Math.max(24, 11 * group.length);
-        const members = group.map((k) => pts[k].n).sort((a, b) => (b.is_home - a.is_home) || a.id.localeCompare(b.id));
-        members.forEach((n, k) => {
-            const ang = -Math.PI / 2 + (k * 2 * Math.PI) / members.length;
-            const ll = map.unproject([cx + r * Math.cos(ang), cy + r * Math.sin(ang)], z);
-            S.disp[n.id] = [ll.lat, ll.lng];
-        });
-    }
-}
-// Where a node is drawn: spread position if it has one, else its own.
-function dispLL(n) { return S.disp[n.id] || [n.lat, n.lon]; }
-function renderLeaders() {
-    if (!S.leaders) S.leaders = L.layerGroup().addTo(map);
-    S.leaders.clearLayers();
-    for (const n of S.fleet.nodes) {
-        const d = S.disp[n.id];
-        if (!d || n.lat == null) continue;
-        S.leaders.addLayer(L.polyline([[n.lat, n.lon], d], { className: "leader", interactive: false, weight: 1 }));
-        S.leaders.addLayer(L.circleMarker([n.lat, n.lon], { radius: 2, className: "leader-dot", interactive: false }));
-    }
-}
-
-function renderMap(zoom) {
+function renderMap() {
     const seen = new Set();
-    computeSpread(zoom);
     for (const n of S.fleet.nodes) {
         if (n.lat == null || n.lon == null) continue;
         seen.add(n.id);
         let m = S.markers[n.id];
         if (!m) {
-            m = L.marker(dispLL(n), {
+            m = L.marker([n.lat, n.lon], {
                 draggable: true, riseOnHover: true,
                 icon: L.divIcon({ className: "", html: markerHtml(n), iconSize: [0, 0] }),
             }).addTo(map);
@@ -501,9 +459,9 @@ function renderMap(zoom) {
             m.on("click", () => selectNode(n.id, true));
             S.markers[n.id] = m;
         } else {
-            const ll = m.getLatLng(), [dl, dn] = dispLL(n);
+            const ll = m.getLatLng();
             if (!m.dragging || !m._dragActive) {
-                if (Math.abs(ll.lat - dl) > 1e-9 || Math.abs(ll.lng - dn) > 1e-9) m.setLatLng([dl, dn]);
+                if (Math.abs(ll.lat - n.lat) > 1e-9 || Math.abs(ll.lng - n.lon) > 1e-9) m.setLatLng([n.lat, n.lon]);
             }
             patchMarker(m, n);
         }
@@ -511,7 +469,6 @@ function renderMap(zoom) {
     for (const id of Object.keys(S.markers)) {
         if (!seen.has(id)) { map.removeLayer(S.markers[id]); delete S.markers[id]; }
     }
-    renderLeaders();
     renderLinks();
     setTimeout(declutterLabels, 0);
     const unplaced = S.fleet.nodes.filter((n) => n.lat == null);
@@ -585,7 +542,7 @@ function renderLinks() {
         // Solid = live two-way link; dashed = one side only, or gone quiet.
         const style = { color: rssiColor(w.r), weight: w.key.startsWith("m:") ? 3.5 : 2.5,
                         opacity: w.faded ? 0.4 : 0.9, dashArray: w.oneWay ? "3 7" : w.faded ? "4 6" : null };
-        const pts = [dispLL(w.a), dispLL(w.b)];
+        const pts = [[w.a.lat, w.a.lon], [w.b.lat, w.b.lon]];
         // Label only the selected node's links permanently, and only when the
         // line is long enough on screen to hold it; otherwise on hover/tap.
         const px = map.latLngToContainerPoint(pts[0]).distanceTo(map.latLngToContainerPoint(pts[1]));
@@ -645,7 +602,7 @@ function meshRoute(fromId, toId) {
 function trafficOn() { return !!S.settings.traffic; }
 function flow(path, kind) {
     if (!trafficOn() || !map._loaded) return;
-    const pts = path.map((id) => nodeById(id)).filter((n) => n && n.lat != null).map((n) => dispLL(n));
+    const pts = path.map((id) => nodeById(id)).filter((n) => n && n.lat != null).map((n) => [n.lat, n.lon]);
     if (pts.length < 2) return;
     if (!S.flowLayer) S.flowLayer = L.layerGroup().addTo(map);
     const line = L.polyline(pts, { className: `flow flow-${kind}`, interactive: false, weight: kind === "det" ? 5 : 3 });
@@ -831,11 +788,7 @@ function declutterLabels() {
         placed.push(lab.getBoundingClientRect());
     }
 }
-// Zoom changes which markers overlap (spread): re-fan for the target zoom as
-// the animation starts, and once more when it ends. A pan only moves everything.
-map.on("zoomanim", (e) => renderMap(e.zoom));
-map.on("zoomend", () => renderMap());
-map.on("moveend", () => { renderLinks(); declutterLabels(); });
+map.on("zoomend moveend", () => { renderLinks(); declutterLabels(); });
 
 async function setNodePos(id, lat, lon) {
     const n = nodeById(id);
