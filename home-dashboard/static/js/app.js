@@ -1456,10 +1456,29 @@ $("clearBtn").onclick = async () => {
     $("clearBtn").textContent = "Clear detection history";
     await api("/api/detections/clear", { method: "POST" });
     S.dets = [];
+    await afterDetsCleared();
+};
+
+// Clear one node's detections (drawer). The server tells every open
+// dashboard (dets_cleared) so their feeds drop them too.
+async function afterDetsCleared() {
     S.statsBase = await api("/api/stats");
     S.hourly = S.statsBase.hourly || [];
     renderFeed(); renderKpis(); renderNodes(); loadHistory(false);
-};
+    if (S.selected && $("drawer").classList.contains("open")) openDrawer(S.selected);
+    if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+    if (typeof loadDevices === "function") loadDevices();
+}
+$("vClearDets").onclick = () => twoTap($("vClearDets"), async () => {
+    const mac = S.device;
+    const r = await api("/api/detections/clear", { method: "POST", body: { mac } });
+    if (r.ok) toast("good", `Cleared ${r.n} detection${r.n === 1 ? "" : "s"}`, (S.macAliases[mac] || {}).alias || mac);
+});
+$("dClearDets").onclick = () => twoTap($("dClearDets"), async () => {
+    const id = S.selected;
+    const r = await api("/api/detections/clear", { method: "POST", body: { node: id } });
+    if (r.ok) toast("good", `Cleared ${r.n} detection${r.n === 1 ? "" : "s"}`, nodeName(id));
+});
 
 // ------------------------------------------------------------------
 // fleet key as QR (this computer + the key_nets networks only; server enforces it)
@@ -1618,6 +1637,10 @@ async function boot() {
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); });
     sock.on("mac_aliases", (m) => { S.macAliases = m; });
     sock.on("job", onJob);
+    sock.on("dets_cleared", (e) => {
+        S.dets = S.dets.filter((d) => (e.node && d.node !== e.node) || (e.mac && d.mac !== e.mac));
+        afterDetsCleared();
+    });
     sock.on("gps", onGps);
     sock.on("gps_stop", (g) => {
         delete S.gpsLive[g.node];

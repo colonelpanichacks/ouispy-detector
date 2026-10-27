@@ -134,6 +134,18 @@ class StoreTest(unittest.TestCase):
         self.store.set_mac_alias("B4:1E:52:00:00:02", "")
         self.assertEqual(self.store.mac_aliases(), {})
 
+    def test_clear_one_node(self):
+        self.add("AA:00:00:00:00:01", node="D4E5F6")
+        self.add("AA:00:00:00:00:02", node="D4E5F6")
+        self.add("AA:00:00:00:00:03", node="7A8B9C")
+        self.assertEqual(self.store.clear_detections("D4E5F6"), 2)
+        self.assertEqual(self.store.detection_stats()["per_node"], {"7A8B9C": {"count": 1, "last": self.store.detection_stats()["per_node"]["7A8B9C"]["last"]}})
+        self.add("BB:00:00:00:00:09", node="7A8B9C")
+        self.add("BB:00:00:00:00:09", node="D4E5F6")
+        self.assertEqual(self.store.clear_detections(mac="BB:00:00:00:00:09"), 2)
+        self.assertEqual(self.store.clear_detections(), 1)
+        self.assertEqual(self.store.query_detections()[0], 0)
+
     def test_hourly_and_prune(self):
         now = time.time()
         self.add("AA:00:00:00:00:01", ts=now)

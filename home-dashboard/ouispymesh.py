@@ -446,8 +446,11 @@ def api_export_sig(fmt):
 
 @app.route("/api/detections/clear", methods=["POST"])
 def api_clear():
-    store.clear_detections()
-    return jsonify({"ok": True})
+    body = request.get_json(silent=True) or {}
+    node, mac = body.get("node") or None, body.get("mac") or None
+    n = store.clear_detections(node, mac)
+    emit("dets_cleared", {"node": node, "mac": mac, "n": n})   # every open dashboard drops them too
+    return jsonify({"ok": True, "n": n})
 
 
 @app.route("/api/stats")

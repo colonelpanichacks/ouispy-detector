@@ -339,6 +339,7 @@
             <button class="btn ghost" id="dPlace">Place on map</button>
             <button class="btn ghost" id="dUnplace">Remove from map</button>
             <button class="btn ghost danger" id="dForget">Forget node</button>
+            <button class="btn ghost danger" id="dClearDets" title="Deletes this node's detections from the history; the node itself is not touched">Clear detections</button>
         </div>
         <h4>Recent detections</h4>
         <div class="dfeed" id="dDets"></div>
@@ -371,7 +372,10 @@
         <div class="seenby" id="vSeenBy"></div>
         <h4>Sightings</h4>
         <div class="dfeed" id="vDets"></div>
-        <div class="drawer-actions"><button class="btn ghost" id="vHistory">Show in history</button></div>
+        <div class="drawer-actions">
+            <button class="btn ghost" id="vHistory">Show in history</button>
+            <button class="btn ghost danger" id="vClearDets" title="Deletes this device's detections from the history (alias and notes stay)">Clear detections</button>
+        </div>
     </div>
 </aside>
 

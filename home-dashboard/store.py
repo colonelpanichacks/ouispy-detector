@@ -351,10 +351,19 @@ class Store:
             self.db.execute("DELETE FROM tracks WHERE node=?", (node,))
             self.db.commit()
 
-    def clear_detections(self):
+    def clear_detections(self, node=None, mac=None):
+        """Delete all detections, or only one node's, or only one device's
+        (both given: that device as seen by that node). -> rows deleted."""
+        where, args = [], []
+        if node:
+            where.append("node=?"); args.append(node)
+        if mac:
+            where.append("mac=?"); args.append(mac)
         with self.lock:
-            self.db.execute("DELETE FROM detections")
+            n = self.db.execute("DELETE FROM detections" + (" WHERE " + " AND ".join(where) if where else ""),
+                                args).rowcount
             self.db.commit()
+        return n
 
     # ---------- sightings ----------
     def add_sighting(self, node, event, rssi=None, pkts=None, ts=None):
