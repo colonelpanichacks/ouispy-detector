@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include "mesh_ota.h"
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
@@ -64,6 +65,7 @@ extern bool isSerialConnected();
 #define MESH_T_BYE      5
 #define MESH_T_DETACK   7    // 6 is the esp-lr-mesh library's DATA_TO
 #define MESH_T_STATUS   8
+#define MESH_T_OTA      9    // firmware update session (mesh_ota.cpp)
 #define MESH_SEAL_NONCE 12
 #define MESH_SEAL_TAG   8
 #define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
@@ -816,6 +818,26 @@ void meshSelfIdHex(char out[7]) {
     snprintf(out, 7, "%02X%02X%02X", baseMac[3], baseMac[4], baseMac[5]);
 }
 
+// ---- for mesh_ota.cpp ----
+void meshSelfIdBytes(uint8_t out[3]) { memcpy(out, selfId, 3); }
+bool meshSealed() { return encReady; }
+uint8_t meshTxFree() { return (uint8_t)(MESH_TXQ_SIZE - txCount); }
+// One OTA frame: header + body. ttl 1 = direct only, MESH_TTL = may relay.
+bool meshOtaSend(const uint8_t* body, uint8_t len, bool relay) {
+    if (!meshStarted || txCount >= MESH_TXQ_SIZE || MESH_HDR_LEN + len > MESH_PKT_MAX) return false;
+    uint8_t pkt[MESH_PKT_MAX];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_OTA, relay ? MESH_TTL : 1);
+    memcpy(pkt + n, body, len);
+    return meshTxPush(pkt, n + len);
+}
+bool meshHomeHeard() {
+    uint32_t now = millis();
+    for (int i = 0; i < MESH_ROSTER_SIZE; i++) {
+        if (roster[i].live && roster[i].role == 1 && now - roster[i].lastSeen < MESH_ROSTER_TIMEOUT) return true;
+    }
+    return false;
+}
+
 static bool meshHomeKnown(uint32_t now) {
     for (int i = 0; i < MESH_ROSTER_SIZE; i++) {
         if (roster[i].live && roster[i].role == 1 && now - roster[i].lastSeen < MESH_ROSTER_TIMEOUT) return true;
@@ -1262,6 +1284,7 @@ static bool meshLenOk(uint8_t type, int len) {
         case MESH_T_BYE:      return len >= MESH_BYE_LEN;
         case MESH_T_DETACK:   return len >= MESH_DETACK_LEN;
         case MESH_T_STATUS:   return len >= MESH_MIN_LEN + 1;
+        case MESH_T_OTA:      return len >= MESH_MIN_LEN + 6;
         default:              return len >= MESH_MIN_LEN;
     }
 }
@@ -1801,6 +1824,16 @@ void meshTick() {
                 }
             }
             break;
+        case MESH_T_OTA: {
+            // Body: senderId[3], sub, session(2), dest[3], ... (mesh_ota.cpp).
+            // Frames for another node are relayed at once (no managed-flood
+            // wait: an update is thousands of frames); the sender sends with
+            // ttl 1 when the target is in direct range, so nothing relays then.
+            const uint8_t* body = pkt + MESH_HDR_LEN;
+            if (memcmp(body + 6, selfId, 3) == 0) meshOtaRx(body, len - MESH_HDR_LEN, pkt + 6, rxHop);
+            else meshRelayNow(pkt, len);
+            break;
+        }
         case MESH_T_ANNOUNCE:
         default:
             break;  // announces carry ttl=1 and are never relayed

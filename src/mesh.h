@@ -178,6 +178,13 @@ void meshSelfIdHex(char out[7]);
 // unless the radio is parked on the mesh channel — see meshFlushTxNow.
 void meshFlushTxNow();
 
+// For mesh_ota.cpp: raw OTA frames and the bits of mesh state it needs.
+void meshSelfIdBytes(uint8_t out[3]);
+bool meshSealed();                 // fleet key set and frames encrypted
+uint8_t meshTxFree();
+bool meshOtaSend(const uint8_t* body, uint8_t len, bool relay);
+bool meshHomeHeard();              // the home is live in the roster
+
 // Implemented in main.cpp — applies a complete, CRC-verified command payload
 // in loop context. May reboot the node (filter push, reboot command).
 void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint16_t len);

@@ -19,6 +19,7 @@
 #include <ArduinoJson.h>
 #include "mqtt.h"
 #include "mesh.h"
+#include "mesh_ota.h"
 #include <rom/crc.h>
 #include <mbedtls/sha256.h>
 
@@ -1494,6 +1495,14 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         filtersReportDueAt = millis() + random(200, 3000);
         if (!filtersReportDueAt) filtersReportDueAt = 1;
         break;
+    case MESH_CMD_OTA_OFFER: {
+        // A firmware update offer (signed, addressed). Accepting it starts
+        // the receiver; the transfer itself runs in mesh_ota.cpp.
+        bool ok = meshOtaOffer(payload, len);
+        meshSendAck(cmd, cmdId, ok ? 0 : 1, 0);
+        if (!ok && isSerialConnected()) Serial.println("[OTA] update offer refused (no fleet key, no OTA partition, or too big)");
+        break;
+    }
     case MESH_CMD_FILTERS_REPORT: {
         // {reporterId[3], records...}: print it, never apply or ack it.
         if (len < 3) return;
@@ -1865,6 +1874,64 @@ static bool remoteConsoleCommand(const String& line) {
     // mfadd / mfdel are their own verbs (not an mfbegin argument) so an
     // older home answers "unknown command" instead of replacing a remote's
     // whole list with the one filter meant to be added.
+    // Firmware over the mesh (mesh_ota.cpp). The dashboard stages the image
+    // on this node over USB, then sends it to remotes one at a time:
+    //   fwbegin <size> <sha256 hex>   fwdata <offset> <hex>   fwend
+    //   fwsend <node>   fwabort   fwself (install on this node)   fwstatus
+    if (verb == "fwbegin") {
+        uint32_t size = (uint32_t)strtoul(arg[0].c_str(), nullptr, 10);
+        uint8_t sha[32];
+        if (arg[1].length() != 64) { Serial.println("ERR fwbegin: usage fwbegin <size> <sha256 hex>"); return true; }
+        for (int i = 0; i < 32; i++) sha[i] = (uint8_t)strtol(arg[1].substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
+        String err;
+        if (!otaStageBegin(size, sha, err)) { Serial.printf("ERR fwbegin: %s\n", err.c_str()); return true; }
+        Serial.println("OK fwbegin");
+        return true;
+    }
+    if (verb == "fwdata") {
+        static uint8_t buf[1024];
+        const String& hex = arg[1];
+        if (hex.length() % 2 || hex.length() / 2 > sizeof(buf)) { Serial.println("ERR fwdata: bad hex"); return true; }
+        uint16_t n = hex.length() / 2;
+        for (uint16_t i = 0; i < n; i++) {
+            char h[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
+            if (!isxdigit((unsigned char)h[0]) || !isxdigit((unsigned char)h[1])) { Serial.println("ERR fwdata: bad hex"); return true; }
+            buf[i] = (uint8_t)strtol(h, nullptr, 16);
+        }
+        String err;
+        uint32_t off = (uint32_t)strtoul(arg[0].c_str(), nullptr, 10);
+        if (!otaStageData(off, buf, n, err)) { Serial.printf("ERR fwdata: %s\n", err.c_str()); Serial.flush(); return true; }
+        Serial.printf("OK fwdata %u\n", off + n);
+        Serial.flush();   // push the short reply out now, not with the next long line
+        return true;
+    }
+    if (verb == "fwend") {
+        String err;
+        uint32_t size;
+        if (!otaStageEnd(err)) { Serial.printf("ERR fwend: %s\n", err.c_str()); return true; }
+        otaStaged(size);
+        Serial.printf("OK fwend staged %u bytes\n", size);
+        return true;
+    }
+    if (verb == "fwsend") {
+        uint32_t size;
+        if (!otaStaged(size)) { Serial.println("ERR fwsend: nothing staged (fwbegin/fwdata/fwend first)"); return true; }
+        if (!parseTarget(arg[0], t, all) || all) { Serial.println("ERR fwsend: target must be one node ID"); return true; }
+        if (meshOtaBusy()) { Serial.println("ERR fwsend: an update is already running"); return true; }
+        uint8_t p[48];
+        uint16_t n = otaOfferPayload(t, p);
+        if (sendMgmt("fwsend", t, false, MESH_CMD_OTA_OFFER, p, n)) otaSendBegin(t, (uint16_t)(p[0] | (p[1] << 8)));
+        return true;
+    }
+    if (verb == "fwabort") { otaSendAbort(); Serial.println("OK fwabort"); return true; }
+    if (verb == "fwstatus") { otaPrintStatus(); return true; }
+    if (verb == "fwself") {
+        String err;
+        if (!otaSelfInstall(err)) { Serial.printf("ERR fwself: %s\n", err.c_str()); return true; }
+        localReboot("installing the staged firmware on this node");
+        return true;
+    }
+
     if (verb == "mfbegin" || verb == "mfadd" || verb == "mfdel") {
         String a = arg[0];
         a.toUpperCase();
@@ -1903,7 +1970,9 @@ static bool remoteConsoleCommand(const String& line) {
         } else {
             static const char* const OPS[] = { "filters", "fadd", "fdel" };
             static const uint8_t CMDS[] = { MESH_CMD_FILTERS, MESH_CMD_FILTER_ADD, MESH_CMD_FILTER_DEL };
-            sendMgmt(OPS[mfOp], mfTarget, mfAll, CMDS[mfOp], mfBuf, mfLen);
+            // Mesh busy (another transfer still going out): keep the staged
+            // list, so the dashboard's retry of "mfend" can send it.
+            if (!sendMgmt(OPS[mfOp], mfTarget, mfAll, CMDS[mfOp], mfBuf, mfLen)) return true;
         }
         free(mfBuf);
         mfBuf = nullptr;
@@ -2204,8 +2273,26 @@ struct PresetEntry {
 // magnets (0xFD5F is advertised by phones running Meta apps). The composite
 // requires mfr CID 0x0D53 (Luxottica) AND svc UUID 0xFD5F (Meta) in the
 // same advert, or a name-substring hit — see matchesMetaComposite().
+// Ray-Ban / Oakley Meta smart glasses. Bluetooth SIG registry: company IDs
+// 0x0D53 Luxottica, 0x058E Meta Platforms Technologies, 0x01AB Meta
+// Platforms; 16-bit service UUIDs 0xFD5F (Meta Platforms Technologies),
+// 0xFEB7 / 0xFEB8 (Meta Platforms). IEEE: Luxottica 98:59:49 and Luxottica
+// Tristar (the glasses plant) 80:AA:1C, 38:47:12. The composite is the
+// precise match; 01AB / FEB7 / FEB8 also fire on other Meta hardware.
 const PresetEntry PRESET_META[] = {
-    { FT_META_COMPOSITE, "0x0D53+0xFD5F", "Composite: Luxottica CID + Meta svc UUID, or Ray-Ban/Wayfarer/Oakley Meta name" },
+    { FT_META_COMPOSITE,  "0x0D53+0xFD5F", "Luxottica CID + Meta svc, or glasses name" },
+    { FT_COMPANY_ID,      "0D53", "Luxottica CID (Ray-Ban / Oakley Meta glasses)" },
+    { FT_SERVICE_UUID_16, "FD5F", "Meta Reality Labs svc UUID (glasses, Quest)" },
+    { FT_COMPANY_ID,      "058E", "Meta Platforms Technologies CID (glasses, Quest)" },
+    { FT_COMPANY_ID,      "01AB", "Meta Platforms CID (any Meta device)" },
+    { FT_SERVICE_UUID_16, "FEB7", "Meta Platforms svc UUID (any Meta device)" },
+    { FT_SERVICE_UUID_16, "FEB8", "Meta Platforms svc UUID (any Meta device)" },
+    { FT_NAME_SUBSTRING,  "Ray-Ban", "Ray-Ban Meta glasses (BLE name)" },
+    { FT_NAME_SUBSTRING,  "Oakley", "Oakley Meta glasses (BLE name)" },
+    { FT_NAME_SUBSTRING,  "Wayfarer", "Ray-Ban Meta Wayfarer (BLE name)" },
+    { FT_MAC_PREFIX,      "985949", "Luxottica Group OUI (IEEE)" },
+    { FT_MAC_PREFIX,      "80AA1C", "Luxottica Tristar OUI (IEEE, glasses plant)" },
+    { FT_MAC_PREFIX,      "384712", "Luxottica Tristar OUI (IEEE, glasses plant)" },
 };
 const size_t PRESET_META_COUNT = sizeof(PRESET_META) / sizeof(PRESET_META[0]);
 
@@ -3409,10 +3496,10 @@ R"html(
                     <div class="oui-meta"><strong>Common Devices:</strong> Skydio 2, Skydio X2, Skydio 3</div>
                     </details>
                     <details>
-                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>5 OUIs</code></summary>
+                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>7 OUIs</code></summary>
                     <div class="oui-note"><em>sourced from <a href=\"https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21\" target=\"_blank\" style=\"color:#4ecdc4;\">glass-detect repository</a></em></div>
                     <div class="oui-note">Last one from Luxottica Group S.P.A. detected by @konradit.</div>
-                    <div class="oui-entries"><code data-oui="7C:2A:9E" onclick="toggleOuiChip(this)">7C:2A:9E</code> <code data-oui="CC:66:0A" onclick="toggleOuiChip(this)">CC:66:0A</code> <code data-oui="F4:03:43" onclick="toggleOuiChip(this)">F4:03:43</code> <code data-oui="5C:E9:1E" onclick="toggleOuiChip(this)">5C:E9:1E</code> <code data-oui="98:59:49" onclick="toggleOuiChip(this)">98:59:49</code></div>
+                    <div class="oui-entries"><code data-oui="7C:2A:9E" onclick="toggleOuiChip(this)">7C:2A:9E</code> <code data-oui="CC:66:0A" onclick="toggleOuiChip(this)">CC:66:0A</code> <code data-oui="F4:03:43" onclick="toggleOuiChip(this)">F4:03:43</code> <code data-oui="5C:E9:1E" onclick="toggleOuiChip(this)">5C:E9:1E</code> <code data-oui="98:59:49" onclick="toggleOuiChip(this)">98:59:49</code> <code data-oui="80:AA:1C" onclick="toggleOuiChip(this)">80:AA:1C</code> <code data-oui="38:47:12" onclick="toggleOuiChip(this)">38:47:12</code></div>
                     <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="META/RAYBAN SMARTGLASSES" onclick="addFilterCard(this)">+ Add selected to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
@@ -5862,7 +5949,12 @@ void setup() {
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);   // runtime BOOT-hold escape
     delay(400);
     
-    // Initialize Serial first
+    // Initialize Serial first. 4 KB RX: firmware staging lines (fwdata)
+    // are ~1 KB and the default 256-byte buffer drops their tail.
+    Serial.setRxBufferSize(4096);
+    // TX too: the 256-byte default made every long line (TLM, RST) wait on
+    // the host, stalling the loop for seconds during a firmware upload.
+    Serial.setTxBufferSize(4096);
     Serial.begin(115200);
     delay(250);
 
@@ -6098,6 +6190,8 @@ static void emitTelemetry() {
 
 void loop() {
     checkBootButtonLoop();   // BOOT hold -> clear lock, back to config mode
+    meshOtaTick();
+    otaRollbackTick();
     static unsigned long lastCleanupTime = 0;
     static unsigned long lastStatusTime = 0;
     unsigned long currentMillis = millis();
@@ -6218,6 +6312,30 @@ void loop() {
 
         // Channel auto-heal owns the radio while sweeping: no phase
         // transitions, no hops — just the mesh, the console, and the LED.
+        // Firmware update in progress (sending or receiving): scanning
+        // pauses and the radio stays parked on the mesh channel.
+        static bool otaParked = false;
+        if (meshCfg.enabled && meshOtaBusy()) {
+            if (!otaParked) {
+                if (pBLEScan && pBLEScan->isScanning()) pBLEScan->stop();
+                esp_wifi_set_promiscuous(false);
+                g_radioPhase = PHASE_IDLE;   // scanning restarts cleanly afterwards
+                meshParkChannel();
+                otaParked = true;
+            }
+            meshTick();
+            remoteMgmtTick();
+            serialConsoleTick();
+            updateNeoPixelAnimation();
+            meshLinkLedTick();
+            // Keep telemetry flowing, or the dashboard shows the fleet offline.
+            static unsigned long otaTlmAt = 0;
+            if (millis() - otaTlmAt >= 5000) { otaTlmAt = millis(); emitTelemetry(); }
+            delay(1);
+            return;
+        }
+        otaParked = false;
+
         if (meshCfg.enabled && meshHealing()) {
             meshTick();
             remoteMgmtTick();
