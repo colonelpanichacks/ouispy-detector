@@ -262,7 +262,10 @@ function renderNodes() {
 // ------------------------------------------------------------------
 // map
 // ------------------------------------------------------------------
-const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true });
+// maxZoom 22 everywhere: past a layer's last real tile level (maxNativeZoom)
+// Leaflet enlarges its final tiles, so you can always zoom in close.
+const MAP_MAX_ZOOM = 22;
+const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 // Free base maps that need no API key. Each keeps its provider's
@@ -307,13 +310,28 @@ function applyTiles() {
     el.classList.toggle("grid-bg", mode === "none");
     el.classList.toggle("dark-tiles", (t && t.dark) || mode === "custom-dark");
     if (t) {
-        tileLayer = L.tileLayer(t.url, { maxZoom: 20, maxNativeZoom: t.max, attribution: t.attr, detectRetina: false }).addTo(map);
-        if (t.labels) labelLayer = L.tileLayer(t.labels, { maxZoom: 20, maxNativeZoom: t.max, pane: "overlayPane" }).addTo(map);
+        tileLayer = L.tileLayer(t.url, { maxZoom: MAP_MAX_ZOOM, maxNativeZoom: t.max, attribution: t.attr }).addTo(map);
+        if (t.labels) labelLayer = L.tileLayer(t.labels, { maxZoom: MAP_MAX_ZOOM, maxNativeZoom: t.max, pane: "overlayPane" }).addTo(map);
     } else if (mode.startsWith("custom") && S.settings.tiles_custom) {
-        tileLayer = L.tileLayer(S.settings.tiles_custom, { maxZoom: 20 }).addTo(map);
+        tileLayer = L.tileLayer(S.settings.tiles_custom, { maxZoom: MAP_MAX_ZOOM, maxNativeZoom: 19 }).addTo(map);
     }
     if ($("mapLayer") && document.activeElement !== $("mapLayer")) $("mapLayer").value = mode;
 }
+// Maximize: the map panel fills the whole window (desktop and phone; a CSS
+// overlay, since phones have no element fullscreen). Esc or the button exits.
+function setMapMax(on) {
+    const panel = document.querySelector(".map-panel");
+    panel.classList.toggle("map-max", on);
+    document.body.classList.toggle("map-maxed", on);
+    $("mapMax").classList.toggle("on", on);
+    $("mapMax").title = on ? "Exit full screen map (Esc)" : "Full screen map";
+    $("mapMax").setAttribute("aria-pressed", on ? "true" : "false");
+    setTimeout(() => map.invalidateSize({ pan: false }), 60);
+}
+$("mapMax").onclick = () => setMapMax(!document.querySelector(".map-panel").classList.contains("map-max"));
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.querySelector(".map-panel.map-max")) setMapMax(false);
+});
 // Picking a layer on the map saves it, so every open dashboard switches too.
 $("mapLayer").onchange = async () => {
     const tiles = $("mapLayer").value;
@@ -361,29 +379,56 @@ map.on("click", (e) => {
     setPlacing(false);
 });
 
-function markerHtml(n) {
+function markerParts(n) {
     const st = nodeState(n);
     const sub = n.is_home ? "home" : (n.rssi ? `${n.rssi} dBm` : st);
     const recent = S.dets.filter((d) => d.node === n.id && now() - d.ts < 900).length;
     const gpsOn = S.gpsLive[n.id] && now() - S.gpsLive[n.id] < 60;
-    return `<div class="nmark ${st} ${n.is_home ? "home" : ""} ${S.selected === n.id ? "sel" : ""}">
+    return {
+        cls: `nmark ${st} ${n.is_home ? "home" : ""} ${S.selected === n.id ? "sel" : ""}`,
+        badge: recent ? String(recent) : "",
+        label: `${esc(n.alias || n.id)}${gpsOn ? `<i class="gpstag">GPS</i>` : ""}<small>${esc(sub)}</small>`,
+    };
+}
+function markerHtml(n) {
+    const p = markerParts(n);
+    return `<div class="${p.cls}">
         <span class="ping"></span><span class="burst"></span><span class="core"></span>
-        ${recent ? `<span class="badge" title="Detections in the last 15 min">${recent}</span>` : ""}
-        <span class="label">${esc(n.alias || n.id)}${gpsOn ? `<i class="gpstag">GPS</i>` : ""}<small>${esc(sub)}</small></span></div>`;
+        ${p.badge ? `<span class="badge" title="Detections in the last 15 min">${p.badge}</span>` : ""}
+        <span class="label">${p.label}</span></div>`;
+}
+// Update a marker that's already on the map without rebuilding it: only the
+// pieces that changed are touched, so its CSS animations (ping, pulse) keep
+// running. Rebuilding the icon every second made the map flicker on phones.
+function patchMarker(m, n) {
+    const root = m.getElement() && m.getElement().querySelector(".nmark");
+    if (!root) return;
+    const p = markerParts(n);
+    const cls = p.cls + (root.classList.contains("hit") ? " hit" : "");
+    if (root.className !== cls) root.className = cls;
+    let badge = root.querySelector(".badge");
+    if (p.badge && !badge) {
+        badge = document.createElement("span");
+        badge.className = "badge";
+        badge.title = "Detections in the last 15 min";
+        root.insertBefore(badge, root.querySelector(".label"));
+    }
+    if (badge && !p.badge) badge.remove();
+    else if (badge && badge.textContent !== p.badge) badge.textContent = p.badge;
+    const label = root.querySelector(".label");
+    if (label && label.innerHTML !== p.label) label.innerHTML = p.label;
 }
 function renderMap() {
     const seen = new Set();
     for (const n of S.fleet.nodes) {
         if (n.lat == null || n.lon == null) continue;
         seen.add(n.id);
-        const html = markerHtml(n);
         let m = S.markers[n.id];
         if (!m) {
             m = L.marker([n.lat, n.lon], {
                 draggable: true, riseOnHover: true,
-                icon: L.divIcon({ className: "", html, iconSize: [0, 0] }),
+                icon: L.divIcon({ className: "", html: markerHtml(n), iconSize: [0, 0] }),
             }).addTo(map);
-            m._html = html;
             m.on("dragend", (e) => { const p = e.target.getLatLng(); setNodePos(n.id, p.lat, p.lng); });
             m.on("click", () => selectNode(n.id, true));
             S.markers[n.id] = m;
@@ -392,10 +437,7 @@ function renderMap() {
             if (!m.dragging || !m._dragActive) {
                 if (Math.abs(ll.lat - n.lat) > 1e-9 || Math.abs(ll.lng - n.lon) > 1e-9) m.setLatLng([n.lat, n.lon]);
             }
-            if (m._html !== html && !m._hitting) {
-                m.setIcon(L.divIcon({ className: "", html, iconSize: [0, 0] }));
-                m._html = html;
-            }
+            patchMarker(m, n);
         }
     }
     for (const id of Object.keys(S.markers)) {
@@ -414,32 +456,51 @@ function renderMap() {
 }
 // Home-to-remote links: the roster RSSI is what the HOME hears from each
 // remote, so a line per placed remote coloured by that RSSI, with distance.
+// One polyline per remote, kept between updates and moved / restyled in
+// place (clearing and redrawing them all every second flickered too).
 function renderLinks() {
     if (!S.links) S.links = L.layerGroup().addTo(map);
-    S.links.clearLayers();
-    if (!map._loaded) return;   // no view yet (first render): moveend redraws
-    if (S.settings.links === false) return;
-    const home = S.fleet.nodes.find((n) => n.is_home && n.lat != null);
-    if (!home) return;
-    for (const n of S.fleet.nodes) {
-        if (n.is_home || n.lat == null || !n.online) continue;
-        const st = nodeState(n);
-        const r = n.rssi;
-        const color = !r ? "#5b6879" : r >= -70 ? "#4ecdc4" : r >= -82 ? "#fbbf24" : "#f87171";
-        const line = L.polyline([[home.lat, home.lon], [n.lat, n.lon]], {
-            color, weight: 2, opacity: st === "stale" ? 0.35 : 0.75,
-            dashArray: st === "stale" ? "4 6" : "6 4",
-        });
-        // Label only the selected node's link permanently, and only when the
-        // line is long enough on screen to hold it without covering the
-        // markers; otherwise the label appears on hover/tap.
-        const px = map.latLngToContainerPoint([home.lat, home.lon])
-            .distanceTo(map.latLngToContainerPoint([n.lat, n.lon]));
-        const pinned = (S.selected === n.id || S.selected === home.id) && px > 160;
-        line.bindTooltip(`<b>${r ? r + " dBm" : "no rssi"}</b> | ${fmtDist(metres(home, n))}`, {
-            permanent: pinned, sticky: !pinned, direction: "center", className: "link-label",
-        });
-        S.links.addLayer(line);
+    if (!S.linkLines) S.linkLines = {};
+    const keep = new Set();
+    const home = map._loaded && S.settings.links !== false
+        ? S.fleet.nodes.find((n) => n.is_home && n.lat != null) : null;
+    if (home) {
+        for (const n of S.fleet.nodes) {
+            if (n.is_home || n.lat == null || !n.online) continue;
+            keep.add(n.id);
+            const st = nodeState(n);
+            const r = n.rssi;
+            const color = !r ? "#5b6879" : r >= -70 ? "#4ecdc4" : r >= -82 ? "#fbbf24" : "#f87171";
+            const style = { color, weight: 2, opacity: st === "stale" ? 0.35 : 0.75, dashArray: st === "stale" ? "4 6" : "6 4" };
+            const pts = [[home.lat, home.lon], [n.lat, n.lon]];
+            // Label only the selected node's link permanently, and only when
+            // the line is long enough on screen to hold it without covering
+            // the markers; otherwise the label appears on hover/tap.
+            const px = map.latLngToContainerPoint(pts[0]).distanceTo(map.latLngToContainerPoint(pts[1]));
+            const pinned = (S.selected === n.id || S.selected === home.id) && px > 160;
+            const tip = `<b>${r ? r + " dBm" : "no rssi"}</b> | ${fmtDist(metres(home, n))}`;
+            let line = S.linkLines[n.id];
+            if (!line) {
+                line = S.linkLines[n.id] = L.polyline(pts, style);
+                S.links.addLayer(line);
+            } else {
+                const cur = line.getLatLngs();
+                if (cur[0].lat !== pts[0][0] || cur[0].lng !== pts[0][1] || cur[1].lat !== pts[1][0] || cur[1].lng !== pts[1][1]) line.setLatLngs(pts);
+                const o = line.options;
+                if (o.color !== style.color || o.opacity !== style.opacity || o.dashArray !== style.dashArray) line.setStyle(style);
+            }
+            if (line._pinned !== pinned) {
+                line.unbindTooltip();
+                line.bindTooltip(tip, { permanent: pinned, sticky: !pinned, direction: "center", className: "link-label" });
+                line._pinned = pinned;
+            } else if (line.getTooltip() && line._tip !== tip) {
+                line.setTooltipContent(tip);
+            }
+            line._tip = tip;
+        }
+    }
+    for (const id of Object.keys(S.linkLines)) {
+        if (!keep.has(id)) { S.links.removeLayer(S.linkLines[id]); delete S.linkLines[id]; }
     }
 }
 // ------------------------------------------------------------------
@@ -611,7 +672,7 @@ function hitNode(id) {
         if (el) {
             m._hitting = true;
             el.classList.remove("hit"); void el.offsetWidth; el.classList.add("hit");
-            setTimeout(() => { m._hitting = false; el.classList.remove("hit"); renderMap(); }, 1650);
+            setTimeout(() => { m._hitting = false; el.classList.remove("hit"); }, 1650);
         }
     }
 }
@@ -728,6 +789,9 @@ function flashScreen() {
     o.classList.remove("go"); void o.offsetWidth; o.classList.add("go");
 }
 
+const ALERT_QUIET_S = 300, ALERT_GAP_MS = 2000;
+S.macSeen = {};
+S.lastAlert = 0;
 function onDetection(d) {
     S.dets.unshift(d);
     S.dets.length = Math.min(S.dets.length, 300);
@@ -750,8 +814,16 @@ function onDetection(d) {
         toast("bad", `New device: ${devAlias(d.mac, d.descr || d.match)}`,
               `${d.mac}  ${d.rssi} dBm  via ${nodeName(d.node)}`, () => openDevice(d.mac));
     }
-    if (S.settings.sound) beep(false);
-    if (S.settings.flash) flashScreen();
+    // Sound and screen flash are for news: a new device, or one back after
+    // ALERT_QUIET_S of silence, at most once per ALERT_GAP_MS. A device a node
+    // keeps re-reporting would otherwise flash the screen every few seconds.
+    const prev = S.macSeen[d.mac];
+    S.macSeen[d.mac] = d.ts;
+    if ((d.is_new || !prev || d.ts - prev >= ALERT_QUIET_S) && Date.now() - S.lastAlert >= ALERT_GAP_MS) {
+        S.lastAlert = Date.now();
+        if (S.settings.sound) beep(false);
+        if (S.settings.flash) flashScreen();
+    }
     if (!histFiltered()) {
         $("hBody").insertAdjacentHTML("afterbegin", histRow(d));
         S.hist.total = (S.hist.total || 0) + 1;
@@ -1655,6 +1727,7 @@ async function boot() {
     S.sources = st.sources;
     S.statsBase = st.stats;
     S.dets = st.recent;
+    S.dets.forEach((d) => { if (!S.macSeen[d.mac] || d.ts > S.macSeen[d.mac]) S.macSeen[d.mac] = d.ts; });
     S.hourly = st.hourly || [];
     S.macAliases = st.mac_aliases || {};
     S.filterMeta = st.filter_meta;

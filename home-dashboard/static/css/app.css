@@ -610,6 +610,22 @@ input[type="checkbox"]:checked::after {
 .map-layer { width: auto; max-width: 210px; padding: 3px 8px; font-size: 11px; margin-left: 12px; flex: none; }
 .panel-head .map-layer + .trailctl { margin-left: 10px; }
 
+/* Full screen map: the map panel becomes a window-sized overlay. */
+.map-max-btn { flex: none; margin-left: 10px; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; }
+.map-max-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.map-max-btn .i-min, .map-max-btn.on .i-max { display: none; }
+.map-max-btn.on .i-min { display: block; }
+.map-max-btn.on { color: var(--accent); border-color: rgba(78,205,196,0.5); box-shadow: 0 0 12px rgba(78,205,196,0.3); }
+.map-panel.map-max {
+    position: fixed; inset: 0; z-index: 1600; margin: 0; border-radius: 0;
+    width: 100vw; height: 100vh; height: 100dvh; max-height: none;
+    padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+    display: flex; flex-direction: column;
+}
+.map-panel.map-max #map { flex: 1 1 auto; height: auto; min-height: 0; }
+body.map-maxed { overflow: hidden; }
+body.map-maxed .toasts { z-index: 1700; }
+
 /* ---------- phones and touchscreens ----------
    Last in the file on purpose: these override the base rules above. */
 @media (max-width: 760px) {
@@ -624,6 +640,7 @@ input[type="checkbox"]:checked::after {
     .toast:nth-child(n+4) { display: none; }
     .map-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
     .map-layer { max-width: 160px; margin-left: auto; }
+    .map-panel.map-max { height: 100dvh; }
 }
 @media (pointer: coarse) {
     /* Every control gets a finger-sized tap area. */

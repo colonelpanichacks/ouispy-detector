@@ -253,6 +253,9 @@ feature, pointed at port 5077.
 - Map tiles are the one thing that goes online. Pick a layer from the picker on
   the map (or in Settings): 15 free layers that need no account, in dark,
   satellite (Esri, USGS) and street/terrain styles, each credited on the map.
+  None needs an API key. You can zoom in to level 22 on any of them: past a
+  layer's last real tile level its final tiles are enlarged. The button beside
+  the picker makes the map full screen (desktop and phone); Esc exits.
   Any online layer tells its provider roughly where you are looking. To keep
   that private, choose a local tile server or the offline grid.
 
