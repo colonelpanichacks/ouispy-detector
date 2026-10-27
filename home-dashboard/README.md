@@ -205,7 +205,7 @@ through its setup portal.
 
 In Settings, under Fleet key:
 
-- **Fingerprint:** a short one-way hash of the key (e.g. `6D89-2646`). Each
+- **Fingerprint:** a short one-way hash of the key (e.g. `A1B2-C3D4`). Each
   node reports the fingerprint of its own key, so every node shows **KEY OK**,
   **DIFFERS** (it holds another key and can't talk to the fleet) or **NO KEY**,
   without anyone revealing the key. Nodes on firmware older than this show
