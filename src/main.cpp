@@ -1530,6 +1530,7 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
 #define STATUS_FMT 1
 #define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
 #define STATUS_LEN 56        // + u8 keyFingerprint[4]
+#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5)   // + u8 count, up to 8 neighbors x 5 bytes
 static const char FW_BUILD[] = __DATE__ " " __TIME__;
 
 // Key fingerprint: SHA-256("OUISPY-KEY-FP" | fleet key)[0:4], all zeros
@@ -1616,7 +1617,12 @@ static uint8_t buildStatus(uint8_t* d) {
     n += 16;
     keyFingerprint(d + n);   // 0000 when no key: lets the dashboard check keys match
     n += 4;
-    return n;   // STATUS_LEN
+    // STATUS_LEN so far. Then the direct neighbors: u8 count, 5 bytes each
+    // (older homes ignore the tail; newer dashboards draw the links).
+    uint8_t cnt = meshCfg.enabled ? meshNeighbors(d + n + 1, 8) : 0;
+    d[n] = cnt;
+    n += 1 + cnt * 5;
+    return n;
 }
 
 static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
@@ -1634,16 +1640,29 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
     if (len >= STATUS_LEN) {
         snprintf(kfp, sizeof(kfp), ",\"kfp\":\"%02X%02X%02X%02X\"", d[52], d[53], d[54], d[55]);
     }
+    // Direct neighbors, from nodes that send them: "nbr":[["1A2B3C",-61,2],...]
+    char nbr[8 * 22 + 12] = "";
+    if (len > STATUS_LEN) {
+        uint8_t cnt = d[STATUS_LEN];
+        if (cnt > 8 || len < STATUS_LEN + 1 + cnt * 5) cnt = 0;
+        int w = snprintf(nbr, sizeof(nbr), ",\"nbr\":[");
+        for (uint8_t i = 0; i < cnt; i++) {
+            const uint8_t* e = d + STATUS_LEN + 1 + i * 5;
+            w += snprintf(nbr + w, sizeof(nbr) - w, "%s[\"%02X%02X%02X\",%d,%u]", i ? "," : "",
+                          e[0], e[1], e[2], (int)(int8_t)e[3], e[4]);
+        }
+        snprintf(nbr + w, sizeof(nbr) - w, "]");
+    }
     Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
                   "\"buzzer\":%d,\"led\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
                   "\"peers\":%u,\"lrssi\":%d,\"filters\":%u,\"fcrc\":\"%08lX\",\"up\":%lu,"
-                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s}\n",
+                  "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s%s}\n",
                   id, d[1] ? "home" : "remote", d[2] ? "scan" : "config", d[3],
                   (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
                   (f & 16) ? 1 : 0, (f & 32) ? 1 : 0, d[5], (int)(int8_t)d[6],
                   get16(d + 8), (unsigned long)get32(d + 10), (unsigned long)get32(d + 14),
                   (unsigned long)get32(d + 18), get16(d + 22), (unsigned long)get32(d + 24),
-                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw, kfp);
+                  (unsigned long)get32(d + 28), (unsigned long)get32(d + 32), fw, kfp, nbr);
 }
 
 static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len) {
@@ -1684,8 +1703,27 @@ void meshOnAck(const uint8_t* nodeId, uint8_t cmd, uint16_t cmdId, uint8_t statu
 // every meshTick().
 static void remoteMgmtTick() {
     uint32_t now = millis();
+    // Live topology for the dashboard's mesh map: every ~20 s a remote
+    // floods its status (with its direct neighbors) and the home prints its
+    // own on USB, so link changes, and the mesh healing around them, show
+    // within about half a minute.
+    static uint32_t topoAt = 15000;
+    if (meshCfg.enabled && currentMode == SCANNING_MODE && !meshOtaBusy() && (int32_t)(now - topoAt) >= 0) {
+        topoAt = now + 20000 + random(0, 5000);
+        if (meshCfg.home) {
+            if (isSerialConnected()) {
+                uint8_t d[STATUS_MAX];
+                char id[7];
+                meshSelfIdHex(id);
+                printStatusLine(id, d, buildStatus(d));
+            }
+        } else if (!statusDueAt) {
+            statusDueAt = now;
+            statusCopies = 0;   // one copy: the next round is only 20 s away
+        }
+    }
     if (statusDueAt && (int32_t)(now - statusDueAt) >= 0) {
-        uint8_t d[STATUS_LEN];
+        uint8_t d[STATUS_MAX];
         meshSendStatus(d, buildStatus(d));
         // Repeat so it meets the home's mesh window; copies are harmless
         // (the dashboard just overwrites the same node's settings).
@@ -1810,7 +1848,7 @@ static bool remoteConsoleCommand(const String& line) {
     meshSelfIdHex(selfHex);
 
     if (verb == "status") {
-        uint8_t d[STATUS_LEN];
+        uint8_t d[STATUS_MAX];
         printStatusLine(selfHex, d, buildStatus(d));
         return true;
     }

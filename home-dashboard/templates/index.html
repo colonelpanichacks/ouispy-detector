@@ -48,6 +48,14 @@
             <h3>Map</h3>
             <span class="help" id="mapHint">Drag markers to move nodes. Select a node, then "Place on map".</span>
             <select id="mapLayer" class="field map-layer" title="Map layer" aria-label="Map layer"></select>
+            <button class="icon-btn map-links-btn" id="mapLinks" data-mode="home" aria-label="Map lines">
+                <svg viewBox="0 0 24 24"><circle cx="5" cy="18" r="2.2"/><circle cx="19" cy="18" r="2.2"/><circle cx="12" cy="5" r="2.2"/><path d="M6.6 16.4 10.6 6.8M13.4 6.8l4 9.6M7.3 18h9.4"/></svg>
+                <span>Home</span>
+            </button>
+            <button class="icon-btn map-traffic-btn" id="mapTraffic" aria-label="Show mesh traffic" aria-pressed="false" title="Show traffic: detections, telemetry and commands moving through the mesh">
+                <svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>
+                <span>Traffic</span>
+            </button>
             <button class="icon-btn map-max-btn" id="mapMax" title="Full screen map" aria-label="Full screen map" aria-pressed="false">
                 <svg class="i-max" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
                 <svg class="i-min" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
@@ -239,7 +247,7 @@
                     <h4>Alerts &amp; Map</h4>
                     <div class="toggle-item"><input type="checkbox" id="sNotify"><label for="sNotify" class="toggle-label">Desktop notifications</label></div>
                     <div class="help-text">Shown by your browser while this tab is in the background: new devices and nodes dropping off the mesh.</div>
-                    <div class="toggle-item"><input type="checkbox" id="sLinks"><label for="sLinks" class="toggle-label">Draw home-to-remote links</label></div>
+                    <div class="toggle-item"><input type="checkbox" id="sLinks"><label for="sLinks" class="toggle-label">Draw map lines (the map's line button picks home links or the full mesh)</label></div>
                     <div class="help-text">Lines coloured by the link RSSI the home node hears, labelled with distance.</div>
                     <label>Read node settings every (s, 0 = off)</label>
                     <input type="number" id="sPoll" class="field" min="0" step="10" value="120">
@@ -295,6 +303,12 @@
         <div class="alias-row">
             <input type="text" id="dAlias" class="field" maxlength="40" placeholder="Friendly name">
             <button class="btn" id="dSave">Save</button>
+        </div>
+        <label>Color</label>
+        <div class="color-row">
+            <input type="range" id="dColor" class="hue-slider" min="0" max="359" step="1" value="180" aria-label="Node color">
+            <span class="color-dot" id="dColorDot"></span>
+            <button class="btn ghost mini" id="dColorReset" title="Back to the default colors">Default</button>
         </div>
         <label>Notes</label>
         <textarea id="dNotes" class="field" rows="2" placeholder="Mount point, battery, antenna..."></textarea>

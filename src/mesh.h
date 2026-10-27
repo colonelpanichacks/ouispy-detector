@@ -184,6 +184,9 @@ bool meshSealed();                 // fleet key set and frames encrypted
 uint8_t meshTxFree();
 bool meshOtaSend(const uint8_t* body, uint8_t len, bool relay);
 bool meshHomeHeard();              // the home is live in the roster
+// Direct neighbors (heard first-hand in the last 20 s), 5 bytes each:
+// id[3], rssi (i8, 0 = not measured yet), seconds since last heard.
+uint8_t meshNeighbors(uint8_t* out, uint8_t max);
 
 // Implemented in main.cpp — applies a complete, CRC-verified command payload
 // in loop context. May reboot the node (filter push, reboot command).

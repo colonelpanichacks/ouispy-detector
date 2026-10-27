@@ -504,6 +504,9 @@ def api_node_update(nid):
         if k in data:
             v = data[k]
             fields[k] = None if v is None else float(v)
+    if "color" in data:   # hue 0-359, or null for the default colors
+        v = data["color"]
+        fields["color"] = None if v is None or v == "" else int(v) % 360
     store.update_node(nid.upper(), **fields)
     emit("fleet", fleet.snapshot())
     return jsonify({"ok": True})
@@ -737,7 +740,7 @@ def api_settings_set():
             if k == "key_nets" and not _is_local():
                 return jsonify({"ok": False, "error": "who may view the fleet key can only be changed on this computer"}), 403
     for k in ("sound", "flash", "tiles", "tiles_custom", "map_view", "notify",
-              "retention_days", "links", "status_poll", "trusted_nets", "key_nets"):
+              "retention_days", "links", "traffic", "status_poll", "trusted_nets", "key_nets"):
         if k in data:
             store.set_setting(k, data[k])
     if "serial_port" in data:

@@ -219,11 +219,31 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .nmark.home .core { border-color: var(--pink); background: rgba(240,171,252,0.25); box-shadow: var(--glow-pink); width: 22px; height: 22px; left: -11px; top: -11px; }
 .nmark.stale .core { border-color: var(--amber); background: rgba(251,191,36,0.2); box-shadow: var(--glow-amber); }
 .nmark.offline .core { border-color: var(--red); background: rgba(248,113,113,0.15); box-shadow: none; opacity: 0.8; }
+/* A node's own color (drawer slider) while it's online; stale / offline keep
+   their warning colors so trouble still reads at a glance. */
+.nmark.custom.online:not(.home) .core, .nmark.custom.home.online .core {
+    border-color: var(--nc); background: color-mix(in srgb, var(--nc) 26%, transparent);
+    box-shadow: 0 0 6px var(--nc), 0 0 16px color-mix(in srgb, var(--nc) 50%, transparent);
+}
+.nmark.custom.online .ping, .nmark.custom.home.online .ping { border-color: var(--nc); }
+.node.custom { box-shadow: inset 3px 0 0 var(--nc); }
+.color-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.hue-slider { flex: 1; -webkit-appearance: none; appearance: none; height: 10px; border-radius: 5px; padding: 0; border: none;
+    background: linear-gradient(90deg, hsl(0 90% 62%), hsl(60 90% 62%), hsl(120 90% 62%), hsl(180 90% 62%), hsl(240 90% 62%), hsl(300 90% 62%), hsl(359 90% 62%)); }
+.hue-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid #06080b; box-shadow: 0 0 8px rgba(255,255,255,0.6); cursor: pointer; }
+.hue-slider::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid #06080b; }
+.hue-slider.unset { opacity: 0.45; }
+.color-dot { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-strong); flex: none; box-shadow: 0 0 8px currentColor; }
+.color-row .btn.mini { margin-left: 0; }
+
 .nmark .ping {
     position: absolute; left: -9px; top: -9px; width: 18px; height: 18px; border-radius: 50%;
     border: 2px solid var(--accent); opacity: 0; pointer-events: none;
 }
-.nmark.online .ping { animation: ping 2.6s ease-out infinite; }
+/* Still until something happens: a detection radiates (hit), a carried
+   GPS node pulses while it moves. No idle animation. */
+.nmark.hit .ping { animation: ping 0.9s ease-out 3; }
+.nmark.moving .ping { animation: ping 2.6s ease-out infinite; }
 .nmark.home.online .ping { border-color: var(--pink); }
 .nmark.hit .core { animation: markHit 1.6s ease-out; }
 .nmark.hit .burst { animation: burst 1.6s ease-out; }
@@ -610,6 +630,25 @@ input[type="checkbox"]:checked::after {
 .map-layer { width: auto; max-width: 210px; padding: 3px 8px; font-size: 11px; margin-left: 12px; flex: none; }
 .panel-head .map-layer + .trailctl { margin-left: 10px; }
 
+/* Map lines toggle (home / mesh / off) */
+.map-links-btn { flex: none; margin-left: 10px; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; }
+.map-links-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.map-links-btn[data-mode="mesh"] { color: var(--accent); border-color: rgba(78,205,196,0.5); box-shadow: 0 0 12px rgba(78,205,196,0.3); }
+.map-links-btn[data-mode="home"] { color: var(--pink); border-color: rgba(240,171,252,0.45); }
+.map-links-btn[data-mode="off"] { opacity: 0.6; }
+
+/* Traffic view: a pulse rides the mesh path (pathLength=100 on the SVG). */
+.map-traffic-btn { flex: none; margin-left: 8px; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; opacity: 0.6; }
+.map-traffic-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.map-traffic-btn.on { opacity: 1; color: var(--amber); border-color: rgba(251,191,36,0.5); box-shadow: 0 0 12px rgba(251,191,36,0.3); }
+path.flow { fill: none; stroke-linecap: round; stroke-dasharray: 9 200; stroke-dashoffset: 9; animation: flowRun 1.3s cubic-bezier(.4,0,.6,1) forwards; }
+path.flow-det { stroke: #ff4d8d; filter: drop-shadow(0 0 6px #ff4d8d) drop-shadow(0 0 12px rgba(255,77,141,0.6)); animation-duration: 1.8s; stroke-dasharray: 12 200; stroke-dashoffset: 12; }
+path.flow-tlm { stroke: var(--accent); filter: drop-shadow(0 0 5px var(--accent)); }
+path.flow-cmd { stroke: var(--amber); filter: drop-shadow(0 0 5px var(--amber)); }
+@keyframes flowRun { to { stroke-dashoffset: -100; } }
+
 /* Full screen map: the map panel becomes a window-sized overlay. */
 .map-max-btn { flex: none; margin-left: 10px; width: 30px; height: 30px; display: inline-flex; align-items: center; justify-content: center; }
 .map-max-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
@@ -656,6 +695,7 @@ body.map-maxed .toasts { z-index: 1700; }
     .toast:nth-child(n+4) { display: none; }
     .map-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
     .map-layer { max-width: 160px; margin-left: auto; }
+    .map-links-btn span, .map-traffic-btn span { display: none; }
     .map-panel.map-max { height: 100dvh; }
     .fw-node { grid-template-columns: auto 1fr; }
     .fw-node .fw-cur, .fw-node .fw-bar, .fw-node .fw-st { grid-column: 2; }

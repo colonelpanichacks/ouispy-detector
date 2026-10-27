@@ -322,6 +322,7 @@ class Fleet:
                 m = meta.get(nid, {})
                 nodes.append({**st, "alias": m.get("alias") or "", "lat": m.get("lat"),
                               "lon": m.get("lon"), "notes": m.get("notes") or "",
+                              "color": m.get("color"),
                               "first_seen": m.get("first_seen"),
                               "is_home": nid == self.home_id,
                               "age": round(now - st["last_seen"], 1) if st["last_seen"] else None})

@@ -230,7 +230,7 @@ function renderNodes() {
         const st = nodeState(n);
         const role = n.is_home ? "home" : (n.role || "remote");
         const dc = perNode[n.id] ? perNode[n.id].count : 0;
-        return `<div class="node ${st === "offline" ? "offline" : ""} ${S.selected === n.id ? "sel" : ""}" data-id="${esc(n.id)}">
+        return `<div class="node ${st === "offline" ? "offline" : ""} ${S.selected === n.id ? "sel" : ""} ${n.color != null ? "custom" : ""}" data-id="${esc(n.id)}" style="${n.color != null ? "--nc:" + nodeColor(n) : ""}">
             <div class="node-top">
                 <span class="dot ${st === "online" ? "on" : st === "stale" ? "warn" : ""}"></span>
                 <span class="node-name">${esc(n.alias || n.id)}</span>
@@ -385,14 +385,17 @@ function markerParts(n) {
     const recent = S.dets.filter((d) => d.node === n.id && now() - d.ts < 900).length;
     const gpsOn = S.gpsLive[n.id] && now() - S.gpsLive[n.id] < 60;
     return {
-        cls: `nmark ${st} ${n.is_home ? "home" : ""} ${S.selected === n.id ? "sel" : ""}`,
+        cls: `nmark ${st} ${n.is_home ? "home" : ""} ${S.selected === n.id ? "sel" : ""} ${n.color != null ? "custom" : ""} ${gpsOn ? "moving" : ""}`,
+        color: nodeColor(n),
         badge: recent ? String(recent) : "",
         label: `${esc(n.alias || n.id)}${gpsOn ? `<i class="gpstag">GPS</i>` : ""}<small>${esc(sub)}</small>`,
     };
 }
+// A node's own color (hue from its drawer slider), or "" for the defaults.
+function nodeColor(n) { return n && n.color != null ? `hsl(${n.color} 90% 62%)` : ""; }
 function markerHtml(n) {
     const p = markerParts(n);
-    return `<div class="${p.cls}">
+    return `<div class="${p.cls}" style="${p.color ? "--nc:" + p.color : ""}">
         <span class="ping"></span><span class="burst"></span><span class="core"></span>
         ${p.badge ? `<span class="badge" title="Detections in the last 15 min">${p.badge}</span>` : ""}
         <span class="label">${p.label}</span></div>`;
@@ -406,6 +409,7 @@ function patchMarker(m, n) {
     const p = markerParts(n);
     const cls = p.cls + (root.classList.contains("hit") ? " hit" : "");
     if (root.className !== cls) root.className = cls;
+    if (root.style.getPropertyValue("--nc") !== p.color) root.style.setProperty("--nc", p.color);
     let badge = root.querySelector(".badge");
     if (p.badge && !badge) {
         badge = document.createElement("span");
@@ -456,53 +460,169 @@ function renderMap() {
 }
 // Home-to-remote links: the roster RSSI is what the HOME hears from each
 // remote, so a line per placed remote coloured by that RSSI, with distance.
-// One polyline per remote, kept between updates and moved / restyled in
-// place (clearing and redrawing them all every second flickered too).
+// Map lines: "home" = home to each remote (the old view), "mesh" = every
+// link a node reports hearing first-hand (RST "nbr"), "off". Lines are kept
+// between updates and moved / restyled in place (redrawing them all every
+// second flickered).
+function linkMode() {
+    const v = S.settings.links;
+    return v === false || v === "off" ? "off" : v === "mesh" ? "mesh" : "home";
+}
+const rssiColor = (r) => !r ? "#5b6879" : r >= -70 ? "#4ecdc4" : r >= -82 ? "#fbbf24" : "#f87171";
+function wantedLinks() {
+    const out = [];
+    const mode = linkMode();
+    const placed = (n) => n && n.lat != null;
+    if (!map._loaded || mode === "off") return out;
+    if (mode === "home") {
+        const home = S.fleet.nodes.find((n) => n.is_home && placed(n));
+        if (!home) return out;
+        for (const n of S.fleet.nodes) {
+            if (n.is_home || !placed(n) || !n.online) continue;
+            const st = nodeState(n);
+            out.push({ key: "h:" + n.id, a: home, b: n, r: n.rssi, faded: st === "stale", oneWay: false,
+                       tip: `<b>${n.rssi ? n.rssi + " dBm" : "no rssi"}</b> | ${fmtDist(metres(home, n))}`,
+                       sel: S.selected === n.id || S.selected === home.id });
+        }
+        return out;
+    }
+    // Mesh: merge both directions of each pair.
+    const pairs = {};
+    for (const n of S.fleet.nodes) {
+        const nb = n.cfg && n.cfg.nbr;
+        if (!Array.isArray(nb) || !placed(n)) continue;
+        for (const [id, rssi, age] of nb) {
+            const m = nodeById(id);
+            if (!placed(m)) continue;
+            const key = "m:" + [n.id, id].sort().join("-");
+            const p = pairs[key] = pairs[key] || { key, a: n.id < id ? n : m, b: n.id < id ? m : n, seen: {} };
+            p.seen[n.id] = { rssi, age };
+        }
+    }
+    for (const p of Object.values(pairs)) {
+        const ab = p.seen[p.a.id], ba = p.seen[p.b.id];
+        const rs = [ab, ba].filter((x) => x && x.rssi).map((x) => x.rssi);
+        const r = rs.length ? Math.max(...rs) : 0;
+        const fresh = [ab, ba].some((x) => x && x.age < 30) && p.a.online && p.b.online;
+        const one = (name, x) => x ? `${esc(name)} hears it at ${x.rssi ? x.rssi + " dBm" : "?"}` : `${esc(name)}: not heard`;
+        out.push({ key: p.key, a: p.a, b: p.b, r, faded: !fresh, oneWay: !(ab && ba),
+                   tip: `<b>${esc(nodeName(p.a.id))} - ${esc(nodeName(p.b.id))}</b><br>${one(nodeName(p.a.id), ab)}<br>${one(nodeName(p.b.id), ba)}<br>${fmtDist(metres(p.a, p.b))}`,
+                   sel: S.selected === p.a.id || S.selected === p.b.id });
+    }
+    return out;
+}
 function renderLinks() {
     if (!S.links) S.links = L.layerGroup().addTo(map);
     if (!S.linkLines) S.linkLines = {};
     const keep = new Set();
-    const home = map._loaded && S.settings.links !== false
-        ? S.fleet.nodes.find((n) => n.is_home && n.lat != null) : null;
-    if (home) {
-        for (const n of S.fleet.nodes) {
-            if (n.is_home || n.lat == null || !n.online) continue;
-            keep.add(n.id);
-            const st = nodeState(n);
-            const r = n.rssi;
-            const color = !r ? "#5b6879" : r >= -70 ? "#4ecdc4" : r >= -82 ? "#fbbf24" : "#f87171";
-            const style = { color, weight: 2, opacity: st === "stale" ? 0.35 : 0.75, dashArray: st === "stale" ? "4 6" : "6 4" };
-            const pts = [[home.lat, home.lon], [n.lat, n.lon]];
-            // Label only the selected node's link permanently, and only when
-            // the line is long enough on screen to hold it without covering
-            // the markers; otherwise the label appears on hover/tap.
-            const px = map.latLngToContainerPoint(pts[0]).distanceTo(map.latLngToContainerPoint(pts[1]));
-            const pinned = (S.selected === n.id || S.selected === home.id) && px > 160;
-            const tip = `<b>${r ? r + " dBm" : "no rssi"}</b> | ${fmtDist(metres(home, n))}`;
-            let line = S.linkLines[n.id];
-            if (!line) {
-                line = S.linkLines[n.id] = L.polyline(pts, style);
-                S.links.addLayer(line);
-            } else {
-                const cur = line.getLatLngs();
-                if (cur[0].lat !== pts[0][0] || cur[0].lng !== pts[0][1] || cur[1].lat !== pts[1][0] || cur[1].lng !== pts[1][1]) line.setLatLngs(pts);
-                const o = line.options;
-                if (o.color !== style.color || o.opacity !== style.opacity || o.dashArray !== style.dashArray) line.setStyle(style);
-            }
-            if (line._pinned !== pinned) {
-                line.unbindTooltip();
-                line.bindTooltip(tip, { permanent: pinned, sticky: !pinned, direction: "center", className: "link-label" });
-                line._pinned = pinned;
-            } else if (line.getTooltip() && line._tip !== tip) {
-                line.setTooltipContent(tip);
-            }
-            line._tip = tip;
+    for (const w of wantedLinks()) {
+        keep.add(w.key);
+        const style = { color: rssiColor(w.r), weight: w.key.startsWith("m:") ? 2.5 : 2,
+                        opacity: w.faded ? 0.35 : 0.8, dashArray: w.oneWay ? "3 7" : w.faded ? "4 6" : "6 4" };
+        const pts = [[w.a.lat, w.a.lon], [w.b.lat, w.b.lon]];
+        // Label only the selected node's links permanently, and only when the
+        // line is long enough on screen to hold it; otherwise on hover/tap.
+        const px = map.latLngToContainerPoint(pts[0]).distanceTo(map.latLngToContainerPoint(pts[1]));
+        const pinned = w.sel && px > 160 && w.key.startsWith("h:");
+        let line = S.linkLines[w.key];
+        if (!line) {
+            line = S.linkLines[w.key] = L.polyline(pts, style);
+            S.links.addLayer(line);
+        } else {
+            const cur = line.getLatLngs();
+            if (cur[0].lat !== pts[0][0] || cur[0].lng !== pts[0][1] || cur[1].lat !== pts[1][0] || cur[1].lng !== pts[1][1]) line.setLatLngs(pts);
+            const o = line.options;
+            if (o.color !== style.color || o.opacity !== style.opacity || o.dashArray !== style.dashArray || o.weight !== style.weight) line.setStyle(style);
         }
+        if (line._pinned !== pinned) {
+            line.unbindTooltip();
+            line.bindTooltip(w.tip, { permanent: pinned, sticky: !pinned, direction: "center", className: "link-label" });
+            line._pinned = pinned;
+        } else if (line.getTooltip() && line._tip !== w.tip) {
+            line.setTooltipContent(w.tip);
+        }
+        line._tip = w.tip;
     }
     for (const id of Object.keys(S.linkLines)) {
         if (!keep.has(id)) { S.links.removeLayer(S.linkLines[id]); delete S.linkLines[id]; }
     }
+    const b = $("mapLinks");
+    if (b) {
+        const mode = linkMode();
+        b.dataset.mode = mode;
+        b.querySelector("span").textContent = mode === "mesh" ? "Mesh" : mode === "home" ? "Home" : "Off";
+        b.title = mode === "mesh" ? "Lines: every link nodes report hearing first-hand (tap: off)"
+            : mode === "home" ? "Lines: home to each remote (tap: full mesh)" : "Lines: off (tap: home links)";
+    }
 }
+// ------------------------------------------------------------------
+// Traffic view: pulses travel the mesh path when data moves. A detection
+// rides its route from the node to the home (shortest path through the
+// links nodes report hearing, straight to the home if none are known),
+// telemetry / acks go node -> home, commands home -> node.
+// ------------------------------------------------------------------
+function meshRoute(fromId, toId) {
+    const adj = {};
+    const link = (a, b) => { (adj[a] = adj[a] || new Set()).add(b); (adj[b] = adj[b] || new Set()).add(a); };
+    for (const n of S.fleet.nodes) for (const [id] of (n.cfg && n.cfg.nbr) || []) link(n.id, id);
+    const prev = { [fromId]: null }, q = [fromId];
+    while (q.length) {
+        const c = q.shift();
+        if (c === toId) break;
+        for (const nx of adj[c] || []) if (!(nx in prev)) { prev[nx] = c; q.push(nx); }
+    }
+    if (!(toId in prev)) return [fromId, toId];
+    const path = [];
+    for (let c = toId; c != null; c = prev[c]) path.unshift(c);
+    return path;
+}
+function trafficOn() { return !!S.settings.traffic; }
+function flow(path, kind) {
+    if (!trafficOn() || !map._loaded) return;
+    const pts = path.map((id) => nodeById(id)).filter((n) => n && n.lat != null).map((n) => [n.lat, n.lon]);
+    if (pts.length < 2) return;
+    if (!S.flowLayer) S.flowLayer = L.layerGroup().addTo(map);
+    const line = L.polyline(pts, { className: `flow flow-${kind}`, interactive: false, weight: kind === "det" ? 5 : 3 });
+    S.flowLayer.addLayer(line);
+    const el = line.getElement();
+    if (el) el.setAttribute("pathLength", "100");
+    setTimeout(() => S.flowLayer.removeLayer(line), kind === "det" ? 2000 : 1500);
+}
+function trafficFromLine(line) {
+    if (!trafficOn()) return;
+    const h = homeNode();
+    if (!h) return;
+    const head = line.split(" ", 1)[0];
+    if (!["RST", "ACK", "RFL", "CMD", "OTA"].includes(head)) return;
+    let o;
+    try { o = JSON.parse(line.slice(head.length + 1)); } catch (e) { return; }
+    if (head === "CMD") {
+        const targets = o.target === "all" ? S.fleet.nodes.filter((n) => !n.is_home && n.online).map((n) => n.id) : [o.target];
+        targets.forEach((t) => flow(meshRoute(h.id, t), "cmd"));
+    } else if (o.node && o.node !== h.id) {
+        flow(meshRoute(o.node, h.id), head === "OTA" ? "cmd" : "tlm");
+    }
+}
+$("mapTraffic").onclick = async () => {
+    S.settings.traffic = !trafficOn();
+    renderTrafficBtn();
+    await api("/api/settings", { method: "POST", body: { traffic: S.settings.traffic } });
+};
+function renderTrafficBtn() {
+    $("mapTraffic").classList.toggle("on", trafficOn());
+    $("mapTraffic").setAttribute("aria-pressed", trafficOn() ? "true" : "false");
+}
+
+// Links toggle on the map: home -> mesh -> off. Saved, so every open
+// dashboard switches too.
+$("mapLinks").onclick = async () => {
+    const next = { home: "mesh", mesh: "off", off: "home" }[linkMode()];
+    S.settings.links = next;
+    renderLinks();
+    if ($("sLinks")) $("sLinks").checked = next !== "off";
+    if (next === "mesh" && canCommand()) api("/api/fleet/cmd", { method: "POST", body: { op: "status" } });   // fresh neighbor lists, quietly
+    await api("/api/settings", { method: "POST", body: { links: next } });
+};
 // ------------------------------------------------------------------
 // GPS: a phone carrying a node feeds its position; every viewer sees the
 // marker move and a breadcrumb trail.
@@ -808,6 +928,8 @@ function onDetection(d) {
     while (f.children.length > 120) f.lastElementChild.remove();
     renderKpis();
     hitNode(d.node);
+    const hh = homeNode();
+    if (hh && d.node !== hh.id) flow(meshRoute(d.node, hh.id), "det");
     bumpHourly(d.ts);
     renderActivity();
     if (d.is_new) {
@@ -860,6 +982,7 @@ async function openDrawer(id) {
     $("dSub").textContent = `${n.id} | ${n.is_home ? "home" : n.role} | first seen ${n.first_seen ? fullTime(n.first_seen) : "-"}`;
     if (document.activeElement !== $("dAlias")) $("dAlias").value = n.alias || "";
     if (document.activeElement !== $("dNotes")) $("dNotes").value = n.notes || "";
+    showColor(n);
     const st = nodeState(n);
     const samples = data.sightings.filter((s) => s.rssi);
     const avg = samples.length ? Math.round(samples.reduce((a, s) => a + s.rssi, 0) / samples.length) : null;
@@ -912,6 +1035,29 @@ $("dSave").onclick = async () => {
 $("dAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("dSave").click(); });
 $("dNotes").addEventListener("change", () => api(`/api/nodes/${S.selected}`, { method: "POST", body: { notes: $("dNotes").value } }));
 $("dPlace").onclick = () => setPlacing(true);
+// Color slider: live preview while dragging, saved when let go.
+function showColor(n) {
+    const on = n && n.color != null;
+    if (document.activeElement !== $("dColor")) $("dColor").value = on ? n.color : 180;
+    $("dColor").classList.toggle("unset", !on);
+    $("dColorDot").style.background = on ? nodeColor(n) : "transparent";
+    $("dColorReset").disabled = !on;
+}
+$("dColor").oninput = () => {
+    const n = nodeById(S.selected);
+    if (!n) return;
+    n.color = Number($("dColor").value);
+    showColor(n);
+    renderNodes(); renderMap();
+};
+$("dColor").onchange = () => api(`/api/nodes/${S.selected}`, { method: "POST", body: { color: Number($("dColor").value) } });
+$("dColorReset").onclick = async () => {
+    const n = nodeById(S.selected);
+    if (n) n.color = null;
+    showColor(n);
+    renderNodes(); renderMap();
+    await api(`/api/nodes/${S.selected}`, { method: "POST", body: { color: null } });
+};
 $("dUnplace").onclick = async () => {
     await api(`/api/nodes/${S.selected}`, { method: "POST", body: { lat: null, lon: null } });
     openDrawer(S.selected);
@@ -1625,7 +1771,7 @@ async function loadSettingsForm() {
     $("mTopic").value = m.topic || "+/detection";
     $("sTiles").value = s.tiles || "osm-dark";
     $("sNotify").checked = !!s.notify;
-    $("sLinks").checked = s.links !== false;
+    $("sLinks").checked = linkMode() !== "off";
     $("sRetention").value = s.retention_days || 0;
     $("sPoll").value = s.status_poll ?? 120;
     $("sTrusted").value = s.trusted_nets || "";
@@ -1647,7 +1793,7 @@ $("saveSettings").onclick = async () => {
     const body = {
         tiles: $("sTiles").value, tiles_custom: $("sTilesCustom").value.trim(),
         serial_port: $("sPort").value,
-        notify: $("sNotify").checked, links: $("sLinks").checked,
+        notify: $("sNotify").checked, links: $("sLinks").checked ? (linkMode() === "off" ? "home" : linkMode()) : "off",
         retention_days: Math.max(0, parseInt($("sRetention").value, 10) || 0),
         status_poll: Math.max(0, parseInt($("sPoll").value, 10) || 0),
         trusted_nets: $("sTrusted").value.trim(),
@@ -1829,6 +1975,7 @@ async function boot() {
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     tileOptions($("mapLayer"));
+    setTimeout(renderTrafficBtn, 0);
     tileOptions($("sTiles"));
     vendorOptions($("dPreset"));
     vendorOptions($("fPreset"));
@@ -1857,7 +2004,7 @@ async function boot() {
     sock.on("fleet", applyFleet);
     sock.on("det", onDetection);
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
-    sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); });
+    sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
     sock.on("mac_aliases", (m) => {
         S.macAliases = m;
         renderFeed();
@@ -1871,7 +2018,7 @@ async function boot() {
         const layerChanged = s.tiles !== S.settings.tiles || s.tiles_custom !== S.settings.tiles_custom;
         S.settings = { ...s, map_view: S.settings.map_view };
         if (layerChanged) applyTiles();
-        renderLinks(); renderToggles();
+        renderLinks(); renderToggles(); renderTrafficBtn();
         // Refill the form unless someone is typing in it right now.
         if (!$("tab-settings").contains(document.activeElement)) loadSettingsForm();
     });

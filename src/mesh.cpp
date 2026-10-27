@@ -192,7 +192,8 @@ static uint8_t rxHead = 0, rxTail = 0, rxCount = 0;
 static portMUX_TYPE rxMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Roster of other nodes, keyed by the STABLE nodeId (never the MAC).
-struct MeshNode { uint8_t id[3]; uint32_t lastSeen; uint8_t role; uint32_t pkts; bool live; uint8_t mac[6]; };
+struct MeshNode { uint8_t id[3]; uint32_t lastSeen; uint8_t role; uint32_t pkts; bool live; uint8_t mac[6];
+                 uint32_t lastDirect; };   // last frame straight from it (not relayed): a link
 static MeshNode roster[MESH_ROSTER_SIZE];
 
 // Ack counters for the last few command batches (successful acks only).
@@ -534,6 +535,28 @@ bool meshLinkFresh() {
         if (roster[i].live && now - roster[i].lastSeen < MESH_LIGHT_TIMEOUT_MS) return true;
     }
     return false;
+}
+
+// Nodes heard first-hand in the last 20 s: {id[3], rssi, age s} each.
+// The dashboard draws the mesh's real links from every node's list.
+uint8_t meshNeighbors(uint8_t* out, uint8_t max) {
+    uint32_t now = millis();
+    uint8_t n = 0;
+    for (int i = 0; i < MESH_ROSTER_SIZE && n < max; i++) {
+        const MeshNode& r = roster[i];
+        if (!r.live || !r.lastDirect || now - r.lastDirect > 20000) continue;   // gone quiet: link down
+        int8_t rssi = 0;
+        for (int s = 0; s < MESH_SNIFF_SLOTS; s++) {
+            if (sniffTs[s] && memcmp(sniffMac[s], r.mac, 6) == 0 && (int32_t)(now - sniffTs[s]) < 60000) { rssi = sniffRssi[s]; break; }
+        }
+        uint32_t age = (now - r.lastDirect) / 1000;
+        uint8_t* o = out + n * 5;
+        memcpy(o, r.id, 3);
+        o[3] = (uint8_t)rssi;
+        o[4] = (uint8_t)(age > 255 ? 255 : age);
+        n++;
+    }
+    return n;
 }
 
 void meshNodesJson(String& out) {
@@ -1738,8 +1761,13 @@ void meshTick() {
 
         bool isNewNode = sameCh && meshRosterUpdate(nodeId, isAnnounce, role, now);
         if (sameCh) {
+            bool direct = memcmp(rxHop, pkt + 6, 6) == 0;   // sent by the origin itself
             for (int i = 0; i < MESH_ROSTER_SIZE; i++) {
-                if (roster[i].live && memcmp(roster[i].id, nodeId, 3) == 0) { memcpy(roster[i].mac, pkt + 6, 6); break; }
+                if (roster[i].live && memcmp(roster[i].id, nodeId, 3) == 0) {
+                    memcpy(roster[i].mac, pkt + 6, 6);
+                    if (direct) roster[i].lastDirect = now;
+                    break;
+                }
             }
         }
         if (isNewNode) {

@@ -99,6 +99,10 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        # Columns added after the first release (older databases lack them).
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(nodes)")}
+        if "color" not in cols:
+            self.db.execute("ALTER TABLE nodes ADD COLUMN color INTEGER")   # hue 0-359, NULL = default
         self.db.commit()
 
     # ---------- settings ----------
@@ -147,7 +151,7 @@ class Store:
             self.db.commit()
 
     def update_node(self, node_id, **fields):
-        allowed = {k: v for k, v in fields.items() if k in ("alias", "lat", "lon", "notes")}
+        allowed = {k: v for k, v in fields.items() if k in ("alias", "lat", "lon", "notes", "color")}
         if not allowed:
             return
         with self.lock:

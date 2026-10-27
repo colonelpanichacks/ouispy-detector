@@ -281,6 +281,11 @@ class MqttSource(Source):
 # ----------------------------------------------------------------------
 DEMO_HOME = "DE0A01"
 DEMO_REMOTES = ["DE0B02", "DE0C03", "DE0D04", "DE0E05"]
+# Who hears whom first-hand in the demo (RST "nbr"): not every remote reaches
+# the home directly, so the mesh view shows relaying.
+DEMO_LINKS = {"DE0A01": ["DE0B02", "DE0C03"], "DE0B02": ["DE0A01", "DE0D04"],
+              "DE0C03": ["DE0A01", "DE0E05", "DE0D04"], "DE0D04": ["DE0B02", "DE0C03"],
+              "DE0E05": ["DE0C03"]}
 DEMO_TARGETS = [
     ("00:25:DF", "OUI", "AXON", "ble"), ("00:25:DF", "PROBE", "AXON", "wifi"),
     ("B4:1E:52", "OUI", "FLOCK SAFETY", "ble"), ("70:C9:4E", "BEACON", "FLOCK SAFETY", "wifi"),
@@ -436,7 +441,9 @@ class DemoSource(Source):
             "fcrc": self.flt.crc(c["filters"]), "up": int(time.time() - c["boot"]),
             "heap": random.randint(140000, 158000), "dev": random.randint(2, 30),
             **self._delivery(),
-            "fw": "Oct 26 2026 13:10"}, separators=(",", ":"))
+            "fw": "Oct 26 2026 13:10",
+            "nbr": [[m, self.rssi.get(m, -70) if n == DEMO_HOME else random.randint(-88, -55), random.randint(0, 12)]
+                    for m in DEMO_LINKS.get(n, []) if self._up(m)]}, separators=(",", ":"))
 
     @staticmethod
     def _delivery():

@@ -60,6 +60,28 @@ E0:A7:00
 
 <details>
 
+<summary><b>CRADLEPOINT</b> <code>2 OUIs</code></summary>
+
+*IEEE registry: CradlePoint, Inc (now Ericsson Enterprise Wireless).*
+
+- `00:30:44`
+- `00:E0:1C`
+
+**Copy OUIs:**
+
+```
+00:30:44
+00:E0:1C
+```
+
+> **Category:** Vehicle / Mobile Routers  
+> **Frame Types:** Probe Request, Beacon  
+> **Common Devices:** Cradlepoint cellular routers (IBR / R-series), common in police vehicles and mobile command units
+
+</details>
+
+<details>
+
 <summary><b>WiFi PINEAPPLE (Hak5)</b> <code>1 OUI</code></summary>
 
 - `00:13:37`
