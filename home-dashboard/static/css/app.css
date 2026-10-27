@@ -49,6 +49,10 @@ body {
     overflow-x: hidden;
 }
 svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* ...but never the map's own drawing layers: Leaflet sizes its overlay SVG
+   with attributes, and the 16 px icon rule above clipped every map line
+   (links, mesh, traffic) to a 16 px square in the corner. */
+.leaflet-pane > svg { width: unset; height: unset; fill: unset; stroke: unset; }
 
 /* ---------- top bar ---------- */
 .topbar {
@@ -636,6 +640,19 @@ input[type="checkbox"]:checked::after {
 .map-tools .map-layer { max-width: 190px; height: 30px; }
 .map-tools .icon-btn { color: var(--soft); border-color: var(--line-strong); }
 .panel-head .help { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 auto; }
+
+/* Spread markers: faint leader to each node's true spot */
+path.leader { stroke: rgba(219,228,238,0.45); stroke-dasharray: 2 3; fill: none; }
+path.leader-dot { stroke: rgba(219,228,238,0.7); fill: rgba(219,228,238,0.7); }
+
+/* Mesh diagram (map corner) */
+.mesh-graph { background: rgba(6,8,11,0.88); backdrop-filter: blur(4px); border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px 2px; }
+.mesh-graph .mg-head { font-family: var(--mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); }
+.mesh-graph .mg-head span { color: var(--faint); letter-spacing: 0.5px; text-transform: none; margin-left: 6px; }
+.mesh-graph svg { display: block; width: 230px !important; height: 190px !important; }
+.mesh-graph .mg-name { font: 600 10px var(--sans); fill: var(--text); text-anchor: middle; }
+.mesh-graph .mg-db { font: 10px var(--mono); fill: var(--soft); text-anchor: middle; paint-order: stroke; stroke: #06080b; stroke-width: 3px; }
+@media (max-width: 760px) { .mesh-graph svg { width: 180px !important; height: 149px !important; } }
 
 /* Map lines toggle (home / mesh / off) */
 .map-links-btn { flex: none; margin-left: 10px; height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px;

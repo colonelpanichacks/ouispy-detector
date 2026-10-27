@@ -436,14 +436,60 @@ function patchMarker(m, n) {
     const label = root.querySelector(".label");
     if (label && label.innerHTML !== p.label) label.innerHTML = p.label;
 }
+// Nodes placed close together overlap on screen, and their links shrink to
+// nothing. Markers closer than SPREAD_PX are fanned out on a small circle
+// around their shared spot for display (stored positions are untouched;
+// a faint leader shows each true spot), and lines and traffic are drawn
+// between the displayed positions, so they work at any zoom.
+const SPREAD_PX = 54;
+S.disp = {};
+function computeSpread() {
+    S.disp = {};
+    if (!map._loaded) return;
+    const pts = S.fleet.nodes.filter((n) => n.lat != null)
+        .map((n) => ({ n, p: map.latLngToContainerPoint([n.lat, n.lon]) }));
+    const used = new Set();
+    for (let i = 0; i < pts.length; i++) {
+        if (used.has(i)) continue;
+        const group = [i];
+        for (let j = i + 1; j < pts.length; j++) {
+            if (!used.has(j) && group.some((k) => pts[k].p.distanceTo(pts[j].p) < SPREAD_PX)) group.push(j);
+        }
+        if (group.length < 2) continue;
+        group.forEach((k) => used.add(k));
+        const cx = group.reduce((a, k) => a + pts[k].p.x, 0) / group.length;
+        const cy = group.reduce((a, k) => a + pts[k].p.y, 0) / group.length;
+        const r = Math.max(34, 16 * group.length);
+        const members = group.map((k) => pts[k].n).sort((a, b) => (b.is_home - a.is_home) || a.id.localeCompare(b.id));
+        members.forEach((n, k) => {
+            const ang = -Math.PI / 2 + (k * 2 * Math.PI) / members.length;
+            const ll = map.containerPointToLatLng([cx + r * Math.cos(ang), cy + r * Math.sin(ang)]);
+            S.disp[n.id] = [ll.lat, ll.lng];
+        });
+    }
+}
+// Where a node is drawn: spread position if it has one, else its own.
+function dispLL(n) { return S.disp[n.id] || [n.lat, n.lon]; }
+function renderLeaders() {
+    if (!S.leaders) S.leaders = L.layerGroup().addTo(map);
+    S.leaders.clearLayers();
+    for (const n of S.fleet.nodes) {
+        const d = S.disp[n.id];
+        if (!d || n.lat == null) continue;
+        S.leaders.addLayer(L.polyline([[n.lat, n.lon], d], { className: "leader", interactive: false, weight: 1 }));
+        S.leaders.addLayer(L.circleMarker([n.lat, n.lon], { radius: 2, className: "leader-dot", interactive: false }));
+    }
+}
+
 function renderMap() {
     const seen = new Set();
+    computeSpread();
     for (const n of S.fleet.nodes) {
         if (n.lat == null || n.lon == null) continue;
         seen.add(n.id);
         let m = S.markers[n.id];
         if (!m) {
-            m = L.marker([n.lat, n.lon], {
+            m = L.marker(dispLL(n), {
                 draggable: true, riseOnHover: true,
                 icon: L.divIcon({ className: "", html: markerHtml(n), iconSize: [0, 0] }),
             }).addTo(map);
@@ -451,9 +497,9 @@ function renderMap() {
             m.on("click", () => selectNode(n.id, true));
             S.markers[n.id] = m;
         } else {
-            const ll = m.getLatLng();
+            const ll = m.getLatLng(), [dl, dn] = dispLL(n);
             if (!m.dragging || !m._dragActive) {
-                if (Math.abs(ll.lat - n.lat) > 1e-9 || Math.abs(ll.lng - n.lon) > 1e-9) m.setLatLng([n.lat, n.lon]);
+                if (Math.abs(ll.lat - dl) > 1e-9 || Math.abs(ll.lng - dn) > 1e-9) m.setLatLng([dl, dn]);
             }
             patchMarker(m, n);
         }
@@ -461,6 +507,7 @@ function renderMap() {
     for (const id of Object.keys(S.markers)) {
         if (!seen.has(id)) { map.removeLayer(S.markers[id]); delete S.markers[id]; }
     }
+    renderLeaders();
     renderLinks();
     setTimeout(declutterLabels, 0);
     const unplaced = S.fleet.nodes.filter((n) => n.lat == null);
@@ -531,9 +578,10 @@ function renderLinks() {
     const keep = new Set();
     for (const w of wantedLinks()) {
         keep.add(w.key);
-        const style = { color: rssiColor(w.r), weight: w.key.startsWith("m:") ? 2.5 : 2,
-                        opacity: w.faded ? 0.35 : 0.8, dashArray: w.oneWay ? "3 7" : w.faded ? "4 6" : "6 4" };
-        const pts = [[w.a.lat, w.a.lon], [w.b.lat, w.b.lon]];
+        // Solid = live two-way link; dashed = one side only, or gone quiet.
+        const style = { color: rssiColor(w.r), weight: w.key.startsWith("m:") ? 3.5 : 2.5,
+                        opacity: w.faded ? 0.4 : 0.9, dashArray: w.oneWay ? "3 7" : w.faded ? "4 6" : null };
+        const pts = [dispLL(w.a), dispLL(w.b)];
         // Label only the selected node's links permanently, and only when the
         // line is long enough on screen to hold it; otherwise on hover/tap.
         const px = map.latLngToContainerPoint(pts[0]).distanceTo(map.latLngToContainerPoint(pts[1]));
@@ -560,6 +608,7 @@ function renderLinks() {
     for (const id of Object.keys(S.linkLines)) {
         if (!keep.has(id)) { S.links.removeLayer(S.linkLines[id]); delete S.linkLines[id]; }
     }
+    renderMeshGraph();
     const b = $("mapLinks");
     if (b) {
         const mode = linkMode();
@@ -593,7 +642,7 @@ function meshRoute(fromId, toId) {
 function trafficOn() { return !!S.settings.traffic; }
 function flow(path, kind) {
     if (!trafficOn() || !map._loaded) return;
-    const pts = path.map((id) => nodeById(id)).filter((n) => n && n.lat != null).map((n) => [n.lat, n.lon]);
+    const pts = path.map((id) => nodeById(id)).filter((n) => n && n.lat != null).map((n) => dispLL(n));
     if (pts.length < 2) return;
     if (!S.flowLayer) S.flowLayer = L.layerGroup().addTo(map);
     const line = L.polyline(pts, { className: `flow flow-${kind}`, interactive: false, weight: kind === "det" ? 5 : 3 });
@@ -626,6 +675,60 @@ function renderTrafficBtn() {
     $("mapTraffic").classList.toggle("on", trafficOn());
     $("mapTraffic").querySelector("span").textContent = trafficOn() ? "Traffic: on" : "Traffic: off";
     $("mapTraffic").setAttribute("aria-pressed", trafficOn() ? "true" : "false");
+}
+
+// Mesh diagram (map corner, Lines: mesh): who hears whom, independent of
+// where nodes are placed (placed close together, map lines are only a few
+// pixels long). Home in the middle, the rest around it; each link colored
+// by its best signal with the dBm on it, dashed when only one side hears.
+const meshGraphCtl = L.control({ position: "bottomleft" });
+meshGraphCtl.onAdd = () => {
+    const div = L.DomUtil.create("div", "mesh-graph");
+    L.DomEvent.disableClickPropagation(div);
+    return div;
+};
+meshGraphCtl.addTo(map);
+function renderMeshGraph() {
+    const box = meshGraphCtl.getContainer();
+    if (!box) return;
+    const nodes = S.fleet.nodes;
+    if (linkMode() !== "mesh" || nodes.length < 2) { box.style.display = "none"; return; }
+    box.style.display = "";
+    const W = 230, H = 190, cx = W / 2, cy = H / 2 + 6, R = 64;
+    const home = nodes.find((n) => n.is_home);
+    const ring = nodes.filter((n) => n !== home);
+    const pos = {};
+    if (home) pos[home.id] = [cx, cy];
+    ring.forEach((n, i) => {
+        const a = -Math.PI / 2 + (i * 2 * Math.PI) / ring.length;
+        pos[n.id] = [cx + R * 1.35 * Math.cos(a), cy + R * Math.sin(a)];
+    });
+    // Merge both directions of each pair.
+    const pairs = {};
+    for (const n of nodes) for (const [id, rssi, age] of (n.cfg && n.cfg.nbr) || []) {
+        if (!pos[id]) continue;
+        const k = [n.id, id].sort().join("-");
+        (pairs[k] = pairs[k] || { a: k.slice(0, 6), b: k.slice(7), seen: {} }).seen[n.id] = { rssi, age };
+    }
+    let edges = "", labels = "";
+    for (const p of Object.values(pairs)) {
+        const [x1, y1] = pos[p.a], [x2, y2] = pos[p.b];
+        const rs = Object.values(p.seen).map((x) => x.rssi).filter(Boolean);
+        const r = rs.length ? Math.max(...rs) : 0;
+        const both = p.seen[p.a] && p.seen[p.b];
+        const up = nodeById(p.a) && nodeById(p.a).online && nodeById(p.b) && nodeById(p.b).online;
+        edges += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${rssiColor(r)}" stroke-width="2.2" stroke-dasharray="${both ? "" : "3 5"}" opacity="${up ? 0.9 : 0.35}"/>`;
+        if (r) labels += `<text x="${(x1 + x2) / 2}" y="${(y1 + y2) / 2 - 3}" class="mg-db">${r}</text>`;
+    }
+    const dots = nodes.filter((n) => pos[n.id]).map((n) => {
+        const [x, y] = pos[n.id];
+        const st = nodeState(n);
+        const col = st === "offline" ? "#f87171" : st === "stale" ? "#fbbf24" : nodeColor(n) || (n.is_home ? "#f0abfc" : "#4ecdc4");
+        return `<circle cx="${x}" cy="${y}" r="${n.is_home ? 8 : 6.5}" fill="#06080b" stroke="${col}" stroke-width="2.4"/>` +
+            `<text x="${x}" y="${y + (y < cy ? -12 : 20)}" class="mg-name">${esc(n.alias || n.id)}</text>`;
+    }).join("");
+    box.innerHTML = `<div class="mg-head">Mesh links <span>dBm, best side</span></div>
+        <svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Mesh link diagram">${edges}${labels}${dots}</svg>`;
 }
 
 // Links toggle on the map: home -> mesh -> off. Saved, so every open
@@ -779,7 +882,9 @@ function declutterLabels() {
         placed.push(lab.getBoundingClientRect());
     }
 }
-map.on("zoomend moveend", () => { renderLinks(); declutterLabels(); });
+// Zoom changes which markers overlap (spread); a pan only moves everything.
+map.on("zoomend", () => renderMap());
+map.on("moveend", () => { renderLinks(); declutterLabels(); });
 
 async function setNodePos(id, lat, lon) {
     const n = nodeById(id);
