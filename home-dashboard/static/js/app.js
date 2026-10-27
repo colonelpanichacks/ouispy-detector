@@ -1007,6 +1007,96 @@ async function command(target, op, args) {
 }
 function targetName(t) { return t === "all" ? "all nodes" : nodeName(t); }
 const JOB_RANK = { queued: 0, sending: 1, sent: 2, done: 3, failed: 3, partial: 3 };
+S.jobWaiters = {};
+// Resolves when the job reaches done / failed / partial.
+function waitJob(id) {
+    const j = S.jobs.find((x) => x.id === id);
+    if (j && ["done", "failed", "partial"].includes(j.state)) return Promise.resolve(j);
+    return new Promise((res) => { S.jobWaiters[id] = res; });
+}
+
+// ------------------------------------------------------------------
+// firmware updates over the mesh
+// ------------------------------------------------------------------
+S.firmware = null;
+S.fwSel = new Set();
+S.fwRun = null;          // {queue: [ids], current, results: {id: text}}
+function fwBuildOf(n) { return (n.cfg && n.cfg.fw) || ""; }
+function renderFirmware() {
+    const m = S.firmware;
+    $("fwInfo").innerHTML = m
+        ? `<b>${esc(m.filename || "firmware.bin")}</b> build ${esc(m.build || m.date + " " + m.time)} | ${(m.size / 1024).toFixed(0)} KB | ${esc(m.sha256.slice(0, 12))}`
+        : "No image uploaded";
+    const nodes = S.fleet.nodes.slice().sort((a, b) => (a.is_home - b.is_home) || String(a.alias || a.id).localeCompare(b.alias || b.id));
+    const job = (id) => S.jobs.find((j) => j.op && j.op.startsWith("fw_") && (j.target === id) && !["done", "failed", "partial"].includes(j.state))
+        || (S.fwRun && S.fwRun.lastJob[id]);
+    $("fwNodes").innerHTML = nodes.map((n) => {
+        const j = job(n.id);
+        const res = S.fwRun && S.fwRun.results[n.id];
+        const pct = j && j.progress != null ? j.progress : null;
+        const stage = j ? (j.op === "fw_stage" ? "staging on home" : j.ota && j.ota.state ? j.ota.state : j.state) : "";
+        return `<label class="fw-node ${n.online ? "" : "off"}">
+            <input type="checkbox" data-id="${esc(n.id)}" ${S.fwSel.has(n.id) ? "checked" : ""} ${n.online && !S.fwRun ? "" : "disabled"}>
+            <span class="fw-name">${esc(n.alias || n.id)}${n.is_home ? " <i>home</i>" : ""}</span>
+            <span class="fw-cur" title="Firmware build it runs now">${esc(fwBuildOf(n) || "build unknown")}</span>
+            ${pct != null || res ? `<span class="fw-bar"><i style="width:${pct != null ? pct : 100}%"></i></span>
+            <span class="fw-st">${esc(res || `${stage}${pct != null ? " " + pct + "%" : ""}${j && j.ota && j.ota.kbps ? " | " + j.ota.kbps + " kbps" : ""}`)}</span>` : ""}
+        </label>`;
+    }).join("");
+    $("fwNodes").querySelectorAll("input[type=checkbox]").forEach((c) => c.onchange = () => {
+        if (c.checked) S.fwSel.add(c.dataset.id); else S.fwSel.delete(c.dataset.id);
+        $("fwGo").disabled = !S.firmware || !S.fwSel.size || !!S.fwRun;
+    });
+    $("fwGo").disabled = !S.firmware || !S.fwSel.size || !!S.fwRun;
+    $("fwGo").textContent = S.fwRun ? "Updating..." : "Update selected";
+}
+$("fwFile").onchange = async () => {
+    const f = $("fwFile").files[0];
+    if (!f) return;
+    const r = await fetch("/api/firmware", { method: "POST", body: f, headers: { "X-Filename": f.name, "Content-Type": "application/octet-stream" } });
+    const d = await r.json();
+    if (!d.ok) { toast("bad", "Firmware not accepted", d.error); return; }
+    S.firmware = d.firmware;
+    toast("good", "Firmware uploaded", `build ${d.firmware.build || d.firmware.date}, ${(d.firmware.size / 1024).toFixed(0)} KB`);
+    renderFirmware();
+    $("fwFile").value = "";
+};
+// Stage on the home once, then each selected remote in turn, the home last.
+$("fwGo").onclick = () => twoTap($("fwGo"), async () => {
+    const h = homeNode();
+    if (!h || !S.firmware) return;
+    const remotes = [...S.fwSel].filter((id) => id !== h.id);
+    const home = S.fwSel.has(h.id);
+    S.fwRun = { results: {}, lastJob: {} };
+    renderFirmware();
+    const run = async (target, op) => {
+        const r = await command(target, op);
+        if (!r.ok) return { state: "failed", error: r.error };
+        S.fwRun.lastJob[target] = r.job;
+        return waitJob(r.job.id);
+    };
+    const st = await run(h.id, "fw_stage");
+    if (st.state !== "done") {
+        S.fwRun.results[h.id] = "staging failed: " + (st.error || "");
+    } else {
+        for (const id of remotes) {
+            const j = await run(id, "fw_send");
+            S.fwRun.results[id] = j.state === "done" ? "updated, rebooting" : "failed: " + (j.error || Object.values(j.replies || {}).map((x) => x.text).join(", "));
+            renderFirmware();
+        }
+        if (home) {
+            const j = await run(h.id, "fw_self");
+            S.fwRun.results[h.id] = j.state === "done" ? "installing, rebooting" : "failed: " + (j.error || "");
+        }
+    }
+    const results = S.fwRun.results;
+    S.fwRun = null;
+    S.fwSel.clear();
+    renderFirmware();
+    const bad = Object.values(results).filter((t) => !/^updated|^installing/.test(t)).length;
+    toast(bad ? "warn" : "good", "Firmware update finished", bad ? `${bad} node(s) need attention` : "all selected nodes updated");
+});
+
 function onJob(j) {
     const i = S.jobs.findIndex((x) => x.id === j.id);
     // The socket can deliver "done" before the POST that queued the job
@@ -1017,6 +1107,8 @@ function onJob(j) {
     const prev = S.jobState[j.id];
     S.jobState[j.id] = j.state;
     const final = ["done", "failed", "partial"].includes(j.state);
+    if (final && S.jobWaiters[j.id]) { S.jobWaiters[j.id](j); delete S.jobWaiters[j.id]; }
+    if (j.op && j.op.startsWith("fw_")) renderFirmware();
     if (final && prev !== j.state && !j.auto && S.booted) {
         const reps = Object.entries(j.replies || {});
         const okN = reps.filter(([, r]) => r.st === 0).length;
@@ -1365,6 +1457,7 @@ $("dFiltEdit").onclick = () => {
 
 // fleet control tab
 function renderFleetCtl() {
+    renderFirmware();
     $("tab-fleetctl").classList.toggle("no-command", !canCommand());
     const nodes = S.fleet.nodes;
     $("fBody").innerHTML = nodes.map((n) => {
@@ -1741,6 +1834,7 @@ async function boot() {
     vendorOptions($("fPreset"));
     quickTypeOptions($("dQType"));
     quickTypeOptions($("fQType"));
+    try { S.firmware = (await api("/api/firmware")).firmware; } catch (e) { /* older server */ }
     loadFleetKeyStatus();
     const badge = $("modeBadge");
     badge.textContent = st.mode.toUpperCase();
@@ -1782,6 +1876,7 @@ async function boot() {
         if (!$("tab-settings").contains(document.activeElement)) loadSettingsForm();
     });
     sock.on("fleetkey", () => loadFleetKeyStatus());
+    sock.on("firmware", (m) => { S.firmware = m; renderFirmware(); });
     sock.on("job", onJob);
     sock.on("dets_cleared", (e) => {
         S.dets = S.dets.filter((d) => (e.node && d.node !== e.node) || (e.mac && d.mac !== e.mac));

@@ -166,6 +166,18 @@
                         <button class="btn ghost" id="fPresetGo">Install on all</button>
                     </div>
                 </div>
+                <div class="fa fw-card">
+                    <h4>Firmware update (over the mesh)</h4>
+                    <div class="ctl-row">
+                        <label class="btn ghost fw-pick">Choose firmware.bin<input type="file" id="fwFile" accept=".bin" hidden></label>
+                        <span class="fw-info" id="fwInfo">No image uploaded</span>
+                    </div>
+                    <div class="fw-nodes" id="fwNodes"></div>
+                    <div class="ctl-row">
+                        <button class="btn" id="fwGo" disabled>Update selected</button>
+                        <span class="help-text fw-note">Nodes update one at a time; the home goes last. Each new image must reach the mesh within 3 min or the node rolls back.</span>
+                    </div>
+                </div>
                 <div class="fa">
                     <h4>Radio (whole fleet, including home)</h4>
                     <div class="ctl-row">

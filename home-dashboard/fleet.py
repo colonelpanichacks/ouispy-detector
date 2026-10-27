@@ -82,7 +82,7 @@ class Fleet:
             self.console.append([time.time(), source, line])
             del self.console[:-300]
         self.emit("console", {"ts": time.time(), "source": source, "line": line})
-        if self.on_line and line.split(" ", 1)[0] in ("OK", "ERR", "CMD", "ACK", "RST", "RFL"):
+        if self.on_line and line.split(" ", 1)[0] in ("OK", "ERR", "CMD", "ACK", "RST", "RFL", "OTA"):
             self.on_line(line)
 
         if line.startswith(("RST ", "RFL ")):

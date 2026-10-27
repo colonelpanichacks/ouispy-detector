@@ -12,24 +12,27 @@ Firmware lines (src/main.cpp "Remote management"):
   RFL {"node","ok","filters":[...]}   filter list
 """
 import collections
+import re
 import itertools
 import json
 import threading
 import time
 
 import filters as flt
+import firmware as fw
 
 ACK_TEXT = {0: "applied", 1: "rejected", 2: "fleet key mismatch", 3: "replayed"}
 LINE_TIMEOUT = 4.0       # s for the home to answer one console line
 BUSY_RETRIES = 12        # "mesh busy" = a previous transfer is still going out
 BUSY_WAIT = 1.5
-REPLY_WINDOW = {"ack": 20, "rst": 12, "rfl": 30}
+REPLY_WINDOW = {"ack": 20, "rst": 12, "rfl": 30, "ota": 2400}
 LABELS = {
     "status": "Read status", "audio": "Set buzzer/LED", "identify": "Identify",
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
     "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
     "rechan": "Re-channel fleet", "meshpush": "Push home filters",
     "setkey": "Set fleet key",
+    "fw_stage": "Stage firmware on home", "fw_send": "Update firmware", "fw_self": "Update home firmware",
 }
 
 
@@ -107,6 +110,22 @@ def plan(op, target, args, home_id):
         return [(f"meshrechan {ch}", "OK")], "local", f"Re-channel fleet to {ch}"
     if op == "meshpush":
         return [("meshpush", "CMD")], "ack", label
+    if op == "fw_stage":
+        # Lines are generated while it runs (2,500+ of them): see _stage_firmware.
+        if not local:
+            raise PlanError("firmware is staged on the home node, over USB")
+        meta = fw.current()
+        if not meta:
+            raise PlanError("upload a firmware image first")
+        return [], "local", f"Stage firmware {meta.get('build') or meta['date']} on home"
+    if op == "fw_send":
+        if local or target == "all":
+            raise PlanError("pick one remote node (the home updates itself with fw_self)")
+        return [(f"fwsend {tgt}", "CMD")], "ota", "Update firmware"
+    if op == "fw_self":
+        if not local:
+            raise PlanError("fw_self is for the home node")
+        return [("fwself", "OK")], "local", label
     if op == "setkey":
         # USB console of the home ONLY: a key never crosses the radio.
         if not local:
@@ -174,6 +193,9 @@ class Commander(threading.Thread):
     def feed_line(self, line):
         """Every console line from the home; called by Fleet."""
         head = line.split(" ", 1)[0]
+        if head == "OTA":
+            self._ota_line(line)
+            return
         if head in ("OK", "ERR", "CMD", "RST", "RFL"):
             with self.cv:
                 self.answers.append(line)
@@ -205,6 +227,8 @@ class Commander(threading.Thread):
             return self._finish(job, "failed", "home node disconnected")
         job["state"] = "sending"
         self._publish(job)
+        if job["op"] == "fw_stage":
+            return self._stage_firmware(job, sender)
         for i, (line, kind) in enumerate(zip(job["lines"], job["kinds"])):
             for attempt in range(BUSY_RETRIES):
                 with self.cv:
@@ -238,6 +262,74 @@ class Commander(threading.Thread):
         self.waiting.append(job)
         self._publish(job)
 
+    def _await_fw(self, timeout):
+        """Next answer to a firmware staging line: "OK fw..." or "ERR fw..."
+        (other commands' lines are skipped)."""
+        deadline = time.time() + timeout
+        with self.cv:
+            while True:
+                while self.answers:
+                    a = self.answers.popleft()
+                    if a.startswith(("OK fw", "ERR fw")):
+                        return a
+                left = deadline - time.time()
+                if left <= 0:
+                    return None
+                self.cv.wait(left)
+
+    def _stage_firmware(self, job, sender):
+        """Copy the uploaded image into the home's PSRAM, then fwend writes
+        it to its spare slot. Each fwdata line carries its offset and every
+        reply names the byte count, so a lost line or reply is resent and a
+        stale reply can't be mistaken for the current one."""
+        try:
+            img, meta = fw.load()
+        except fw.FirmwareError as e:
+            return self._finish(job, "failed", str(e))
+        with self.cv:
+            self.answers.clear()
+        sender.send(f"fwbegin {meta['size']} {meta['sha256']}")
+        a = self._await_fw(15)
+        if not a or not a.startswith("OK fwbegin"):
+            return self._finish(job, "failed", (a or "no answer to fwbegin")[4:] if a else "no answer to fwbegin")
+        off, misses, last_pub = 0, 0, 0.0
+        while off < len(img):
+            end = min(off + fw.CHUNK, len(img))
+            sender.send(f"fwdata {off} {img[off:end].hex()}")
+            got = None
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                a = self._await_fw(deadline - time.time())
+                if a is None:
+                    break
+                m = re.match(r"OK fwdata (\d+)$", a)
+                if m and int(m.group(1)) == end:
+                    got = end
+                    break
+                m = re.search(r"expected offset (\d+)", a)
+                if m:
+                    got = int(m.group(1))
+                    break
+                if a.startswith("ERR fwdata") and "bad hex" not in a:
+                    return self._finish(job, "failed", a[4:])
+            if got is None:
+                misses += 1
+                if misses > 20:
+                    return self._finish(job, "failed", f"the home stopped answering at byte {off}")
+                continue
+            off = got
+            if time.time() - last_pub > 0.5:
+                job["progress"] = int(off * 100 / len(img))
+                self._publish(job)
+                last_pub = time.time()
+        job["progress"] = 100
+        self._publish(job)
+        sender.send("fwend")
+        a = self._await_fw(90)
+        if not a or not a.startswith("OK fwend"):
+            return self._finish(job, "failed", a[4:] if a else "no answer to fwend")
+        return self._finish(job, "done")
+
     def _await(self, kind, line=""):
         """Wait for the answer to the line in flight. An ERR naming another
         console command (a late "ERR rstatus: mesh busy" from an earlier
@@ -269,6 +361,28 @@ class Commander(threading.Thread):
                 if left <= 0:
                     return None
                 self.cv.wait(left)
+
+    def _ota_line(self, line):
+        """OTA {node, state, pct, ...}: progress of an update the home is sending."""
+        try:
+            obj = json.loads(line[4:])
+        except ValueError:
+            return
+        node = obj.get("node")
+        for job in list(self.waiting):
+            if job["expect"] != "ota" or job["target"] != node:
+                continue
+            job["progress"] = obj.get("pct", job.get("progress", 0))
+            job["ota"] = {k: obj.get(k) for k in ("state", "bytes", "size", "kbps", "direct", "err")}
+            st = obj.get("state")
+            if st == "done":
+                job["replies"][node] = {"st": 0, "text": "updated, rebooting into it", "ts": time.time()}
+                self._settle(job)
+            elif st == "failed":
+                job["replies"][node] = {"st": 1, "text": obj.get("err") or "update failed", "ts": time.time()}
+                self._settle(job)
+            else:
+                self._publish(job)
 
     def _match_reply(self, kind, obj):
         node = obj.get("node")

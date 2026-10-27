@@ -626,6 +626,22 @@ input[type="checkbox"]:checked::after {
 body.map-maxed { overflow: hidden; }
 body.map-maxed .toasts { z-index: 1700; }
 
+/* Firmware update card */
+.fw-card { grid-column: 1 / -1; }
+.fw-pick { cursor: pointer; }
+.fw-info { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.fw-info b { color: var(--accent); font-weight: 600; }
+.fw-nodes { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
+.fw-node { display: grid; grid-template-columns: auto minmax(90px, 160px) minmax(110px, 1fr) minmax(80px, 1.2fr) auto; align-items: center; gap: 10px;
+           padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.fw-node.off { opacity: 0.45; }
+.fw-node .fw-name i { font-style: normal; font-size: 10px; color: var(--pink); margin-left: 4px; }
+.fw-node .fw-cur { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.fw-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.fw-bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--sky)); box-shadow: 0 0 10px rgba(78,205,196,0.6); transition: width .4s; }
+.fw-st { font-family: var(--mono); font-size: 11px; color: var(--soft); white-space: nowrap; }
+.fw-note { margin: 0; }
+
 /* ---------- phones and touchscreens ----------
    Last in the file on purpose: these override the base rules above. */
 @media (max-width: 760px) {
@@ -641,6 +657,8 @@ body.map-maxed .toasts { z-index: 1700; }
     .map-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
     .map-layer { max-width: 160px; margin-left: auto; }
     .map-panel.map-max { height: 100dvh; }
+    .fw-node { grid-template-columns: auto 1fr; }
+    .fw-node .fw-cur, .fw-node .fw-bar, .fw-node .fw-st { grid-column: 2; }
 }
 @media (pointer: coarse) {
     /* Every control gets a finger-sized tap area. */

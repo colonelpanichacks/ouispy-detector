@@ -530,6 +530,39 @@ class DemoSource(Source):
                 elif verb == "rpreset":
                     added = self._merge(n, a[1])
                     self._ack(n, code, cid, 0, added)
+        elif verb == "fwbegin" and len(a) >= 2:
+            self.fw = {"size": int(a[0]), "got": 0}
+            self._say("OK fwbegin", 0.01)
+        elif verb == "fwdata" and len(a) >= 2 and getattr(self, "fw", None):
+            off = int(a[0])
+            if off != self.fw["got"]:
+                self._say(f"ERR fwdata: expected offset {self.fw['got']}", 0.001)
+            else:
+                self.fw["got"] += len(a[1]) // 2
+                self._say(f"OK fwdata {self.fw['got']}", 0.001)
+        elif verb == "fwend" and getattr(self, "fw", None):
+            ok = self.fw["got"] == self.fw["size"]
+            self.fw_size = self.fw["size"]
+            self._say(f"OK fwend staged {self.fw['size']} bytes" if ok else "ERR fwend: short image", 1.0)
+        elif verb == "fwsend" and a:
+            t = a[0].upper()
+            if t not in self.nodes or not self._up(t):
+                self._say("ERR fwsend: target must be one node ID")
+            else:
+                self._cmd("fwsend", t, 13)
+                size, steps = getattr(self, "fw_size", 1300000), 12
+                def ota(i, state):
+                    pct = min(100, int(i * 100 / steps))
+                    return "OTA " + json.dumps({"node": t, "state": state, "pct": pct, "bytes": size * pct // 100,
+                                                "size": size, "kbps": 96, "direct": 1, "err": ""}, separators=(",", ":"))
+                self._say(ota(0, "offered"), 0.3)
+                for i in range(1, steps):
+                    self._say(ota(i, "sending"), 0.5 + i * 0.7)
+                self._say(ota(steps, "done"), 0.5 + steps * 0.7)
+                threading.Timer(0.6 + steps * 0.7, lambda: self._reboot(t, 8)).start()
+        elif verb == "fwself":
+            self._say("OK installing the staged firmware on this node - rebooting")
+            self._reboot(DEMO_HOME, 6)
         elif verb in ("mfbegin", "mfadd", "mfdel") and a:
             self.mf = {"t": a[0], "op": verb, "buf": bytearray()}
             self._say("OK mfbegin")

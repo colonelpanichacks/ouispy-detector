@@ -22,6 +22,7 @@ from flask import Flask, Response, abort, jsonify, redirect, render_template, re
 from flask_socketio import SocketIO
 
 import filters as flt
+import firmware as fw
 from commands import Commander, PlanError
 from fleet import Fleet
 from sources import (DemoSource, MqttSource, ReplaySource, SerialSource,
@@ -685,6 +686,23 @@ def api_fleetkey_provision_home():
 def api_jobs():
     return jsonify(_jobs(request.args.get("node") or None,
                          include_auto=request.args.get("auto") == "1"))
+
+
+@app.route("/api/firmware", methods=["GET"])
+def api_firmware_get():
+    return jsonify({"ok": True, "firmware": fw.current()})
+
+
+@app.route("/api/firmware", methods=["POST"])
+def api_firmware_upload():
+    """The raw firmware.bin as the request body (X-Filename names it)."""
+    img = request.get_data(cache=False)
+    try:
+        meta = fw.save(img, request.headers.get("X-Filename", ""))
+    except fw.FirmwareError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    emit("firmware", meta)
+    return jsonify({"ok": True, "firmware": meta})
 
 
 @app.route("/api/filters/validate", methods=["POST"])

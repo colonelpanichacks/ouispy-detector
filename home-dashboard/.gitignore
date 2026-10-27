@@ -5,3 +5,4 @@ __pycache__/
 *.db-shm
 *.log
 access_token
+firmware/

@@ -127,6 +127,31 @@ class PlanTest(unittest.TestCase):
         lines, expect, _ = commands.plan("filters_add", "A1B2C3", one, "A1B2C3")
         self.assertEqual((lines[0][0], lines[-1][1], expect), ("mfadd self", "OK", "local"))
 
+    def test_firmware_image_checks(self):
+        import firmware as fwm
+        path = os.path.join(os.path.dirname(__file__), "..", "..", ".pio", "build", "seeed_xiao_esp32s3", "firmware.bin")
+        if os.path.exists(path):
+            meta = fwm.inspect(open(path, "rb").read())
+            self.assertEqual(len(meta["sha256"]), 64)
+            self.assertTrue(meta["date"] and meta["time"])
+        with self.assertRaises(fwm.FirmwareError):
+            fwm.inspect(b"\x00" * 100000)               # not an app image
+        bad = bytearray(open(path, "rb").read()) if os.path.exists(path) else None
+        if bad:
+            bad[12] = 5                                  # another chip id
+            with self.assertRaises(fwm.FirmwareError):
+                fwm.inspect(bytes(bad))
+
+    def test_firmware_plans(self):
+        lines, expect, _ = commands.plan("fw_send", "D4E5F6", {}, "A1B2C3")
+        self.assertEqual((lines, expect), ([("fwsend D4E5F6", "CMD")], "ota"))
+        with self.assertRaises(commands.PlanError):
+            commands.plan("fw_send", "all", {}, "A1B2C3")
+        with self.assertRaises(commands.PlanError):
+            commands.plan("fw_stage", "D4E5F6", {}, "A1B2C3")   # staging is home-only
+        lines, expect, _ = commands.plan("fw_self", "A1B2C3", {}, "A1B2C3")
+        self.assertEqual((lines, expect), ([("fwself", "OK")], "local"))
+
     def test_key_never_over_the_mesh(self):
         with self.assertRaises(commands.PlanError):
             commands.plan("setkey", "D4E5F6", {"key": "k" * 32}, "A1B2C3")
