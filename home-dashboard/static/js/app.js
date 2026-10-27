@@ -265,20 +265,74 @@ function renderNodes() {
 const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true });
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
-const OSM = ["https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'];
-const TILES = { "osm-dark": OSM, "osm": OSM };
+// Free base maps that need no API key. Each keeps its provider's
+// attribution. `dark` runs the light OSM tiles through the CSS invert filter;
+// `labels` lays a transparent place-name layer over imagery.
+const A_OSM = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const A_CARTO = A_OSM + ' &copy; <a href="https://carto.com/attributions">CARTO</a>';
+const A_ESRI = 'Tiles &copy; <a href="https://www.esri.com">Esri</a>';
+const ESRI = (svc) => `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`;
+const CARTO = (style) => `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`;
+const TILES = {
+    "osm-dark":     { name: "OpenStreetMap, dark", url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", attr: A_OSM, max: 19, dark: true },
+    "carto-dark":   { name: "CARTO Dark Matter", url: CARTO("dark_all"), attr: A_CARTO, max: 20 },
+    "carto-dark-nl":{ name: "CARTO Dark Matter, no labels", url: CARTO("dark_nolabels"), attr: A_CARTO, max: 20 },
+    "esri-dark":    { name: "Esri Dark Gray", url: ESRI("Canvas/World_Dark_Gray_Base"), attr: A_ESRI, max: 16,
+                      labels: ESRI("Canvas/World_Dark_Gray_Reference") },
+    "esri-sat":     { name: "Satellite (Esri)", url: ESRI("World_Imagery"), attr: A_ESRI + ", Maxar, Earthstar Geographics", max: 19 },
+    "esri-hybrid":  { name: "Satellite + labels (Esri)", url: ESRI("World_Imagery"), attr: A_ESRI + ", Maxar, Earthstar Geographics", max: 19,
+                      labels: ESRI("Reference/World_Boundaries_and_Places") },
+    "usgs-sat":     { name: "USGS imagery + topo (US only)", url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}",
+                      attr: 'Tiles courtesy of the <a href="https://usgs.gov/">U.S. Geological Survey</a>', max: 16 },
+    "osm":          { name: "OpenStreetMap", url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", attr: A_OSM, max: 19 },
+    "osm-hot":      { name: "OpenStreetMap Humanitarian", url: "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
+                      attr: A_OSM + ', tiles by <a href="https://www.hotosm.org/">HOT</a>', max: 19 },
+    "carto-voyager":{ name: "CARTO Voyager", url: CARTO("rastertiles/voyager"), attr: A_CARTO, max: 20 },
+    "carto-light":  { name: "CARTO Positron (light)", url: CARTO("light_all"), attr: A_CARTO, max: 20 },
+    "esri-street":  { name: "Esri World Street", url: ESRI("World_Street_Map"), attr: A_ESRI, max: 19 },
+    "esri-topo":    { name: "Esri World Topo", url: ESRI("World_Topo_Map"), attr: A_ESRI, max: 19 },
+    "opentopo":     { name: "OpenTopoMap (terrain)", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+                      attr: A_OSM + ', <a href="http://viewfinderpanoramas.org">SRTM</a> | style &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)', max: 17 },
+    "cyclosm":      { name: "CyclOSM", url: "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
+                      attr: A_OSM + ', style <a href="https://www.cyclosm.org">CyclOSM</a>', max: 20 },
+};
+const TILE_OTHER = { "custom-dark": "Custom / local tile server, dark", "custom": "Custom / local tile server", "none": "None - offline grid" };
+let labelLayer = null;
 function applyTiles() {
     if (tileLayer) { map.removeLayer(tileLayer); tileLayer = null; }
-    const known = ["osm-dark", "osm", "custom-dark", "custom", "none"];
-    const mode = known.includes(S.settings.tiles) ? S.settings.tiles : "osm-dark";
+    if (labelLayer) { map.removeLayer(labelLayer); labelLayer = null; }
+    const mode = (TILES[S.settings.tiles] || TILE_OTHER[S.settings.tiles]) ? S.settings.tiles : "osm-dark";
+    const t = TILES[mode];
     const el = map.getContainer();
     el.classList.toggle("grid-bg", mode === "none");
-    el.classList.toggle("dark-tiles", mode === "osm-dark" || mode === "custom-dark");
-    let url = null, attr = "";
-    if (TILES[mode]) [url, attr] = TILES[mode];
-    else if (mode.startsWith("custom") && S.settings.tiles_custom) url = S.settings.tiles_custom;
-    if (url) tileLayer = L.tileLayer(url, { maxZoom: 19, attribution: attr }).addTo(map);
+    el.classList.toggle("dark-tiles", (t && t.dark) || mode === "custom-dark");
+    if (t) {
+        tileLayer = L.tileLayer(t.url, { maxZoom: 20, maxNativeZoom: t.max, attribution: t.attr, detectRetina: false }).addTo(map);
+        if (t.labels) labelLayer = L.tileLayer(t.labels, { maxZoom: 20, maxNativeZoom: t.max, pane: "overlayPane" }).addTo(map);
+    } else if (mode.startsWith("custom") && S.settings.tiles_custom) {
+        tileLayer = L.tileLayer(S.settings.tiles_custom, { maxZoom: 20 }).addTo(map);
+    }
+    if ($("mapLayer") && document.activeElement !== $("mapLayer")) $("mapLayer").value = mode;
+}
+// Picking a layer on the map saves it, so every open dashboard switches too.
+$("mapLayer").onchange = async () => {
+    const tiles = $("mapLayer").value;
+    S.settings.tiles = tiles;
+    applyTiles();
+    if ($("sTiles")) $("sTiles").value = tiles;
+    await api("/api/settings", { method: "POST", body: { tiles } });
+};
+// Map layer picker (the map's top-right corner and Settings share one list).
+function tileOptions(sel) {
+    const opt = (k, n) => `<option value="${k}">${esc(n)}</option>`;
+    const dark = ["osm-dark", "carto-dark", "carto-dark-nl", "esri-dark"];
+    const sat = ["esri-sat", "esri-hybrid", "usgs-sat"];
+    const light = Object.keys(TILES).filter((k) => !dark.includes(k) && !sat.includes(k));
+    sel.innerHTML =
+        `<optgroup label="Dark">${dark.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
+        `<optgroup label="Satellite">${sat.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
+        `<optgroup label="Street and terrain">${light.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
+        `<optgroup label="Private / offline">${Object.entries(TILE_OTHER).map(([k, n]) => opt(k, n)).join("")}</optgroup>`;
 }
 let viewSet = false;
 function initView() {
@@ -1608,6 +1662,8 @@ async function boot() {
     try { await loadTrails(Math.max(S.trailSeconds, 1800)); } catch (e) { /* older server */ }
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
+    tileOptions($("mapLayer"));
+    tileOptions($("sTiles"));
     vendorOptions($("dPreset"));
     vendorOptions($("fPreset"));
     quickTypeOptions($("dQType"));

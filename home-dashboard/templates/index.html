@@ -47,6 +47,7 @@
         <div class="panel-head">
             <h3>Map</h3>
             <span class="help" id="mapHint">Drag markers to move nodes. Select a node, then "Place on map".</span>
+            <select id="mapLayer" class="field map-layer" title="Map layer" aria-label="Map layer"></select>
             <label class="trailctl" title="How much GPS trail to draw for carried nodes">
                 <span>Trail</span>
                 <input type="range" id="trailRange" min="0" max="9" step="1" value="3">
@@ -214,15 +215,9 @@
                 </div>
                 <div class="set-block">
                     <h4>Map Tiles</h4>
-                    <select id="sTiles" class="field">
-                        <option value="osm-dark">OpenStreetMap, dark (online)</option>
-                        <option value="osm">OpenStreetMap (online)</option>
-                        <option value="custom-dark">Custom / local tile server, dark</option>
-                        <option value="custom">Custom / local tile server</option>
-                        <option value="none">None - offline grid</option>
-                    </select>
+                    <select id="sTiles" class="field"></select>
                     <input type="text" id="sTilesCustom" class="field" placeholder="http://localhost:8080/{z}/{x}/{y}.png">
-                    <div class="help-text">Online tiles tell the tile server roughly where you are looking. Use a local tile server or the offline grid to keep that private.</div>
+                    <div class="help-text">The same list as the picker on the map. All are free with no account. Online tiles tell the tile provider roughly where you are looking; a local tile server or the offline grid keeps that private.</div>
                 </div>
                 <div class="set-block">
                     <h4>Alerts &amp; Map</h4>

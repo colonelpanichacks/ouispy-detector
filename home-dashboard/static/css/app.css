@@ -607,6 +607,9 @@ input[type="checkbox"]:checked::after {
 
 .disclaimer { text-align: center; font-size: 10.5px; color: var(--faint); padding: 4px 16px 18px; letter-spacing: 0.3px; }
 
+.map-layer { width: auto; max-width: 210px; padding: 3px 8px; font-size: 11px; margin-left: 12px; flex: none; }
+.panel-head .map-layer + .trailctl { margin-left: 10px; }
+
 /* ---------- phones and touchscreens ----------
    Last in the file on purpose: these override the base rules above. */
 @media (max-width: 760px) {
@@ -619,6 +622,8 @@ input[type="checkbox"]:checked::after {
     .toasts { left: 8px; right: 8px; bottom: 8px; }
     .toast { min-width: 0; max-width: none; }
     .toast:nth-child(n+4) { display: none; }
+    .map-panel .panel-head { flex-wrap: wrap; row-gap: 6px; }
+    .map-layer { max-width: 160px; margin-left: auto; }
 }
 @media (pointer: coarse) {
     /* Every control gets a finger-sized tap area. */
