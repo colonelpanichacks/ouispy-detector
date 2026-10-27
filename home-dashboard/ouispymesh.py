@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 
-from flask import Flask, Response, abort, jsonify, redirect, render_template, request
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
 from flask_socketio import SocketIO
 
 import filters as flt
@@ -373,9 +373,21 @@ def ticker():
 # ----------------------------------------------------------------------
 @app.after_request
 def no_cache(resp):
-    if request.path.startswith("/api/"):
+    # The page itself is never cached (phones held on to an old one after
+    # updates); its scripts and styles are versioned by asset() instead.
+    if request.path.startswith("/api/") or request.path == "/":
         resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+@app.template_global()
+def asset(filename):
+    """Static URL with the file's mtime as ?v=, so an update is a new URL."""
+    try:
+        v = int(os.path.getmtime(os.path.join(app.static_folder, filename)))
+    except OSError:
+        v = 0
+    return url_for("static", filename=filename, v=v)
 
 
 @app.route("/")
@@ -562,7 +574,7 @@ def _filter_meta():
     vendors = [{"key": g["key"], "label": g["label"], "kind": g["kind"],
                 "count": len(g.get("rows") or g["ouis"]), "ouis": g["ouis"],
                 "rows": g.get("rows"), "meta": g["meta"]} for g in flt.vendor_db()]
-    return {"types": flt.LABELS, "hex": flt.HEX_LEN,
+    return {"types": flt.LABELS, "hex": flt.HEX_LEN, "library": flt.library(),
             "presets": {k: [{"t": t, "id": i, "d": d} for t, i, d in v] for k, v in flt.PRESETS.items()},
             "vendors": vendors}
 

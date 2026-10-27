@@ -100,6 +100,21 @@ class PlanTest(unittest.TestCase):
             "filters_set", "A1B2C3", {"filters": [{"t": "OUI", "id": "0025DF"}]}, "A1B2C3")
         self.assertEqual((lines[0][0], lines[-1][1], expect), ("mfbegin self", "OK", "local"))
 
+    def test_library_one_entry_per_vendor(self):
+        lib = flt.library()
+        keys = [g["key"] for g in lib]
+        self.assertEqual(len(keys), len(set(keys)))
+        by = {g["key"]: g for g in lib}
+        # Firmware presets and database entries for the same vendor merge.
+        self.assertIn("axon", by)
+        self.assertEqual({r["t"] for r in by["axon"]["rows"]}, {"OUI", "PROBE", "BEACON", "CID", "SVC"})
+        for k in ("ipro", "meta", "verkada", "flipper zero", "flock safety"):
+            self.assertGreater(len(by[k]["sources"]), 1, k)
+        for g in lib:
+            rows = [(r["t"], r["id"].upper()) for r in g["rows"]]
+            self.assertEqual(len(rows), len(set(rows)), g["label"])
+            flt.encode(g["rows"])      # every entry is valid on the wire
+
     def test_filters_add_del_use_their_own_verbs(self):
         # An older home would read "mfbegin <t> add" as a full replace; the
         # dedicated verbs make it answer "unknown command" instead.

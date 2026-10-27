@@ -1075,6 +1075,23 @@ void normalizeMACAddress(String& mac) {
     mac.replace(" ", "");
 }
 
+// Hex digits only, lowercase: "D4:2A:E7", "d4-2a-e7" and "D42AE7" all
+// become "d42ae7". MAC and OUI filters are matched in this form, because
+// filters arrive in either spelling: the setup portal stores "00:25:df",
+// a mesh push or live add stores bare hex "0025DF" (the wire format), and
+// NimBLE reports "d4:2a:e7:86:97:42". Comparing the raw strings meant a
+// mesh-pushed MAC or OUI filter could never match a BLE device.
+static String macHex(const String& mac) {
+    String out;
+    out.reserve(12);
+    for (unsigned i = 0; i < mac.length(); i++) {
+        char c = mac[i];
+        if (c >= 'A' && c <= 'F') c = c - 'A' + 'a';
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) out += c;
+    }
+    return out;
+}
+
 bool isValidMAC(const String& mac) {
     String normalized = mac;
     normalizeMACAddress(normalized);
@@ -2014,15 +2031,13 @@ bool matchesMetaComposite(NimBLEAdvertisedDevice* dev, const char*& outLabel);
 bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                           String& matchedDescription, String& matchedIdentifier,
                           FilterType& outType) {
-    String normalizedDeviceMAC = deviceMAC;
-    normalizeMACAddress(normalizedDeviceMAC);
+    const String deviceHex = macHex(deviceMAC);
 
     for (const TargetFilter& filter : targetFilters) {
         switch (filter.type) {
             case FT_MAC_PREFIX: {
-                String filterID = filter.identifier;
-                normalizeMACAddress(filterID);
-                if (normalizedDeviceMAC.startsWith(filterID)) {
+                String filterID = macHex(filter.identifier);
+                if (filterID.length() >= 6 && deviceHex.startsWith(filterID)) {
                     matchedDescription = filter.description;
                     matchedIdentifier  = filter.identifier;
                     outType            = filter.type;
@@ -2031,9 +2046,7 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                 break;
             }
             case FT_FULL_MAC: {
-                String filterID = filter.identifier;
-                normalizeMACAddress(filterID);
-                if (normalizedDeviceMAC.equals(filterID)) {
+                if (deviceHex.equals(macHex(filter.identifier))) {
                     matchedDescription = filter.description;
                     matchedIdentifier  = filter.identifier;
                     outType            = filter.type;

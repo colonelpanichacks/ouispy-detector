@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>OUI-SPY Mesh</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    <link rel="stylesheet" href="{{ asset('css/app.css') }}">
 </head>
 <body>
 <div id="flashOverlay"></div>
@@ -154,11 +154,11 @@
                     </div>
                 </div>
                 <div class="fa">
-                    <h4>Signatures (all remotes, applied live)</h4>
+                    <h4>Signature library (whole fleet incl. home, live)</h4>
                     <div class="ctl-row">
                         <button class="btn ghost" id="fPush" title="Copies the home node's filter list to every remote">Push home filters</button>
                         <select id="fPreset" class="field"></select>
-                        <button class="btn ghost" id="fPresetGo">Install preset</button>
+                        <button class="btn ghost" id="fPresetGo">Install on all</button>
                     </div>
                 </div>
                 <div class="fa">
@@ -305,7 +305,7 @@
             </div>
             <div class="ctl-row">
                 <select id="dPreset" class="field"></select>
-                <button class="btn ghost" id="dPresetGo" title="Firmware preset: installs live on the node. Database vendor: staged in the editor, then Push">Install</button>
+                <button class="btn ghost" id="dPresetGo" title="Adds every signature of this vendor to the node, live">Install</button>
                 <button class="btn ghost danger" id="dReboot">Reboot</button>
             </div>
             <div class="rb-head">
@@ -395,6 +395,6 @@
 <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/socket.io.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/qrcode.min.js') }}"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ asset('js/app.js') }}"></script>
 </body>
 </html>

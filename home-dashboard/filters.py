@@ -194,3 +194,47 @@ def vendor_filters(group, ble=True, wifi=True):
             if "beacon" in frames:
                 rows.append({"t": "BEACON", "id": o, "d": desc})
     return rows
+
+
+# ----------------------------------------------------------------------
+# One signature library: the firmware presets and the OUI database used to
+# be offered side by side, so AXON showed up as "AXON preset", "AXON (BLE)"
+# and "AXON (WiFi)". Entries for the same vendor are merged here into one
+# group holding every signature from every source, deduplicated by
+# (type, identifier).
+# ----------------------------------------------------------------------
+_ALIASES = {"i pro": "ipro", "meta rayban smartglasses": "meta"}
+
+
+def vendor_key(label):
+    s = re.sub(r"\(.*?\)", " ", label.lower())
+    s = re.sub(r"\bpreset\b", " ", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    return _ALIASES.get(s, s)
+
+
+def library():
+    """[{key, label, rows: [{t, id, d}], count, meta, sources}] sorted by label."""
+    groups = {}
+
+    def add(label, rows, meta=None):
+        k = vendor_key(label)
+        g = groups.setdefault(k, {"key": k, "label": re.sub(r"\s*\(.*?\)", "", label).strip().upper(),
+                                  "rows": [], "meta": {}, "sources": []})
+        have = {(r["t"], r["id"].upper()) for r in g["rows"]}
+        for r in rows:
+            if (r["t"], r["id"].upper()) not in have:
+                have.add((r["t"], r["id"].upper()))
+                g["rows"].append({"t": r["t"], "id": r["id"], "d": r["d"]})
+        for mk, mv in (meta or {}).items():
+            g["meta"].setdefault(mk, mv)
+        g["sources"].append(label)
+
+    for g in vendor_db():
+        add(g["label"], vendor_filters(g), g["meta"])
+    for name, rows in PRESETS.items():
+        add(name, [{"t": t, "id": i, "d": d} for t, i, d in rows])
+    out = sorted(groups.values(), key=lambda g: g["label"])
+    for g in out:
+        g["count"] = len(g["rows"])
+    return out

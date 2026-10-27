@@ -924,22 +924,11 @@ function renderJobs() {
 }
 $("fAuto").onchange = renderJobs;
 
-// The editor's picker: firmware presets plus the portal's whole OUI
-// database (BLEOUIs.md / WiFiOUIs.md), grouped like the portal shows them.
+// One signature library (filters.library() on the server): the firmware
+// presets and the portal's OUI database merged by vendor, so each vendor is
+// listed once with every signature it has.
 function vendorOptions(sel) {
-    const p = (S.filterMeta && S.filterMeta.presets) || {};
-    const v = (S.filterMeta && S.filterMeta.vendors) || [];
-    const opt = (val, txt) => `<option value="${esc(val)}">${esc(txt)}</option>`;
-    sel.innerHTML =
-        `<optgroup label="Firmware presets">${Object.keys(p).map((k) => opt("p:" + k, `${k.toUpperCase()} preset (${p[k].length})`)).join("")}</optgroup>` +
-        `<optgroup label="OUI database - BLE">${v.filter((g) => g.kind === "ble").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>` +
-        `<optgroup label="OUI database - WiFi">${v.filter((g) => g.kind === "wifi").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>` +
-        `<optgroup label="Extra signatures">${v.filter((g) => g.kind === "extra").map((g) => opt("v:" + g.key, `${g.label} (${g.count})`)).join("")}</optgroup>`;
-}
-
-function presetOptions(sel) {
-    const p = (S.filterMeta && S.filterMeta.presets) || {};
-    sel.innerHTML = Object.keys(p).map((k) => `<option value="${k}">${k.toUpperCase()} (${p[k].length})</option>`).join("");
+    sel.innerHTML = allGroups().map((g) => `<option value="${esc(g.key)}" title="${esc(g.sources.join(" + "))}">${esc(g.label)} (${g.rows.length})</option>`).join("");
 }
 
 function cfgCells(n) {
@@ -982,37 +971,20 @@ function renderRemote() {
 // changes are staged in the editor and go out with Push.
 // ------------------------------------------------------------------
 function allGroups() {
-    const p = (S.filterMeta && S.filterMeta.presets) || {};
-    const v = (S.filterMeta && S.filterMeta.vendors) || [];
-    return Object.keys(p).map((k) => ({ key: "p:" + k, label: `${k.toUpperCase()} preset`, kind: "preset",
-                                       rows: p[k], section: "Firmware presets" }))
-        .concat(v.map((g) => ({ key: "v:" + g.key, label: g.label, kind: g.kind, ouis: g.ouis, meta: g.meta,
-                                rows: g.rows || null,
-                                section: g.kind === "ble" ? "OUI database - BLE" : g.kind === "wifi" ? "OUI database - WiFi" : "Extra signatures" })));
+    return ((S.filterMeta && S.filterMeta.library) || []).map((g) => ({ ...g, section: "Signature library" }));
 }
-// Rows a group would add (same rules as the portal: BLE entries = BLE OUI
-// and/or WiFi probe per OUI; WiFi entries = probe/beacon per frame types).
+// Rows a group adds. The BLE / WiFi switches pick which radio's signatures
+// go in: BLE off drops the BLE rows (OUI, MAC, CID, UUID, name), WiFi off
+// drops the probe/beacon rows.
+const WIFI_T = ["PROBE", "BEACON"];
 function groupRows(g) {
-    if (g.kind === "preset" || g.kind === "extra") return g.rows.map((r) => ({ t: r.t, id: r.id, d: r.d }));
-    const d = g.label.slice(0, 32), out = [];
-    for (const o of g.ouis) {
-        if (g.kind === "ble") {
-            if (S.groupBle !== false) out.push({ t: "OUI", id: o, d });
-            if (S.groupWifi !== false) out.push({ t: "PROBE", id: o, d });
-        } else {
-            const fr = ((g.meta && g.meta["Frame Types"]) || "Probe Request").toLowerCase();
-            if (fr.includes("probe")) out.push({ t: "PROBE", id: o, d });
-            if (fr.includes("beacon")) out.push({ t: "BEACON", id: o, d });
-        }
-    }
-    return out;
+    return g.rows.filter((r) => (WIFI_T.includes(r.t) ? S.groupWifi !== false : S.groupBle !== false))
+        .map((r) => ({ t: r.t, id: r.id, d: r.d }));
 }
-// Does an installed row belong to this group? Presets: exact type+ID.
-// Database vendors: any OUI-style row (BLE OUI / probe / beacon) on its OUIs.
+function normId(id) { return String(id || "").replace(/[:\-\s]/g, "").toUpperCase(); }
+// Does an installed row belong to this group? Exact type + identifier.
 function rowInGroup(g, f) {
-    const id = String(f.id || "").replace(/[:\-\s]/g, "").toUpperCase();
-    if (g.kind === "preset" || g.kind === "extra") return g.rows.some((r) => r.t === f.t && r.id.toUpperCase() === id);
-    return ["OUI", "PROBE", "BEACON"].includes(f.t) && g.ouis.includes(id);
+    return g.rows.some((r) => r.t === f.t && normId(r.id) === normId(f.id));
 }
 function groupState(g, list) {
     const want = groupRows(g);
@@ -1032,8 +1004,7 @@ function renderGroups() {
         const full = st.total > 0 && st.got === st.total;
         const chip = full ? `<span class="gst on">INSTALLED</span>`
             : st.any ? `<span class="gst part">PARTIAL</span>` : `<span class="gst">-</span>`;
-        const info = g.kind === "preset" || g.kind === "extra" ? `${g.rows.length} signature${g.rows.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`
-            : `${g.ouis.length} OUI${g.ouis.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`;
+        const info = `${g.rows.length} signature${g.rows.length === 1 ? "" : "s"}${g.meta && g.meta["Category"] ? " | " + g.meta["Category"] : ""}`;
         html += `<div class="grow" data-key="${esc(g.key)}">
             ${chip}<span class="gname" title="${esc(info)}">${esc(g.label)}</span><span class="ginfo">${esc(info)}</span>
             ${full ? "" : `<button class="btn ghost mini gadd">Add</button>`}
@@ -1241,30 +1212,11 @@ $("dAudio").onclick = async () => {
     S.audioDirty = null;
 };
 $("dIdent").onclick = () => command(S.selected, "identify", { secs: 15 });
-// Install: firmware presets go straight to the node (it reboots); a
-// database vendor opens the editor on the node's list with it staged.
+// Install: the chosen library entry goes to the node live (only the
+// signatures it doesn't have yet are new; the node keeps scanning).
 $("dPresetGo").onclick = () => {
-    const v = $("dPreset").value;
-    if (v.startsWith("p:")) {
-        twoTap($("dPresetGo"), () => command(S.selected, "preset", { name: v.slice(2) }));
-        return;
-    }
-    const n = nodeById(S.selected);
-    const stage = () => {
-        const g = allGroups().find((x) => x.key === v);
-        if (!g || !S.editing) return;
-        const key = (r) => r.t + ":" + String(r.id).replace(/[:\-\s]/g, "").toUpperCase();
-        const have = new Set(S.editing.map(key));
-        const add = groupRows(g).filter((r) => !have.has(key(r)));
-        S.editing = S.editing.filter((f) => f.id).concat(add);
-        rerenderEditor();
-        $("dFilters").scrollIntoView({ block: "start", behavior: "smooth" });
-        toast("good", `Staged: +${add.length} filter${add.length === 1 ? "" : "s"}`, `${g.label} (press Push to apply)`);
-    };
-    if (S.editing && S.editFor === S.selected) { readEditor(); stage(); return; }
-    if (n && n.filters) { $("dFiltEdit").click(); stage(); return; }
-    S.stageAfterRead = v;          // read the node's list first, then stage
-    $("dFiltEdit").click();
+    const g = allGroups().find((x) => x.key === $("dPreset").value);
+    if (g) twoTap($("dPresetGo"), () => command(S.selected, "filters_add", { filters: groupRows(g) }));
 };
 $("dReboot").onclick = () => twoTap($("dReboot"), () => command(S.selected, "reboot"));
 $("dFiltRead").onclick = () => command(S.selected, "filters_get");
@@ -1315,7 +1267,16 @@ $("fFilters").onclick = () => { command("all", "filters_get"); const h = homeNod
 $("fIdent").onclick = () => command("all", "identify", { secs: 10 });
 $("fAudio").onclick = () => command("all", "audio", { buzzer: $("fBuzzer").checked, led: $("fLed").checked });
 $("fPush").onclick = () => twoTap($("fPush"), () => command("all", "meshpush"));
-$("fPresetGo").onclick = () => twoTap($("fPresetGo"), () => command("all", "preset", { name: $("fPreset").value }));
+$("fPresetGo").onclick = () => {
+    const g = allGroups().find((x) => x.key === $("fPreset").value);
+    if (!g) return;
+    twoTap($("fPresetGo"), async () => {
+        const rows = { filters: groupRows(g) };
+        await command("all", "filters_add", rows);
+        const h = homeNode();
+        if (h) await command(h.id, "filters_add", rows);
+    });
+};
 $("fRechan").onclick = () => twoTap($("fRechan"), () => command("all", "rechan", { ch: Number($("fChan").value) }));
 $("fReboot").onclick = () => twoTap($("fReboot"), () => command("all", "reboot"));
 
@@ -1604,12 +1565,6 @@ function applyFleet(f) {
             S.editAfterRead = null;
             if (S.selected === id && $("drawer").classList.contains("open")) {
                 $("dFiltEdit").click();
-                if (S.stageAfterRead) {
-                    const v = S.stageAfterRead;
-                    S.stageAfterRead = null;
-                    $("dPreset").value = v;
-                    $("dPresetGo").click();
-                }
             }
         }
     }
@@ -1635,7 +1590,7 @@ async function boot() {
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     vendorOptions($("dPreset"));
-    presetOptions($("fPreset"));
+    vendorOptions($("fPreset"));
     quickTypeOptions($("dQType"));
     quickTypeOptions($("fQType"));
     loadFleetKeyStatus();
