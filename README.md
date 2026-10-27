@@ -53,7 +53,9 @@ Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data c
 - **Remote fleet management from the home portal:** live node roster, **mute/unmute all remotes** (buzzer, optionally LED — instant and persisted), **push the current filter list to every remote** (chunked transfer with CRC32; remotes save and reboot into the new list), and **reboot all remotes**, with live ack counts
 - **Unified alerts:** mesh-originated detections beep/flash on every node, appear in device history with a `[mesh xxxx]` provenance tag, and publish through the home node's MQTT exactly like local detections
 - **Presence:** nodes announce in short bursts every 1.5 s; joins/leaves are logged on serial and counted in the heartbeat line
-- **Fleet key (optional, recommended):** one shared secret encrypts the whole mesh (AES-256-GCM: every packet sealed, nothing readable on air) and signs every fleet command (HMAC-SHA256 with a replay counter). Keyed nodes ignore anything they can't decrypt, plus unsigned, forged and replayed commands
+- **Reliable delivery:** detections are retried until a home acknowledges them; fleet commands go out in repeat rounds and every node acks three times, so a node busy scanning still gets them
+- **Channel anchor:** the home node holds the fleet's channel; remotes follow it if it moves and find it again with one channel sweep if they lose it
+- **Fleet key (optional, recommended):** one shared secret encrypts the whole mesh (AES-256-GCM: every packet sealed, nothing readable on air) and signs every fleet command (HMAC-SHA256 with a replay counter). Keyed nodes ignore anything they can't decrypt, plus unsigned, forged and replayed commands. Each node shows a one-way fingerprint of its key, so you can confirm the whole fleet holds the same key
 
 ### Detection System
 - **Dual-domain time-slicing:** The 2.4 GHz radio alternates between WiFi promiscuous sweeps (channels 11→1, 200 ms dwell, ~2.2 s) and BLE active scans (~2.2 s). Each domain runs only if at least one filter of that type is configured; with no filters at all the device idles.
@@ -208,20 +210,37 @@ The **OUI-SPY Mesh** dashboard in [`home-dashboard/`](home-dashboard/) plugs int
 
 1. On each node, open the config portal and scroll to **Node Mesh (ESP-NOW Long Range)**.
 2. Enable the mesh, pick the role, and set the **same channel (1–11) on every node**.
-   Set the same **Fleet Key** on every node: it encrypts the whole mesh (optional but recommended, see Security below).
+   Set the same **Fleet Key** on every node: it encrypts the whole mesh (optional but recommended, see [Fleet key](#fleet-key) below).
 3. On the **home node** also fill in **MQTT** — it is the mesh's gateway to your broker/Home Assistant.
 4. Save. Every node now floods its detections; each relay extends the mesh one more hop.
+5. Check the fleet: every node should show the same key fingerprint (see [Fleet key](#fleet-key)), and the home's roster should list every remote.
 
 **Roles**
 
 - **Remote node:** detects normally (beeps, LED, history) and uplinks every detection over ESP-NOW LR instead of MQTT. Its MQTT settings are ignored while meshing.
-- **Home node:** does everything a remote does, *plus* every mesh detection it hears — its own or relayed — is published to MQTT with the same JSON payload, now carrying a `[mesh xxxx]` suffix in `desc` naming the origin node's ID.
+- **Home node:** does everything a remote does, *plus* every mesh detection it hears — its own or relayed — is published to MQTT with the same JSON payload, now carrying a `[mesh xxxx]` suffix in `desc` naming the origin node's ID. It acknowledges every detection it receives, so the remote stops retrying.
+
+Use one home per fleet. Nodes are identified by a stable ID, the last three bytes of the factory MAC (e.g. `AD5484`), which survives reboots and MAC randomization.
+
+**Channel anchor**
+
+The home node is the fleet's channel anchor. Its channel only changes when you change it (portal, `mesh` or `meshrechan`), never on its own.
+
+- Every announce states the sender's channel. 2.4 GHz channels overlap, so up close a frame sent on channel 4 can be heard on channel 6; a node judges links by the stated channel, not by where its radio happened to hear the frame.
+- A node heard on another channel is a **stray**: its detections are still taken in, but it doesn't count as linked. Strays show in the `TLM` line (`"strays":[{"id","ch","last"}]`) and in the dashboard. A healthy fleet has none.
+- **Follow:** a remote that hears the home announce a different channel 3 times within 15 s moves to that channel, saves it, and announces itself there.
+- **Heal:** a remote that has heard nobody for 2 minutes sweeps channels 1–11 once (3 s per channel). If it finds the fleet it adopts that channel; if not, it goes back to its saved channel and waits for the next quiet spell. The home never heals, and the home's portal turns heal off while its AP is up.
+- `meshrechan <ch>` on the home floods the new channel to every remote, then the home reboots onto it. Remotes it didn't reach find it again by following or healing.
 
 **How it works**
 
-- Transport is ESP-NOW broadcast (vendor-specific action frames) on the mesh channel, with the LR protocol enabled on every node. Release builds (and the web flasher) send ESP-NOW at the LR PHY rate (`-DMESH_ESPNOW_LR_RATE=WIFI_PHY_RATE_LORA_250K` in `platformio.ini`) for more range; remove that flag to fall back to the driver's default 1 Mbps. It is fleet-wide: flash every node with the same setting.
+- Transport is ESP-NOW broadcast (vendor-specific action frames) on the mesh channel, with the LR protocol enabled on every node. Release builds (and the web flasher) send ESP-NOW at the LR PHY rate (`-DMESH_ESPNOW_LR_RATE=WIFI_PHY_RATE_LORA_250K` in `platformio.ini`) for more range; remove that flag to fall back to the driver's default 1 Mbps. It is fleet-wide: flash every node with the same setting. Every node keeps the LR protocol on, so it decodes both rates. The `TLM` line's `rate` field shows the rate actually in force: `lr250k`, `lr500k`, `1m`, or `lr-failed` if the driver refused the LR rate.
+- At the LR rate each frame is about four times longer on air, so a node sends one frame at a time and waits for the radio to finish before the next. A frame the driver rejects is retried up to three times.
 - Flooding uses a 3-hop TTL and a 60 s (origin, seq) duplicate cache, so every packet is relayed at most once per node and loops die naturally.
-- The mesh window is the BLE phase: the radio parks on the mesh channel there, so RX/TX works alongside BLE scanning. During WiFi sweeps the mesh goes quiet by design (the sweep owns the radio); TX still lands on the mesh channel because the broadcast peer is pinned there, so nothing is lost.
+- The mesh window is the BLE phase: the radio parks on the mesh channel there, so RX/TX works alongside BLE scanning. During WiFi sweeps the mesh goes quiet by design (the sweep owns the radio); a sweep visits the mesh channel whenever a frame is waiting, so nothing is lost.
+- **Listen window:** when the mesh has real work (a command going out, a reply this node owes, a fresh detection), the node pauses BLE scanning and stays on the mesh channel, for at most 10 s at a stretch. Sending a command holds the mesh about 8 s so the replies get heard. Routine announces never pause scanning. The `TLM` fields `park` and `pble` show the % of the last 10 s spent on the mesh channel, and how much of it was shared with a BLE scan; two nodes only hear each other while both are parked.
+- **Detections** carry a per-node detection number. The home acks every copy it receives; the origin retries until acked and gives up after 30 s. Every node alerts once per detection, however many copies arrive.
+- **Commands** (mute, filters, reboot, channel, remote management) go out in repeat rounds over about 4 s, and each node acks three times. A node applies a command once, even if it reboots in the middle and hears late rounds. One command at a time: until the previous one is out, the home answers a new one with `ERR` and you send it again.
 - A node with **no filters at all** but mesh enabled becomes a pure relay — drop one on a hill between two others and the mesh extends itself.
 
 **Managing the fleet from the home node**
@@ -276,12 +295,14 @@ mfend                                    →   validate and send it (self = writ
 
 Each accepted command prints `CMD {"op":..,"id":..,"target":..}`, and every ack from the fleet prints `ACK {"node":..,"id":..,"st":..}` (`st` 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed). Nodes on firmware older than this build answer the new commands with `st` 1. They still obey fleet-wide `raudio`/`rreboot` and filter pushes.
 
+A `rstatus` reply comes back as one `RST {json}` line per node with its settings and health: firmware build, mode, burned-in, buzzer/LED, filter count and CRC, uptime, heap, delivery counters, and `kfp`, the node's key fingerprint. The OUI-SPY Mesh dashboard drives all of these commands for you.
+
 A pushed filter list is validated as a whole before the remote writes anything. A list it can't take is refused, and its existing filters stay intact.
 
 **Serial output**
 
 ```
-[MESH] ESP-NOW LR up: REMOTE node, channel 6, id 7A8B1C
+[MESH] ESP-NOW LR up: REMOTE node, channel 6, id 7A8B1C, fleet key set
 [MESH] node 3F2E91 joined (home)
 [MESH] audio changed by home (buzzer MUTED, LED on)
 [MESH] 12 filters pushed by home — rebooting to apply
@@ -296,18 +317,53 @@ With the mesh enabled, the onboard orange LED is a live link heartbeat: **solid 
 **Notes & limits**
 
 - Requires ESP32-S3 (LR mode is not available on the original ESP32).
-- Mesh identity is the node's current WiFi MAC, which is randomized per boot unless MQTT is enabled — after a reboot the roster shows the node under a new ID. Detections are unaffected.
-- Fire-and-forget transport: a detection burst may drop an occasional mesh packet; the 3 s / 30 s re-alert timers re-transmit on the next cycle anyway.
+- Delivery is reliable, not guaranteed: a detection that no home acks within 30 s is given up (the `TLM` line counts these as `dlost`). The 3 s / 30 s re-alert timers send it again if the device is still there.
 - In config mode only the **home** node keeps the mesh up (its portal AP shares the mesh channel); a remote in config mode is unreachable until it returns to scanning.
-- **Security (fleet key):** with the same fleet key on every node, the mesh is encrypted end to end over the air:
-  - **Everything is sealed.** Every frame (announces, detections, acks, commands, status replies) is AES-256-GCM encrypted whole. No magic bytes, packet type, sequence number or node ID go out in the clear; a node recognises fleet traffic only by authenticating it.
-  - **No patterns on air.** Each transmission gets a fresh 12-byte random nonce (relays re-seal, so a relayed copy shares no bytes with the original), and frames are padded to 64, 128, 192 or 250 bytes so heartbeats and detections look alike.
-  - **No replays.** Frames carry the origin's boot count and frame counter and pass a per-sender replay window. Commands are additionally signed (HMAC-SHA256) with their own persistent counter: keyed nodes refuse unsigned commands, wrong signatures and replays.
-  - **The key never goes over the radio.** Set it over USB (`meshkey <secret>`, or *Set on home (USB)* in the [dashboard](home-dashboard/README.md#fleet-key)) or in each node's setup portal; the dashboard can show it as a QR code for a phone. Each node reports a one-way fingerprint of its key, so you can check the fleet matches without revealing it.
-  - **Keep in mind:** use a long random key (the dashboard's *Create fleet key* makes one), since the encryption key is derived directly from it and a short passphrase could be guessed from recorded traffic. The key is stored unencrypted in each node's flash and on the dashboard computer, so anyone holding a node can read it. USB serial and MQTT are not covered (secure your broker separately).
-  - **Changing keys:** a new key resets the replay counters and cuts off every node still on the old one, so re-key the whole fleet together. If the home node's flash is wiped, re-enter the key on the remotes too (re-entering it resets their counters, so they accept the fresh home).
-  - **Without a fleet key** the mesh is plain: anyone in range can read detections, and any node on the channel can mute, reboot, re-channel or re-filter your remotes.
-- **Upgrade the fleet together:** the management protocol is v2; nodes running the first mesh build (v1) and current nodes can't interoperate. Flash all nodes in one session.
+- **Security:** see [Fleet key](#fleet-key). Without a key the mesh is plain: anyone in range can read detections, and any node on the channel can mute, reboot, re-channel or re-filter your remotes.
+- **Upgrade the fleet together:** the mesh protocol is v3; nodes running older mesh builds (v1, v2) and current nodes can't interoperate. Flash all nodes in one session, with the same LR rate setting.
+
+### Fleet key
+
+One shared secret, the same on every node, locks the mesh to your fleet.
+
+**What it does**
+
+- **Everything is sealed.** Every frame (announces, detections, acks, commands, status replies) is AES-256-GCM encrypted whole. No magic bytes, packet type, sequence number or node ID go out in the clear; a node recognises fleet traffic only by authenticating it.
+- **No patterns on air.** Each transmission gets a fresh 12-byte random nonce (relays re-seal, so a relayed copy shares no bytes with the original), and frames are padded to 64, 128, 192 or 250 bytes so heartbeats and detections look alike.
+- **No replays.** Frames carry the origin's boot count and frame counter and pass a per-sender replay window. Commands are also signed (HMAC-SHA256) with a counter each node keeps in flash, so a recorded command is refused even after the receiver reboots.
+- **Strict.** A keyed node drops plaintext frames and frames sealed with any other key, and refuses unsigned or badly signed commands.
+
+**Provisioning a node**
+
+The key never goes over the radio. Give it to each node one of these ways:
+
+- **Dashboard:** in OUI-SPY Mesh, Settings, Fleet key, *Create fleet key* makes a long random key and keeps it on that computer (`~/.config/ouispy/fleet_key`). *Set on home (USB)* sends it down the home's USB console. *Show key as QR* lets you carry it to a remote on your phone. See the [dashboard README](home-dashboard/README.md#fleet-key).
+- **USB serial, any mode:** `meshkey <secret>` (8–63 characters, no spaces); `meshkey -` clears it. Works on burned-in nodes too.
+- **Setup portal:** the **Fleet Key** field in the Node Mesh section. Leave it blank to keep the current key; tick *Clear fleet key* to remove it.
+
+The new key takes effect immediately, no reboot needed. Prefer the dashboard's generated key: the encryption key is derived directly from the string, so a short passphrase could be guessed from recorded traffic.
+
+**Checking the fleet**
+
+Every node reports a fingerprint of its key: 8 hex digits, e.g. `A1B2C3D4` (the dashboard writes it `A1B2-C3D4`). It is a one-way hash, so it shows whether two nodes hold the same key without revealing the key. All nodes holding the same key show the same fingerprint; with no key it is `00000000`.
+
+- **Dashboard:** each node shows **KEY OK** (matches the key on the dashboard computer), **DIFFERS** or **NO KEY**.
+- **Serial:** `status` on any node, or `rstatus all` on the home, prints `RST` lines with `"kfp":"A1B2C3D4"`. The boot line says `fleet key set` or `fleet key OFF`.
+
+**A node with the wrong key (or none)**
+
+It can't talk to the fleet at all: it never appears in anyone's roster, its link LED stays dark, its detections don't reach the home, and it can't command anyone. Nothing breaks on the other nodes; they count its frames in their `TLM` line: `eauth` for frames that fail authentication (another key, or tampering), `eplain` for plaintext frames from an unkeyed node, `ereplay` for replayed frames. `enc` is 1 on a keyed node. Fix it by giving the node the right key; its fingerprint then matches and it joins within a few seconds.
+
+**Changing the key**
+
+- A new key cuts off every node still on the old one, so re-key the whole fleet together.
+- Setting a key resets the node's remembered command counters. If the home node's flash is wiped, its command counter starts over and the remotes refuse its commands as replayed (`st` 3). Clear and re-set the key on each remote (`meshkey -`, then `meshkey <secret>`); setting the same key again without clearing it first changes nothing.
+
+**Keep in mind**
+
+- Every node shares the one key: it keeps outsiders out, but any node holding it can act as any other node.
+- The key is stored unencrypted in each node's flash and on the dashboard computer, so anyone holding a node can read it. Treat a lost node as a lost key and re-key the fleet.
+- USB serial and MQTT are not covered (secure your broker separately).
 
 ## Operation
 
