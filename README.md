@@ -50,7 +50,7 @@ Chrome, Edge, or Opera on desktop. Plug in the XIAO ESP32-S3 with a USB-C data c
 ### Node Mesh (ESP-NOW Long Range)
 - **Mesh-style node linking:** any number of OUI-SPY nodes form a flood mesh over ESP-NOW with the LR protocol enabled — no access point, no pairing. Every node repeats what it hears: a detection only needs a path, not direct reach to home
 - **Two roles, same firmware:** each node is configured as **home** (aggregates the mesh and publishes to MQTT) or **remote** (uplink is the mesh; MQTT ignored). Any node can hold either role
-- **Remote fleet management from the home portal:** live node roster, **mute/unmute all remotes** (buzzer, optionally LED — instant and persisted), **push the current filter list to every remote** (chunked transfer with CRC32; remotes save and reboot into the new list), and **reboot all remotes**, with live ack counts
+- **Remote fleet management from the home portal:** live node roster, **mute/unmute all remotes** (buzzer, optionally LED — instant and persisted), **push the current filter list to every remote** (chunked transfer with CRC32; remotes swap it in live and keep scanning), and **reboot all remotes**, with live ack counts
 - **Unified alerts:** mesh-originated detections beep/flash on every node, appear in device history with a `[mesh xxxx]` provenance tag, and publish through the home node's MQTT exactly like local detections
 - **Presence:** nodes announce in short bursts every 1.5 s; joins/leaves are logged on serial and counted in the heartbeat line
 - **Reliable delivery:** detections are retried until a home acknowledges them; fleet commands go out in repeat rounds and every node acks three times, so a node busy scanning still gets them
@@ -251,7 +251,7 @@ Open the config portal on the home node (it keeps the mesh up while the portal i
 | Action | Behavior on remotes |
 |---|---|
 | **Mute / Unmute All Remotes** | Buzzer (and LED, if checked) disabled instantly, persisted across reboots |
-| **Push Current Filters to Mesh** | Takes the filter list currently in the form, floods it (chunked, CRC32-verified); remotes write it to NVS and reboot into the new list (~3 s). Ack count shows confirmations |
+| **Push Current Filters to Mesh** | Takes the filter list currently in the form, floods it (chunked, CRC32-verified); remotes swap it in live, save it and keep scanning (no reboot). Ack count shows confirmations |
 | **Reboot All Remotes** | Remotes ack and reboot; they rejoin in a few seconds |
 
 Acks are flooded like detections, so the ack count includes remotes beyond the home's direct reach. Only successful applies are counted. Filters pushed this way replace the remote's whole user-managed list; preset-only rows on the home are not pushed (remotes keep whatever presets they already carry — push the expanded rows you want installed).
@@ -287,18 +287,20 @@ rstatus <target>                         → ask node(s) for their settings (RST
 rfilters <target>                        → ask node(s) for their filter lists (RFL lines come back)
 raudio <target> <0|1> <0|1>              → set buzzer/LED on node(s)
 rident <target> [secs]                   → make node(s) beep + flash
-rpreset <target> <axon|meta|ipro|verkada> → add a vendor preset on node(s), which then reboot
+rpreset <target> <axon|meta|ipro|verkada> → add a vendor preset on node(s), live
 rreboot <target>                         → reboot node(s)
-mfbegin <target|self|all>                → start a filter-list upload (from a tool or script):
+mfbegin <target|self|all>                → start a filter upload that REPLACES the list (from a tool or script):
+mfadd <target|self|all>                  →   ...or one that ADDS these filters to the list
+mfdel <target|self|all>                  →   ...or one that REMOVES them (matched by type + identifier)
 mfdata <hex>                             →   records in the MESH_CMD_FILTERS format, up to 96 bytes a line
-mfend                                    →   validate and send it (self = write to this node)
+mfend                                    →   validate and send it (self = apply on this node)
 ```
 
 Each accepted command prints `CMD {"op":..,"id":..,"target":..}`, and every ack from the fleet prints `ACK {"node":..,"id":..,"st":..}` (`st` 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed). Nodes on firmware older than this build answer the new commands with `st` 1. They still obey fleet-wide `raudio`/`rreboot` and filter pushes.
 
 A `rstatus` reply comes back as one `RST {json}` line per node with its settings and health: firmware build, mode, burned-in, buzzer/LED, filter count and CRC, uptime, heap, delivery counters, and `kfp`, the node's key fingerprint. The OUI-SPY Mesh dashboard drives all of these commands for you.
 
-A pushed filter list is validated as a whole before the remote writes anything. A list it can't take is refused, and its existing filters stay intact.
+**Filter changes are live.** A pushed list, an add or a remove is applied to the running scanner on the node and saved: it keeps scanning, no reboot. The edit is validated as a whole first; one the node can't take is refused (ack `st` 1) and its existing filters stay intact. A remove that would leave a node with no filters is refused too. The one restart: a node that booted with no BLE filters never started its BLE scanner, so its first BLE filter brings it up with a quick restart (WiFi filters always apply live). Nodes on older firmware answer add/remove with `st` 1 and keep their list.
 
 **Serial output**
 
@@ -306,7 +308,7 @@ A pushed filter list is validated as a whole before the remote writes anything. 
 [MESH] ESP-NOW LR up: REMOTE node, channel 6, id 7A8B1C, fleet key set
 [MESH] node 3F2E91 joined (home)
 [MESH] audio changed by home (buzzer MUTED, LED on)
-[MESH] 12 filters pushed by home — rebooting to apply
+[MESH] filters added live by home: 1 changed, 8 installed
 [MESH] link: 2 node(s) in roster
 [HEARTBEAT] phase=1 ch=6 dev=12 mesh=2
 ```

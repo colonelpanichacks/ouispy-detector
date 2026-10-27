@@ -143,7 +143,18 @@
                     </div>
                 </div>
                 <div class="fa">
-                    <h4>Signatures (all remotes reboot)</h4>
+                    <h4>Live filter (whole fleet incl. home, no reboot)</h4>
+                    <div class="ctl-row qadd">
+                        <select id="fQType" class="field qtype" title="Auto: 6 hex digits = OUI, 12 = full MAC"></select>
+                        <input id="fQId" class="field qid" placeholder="OUI or MAC" title="OUI or MAC in any format (aa:bb:cc, AA-BB-CC...), or pick a type for a CID, UUID or name" spellcheck="false" autocomplete="off">
+                        <input id="fQDesc" class="field qdesc" placeholder="description (optional)" maxlength="48">
+                        <label class="switch" title="An OUI is also added (and removed) as a WiFi probe filter"><input type="checkbox" id="fQWifi"><span></span>WiFi too</label>
+                        <button class="btn" id="fQAdd">Add to all</button>
+                        <button class="btn ghost danger" id="fQDel">Remove</button>
+                    </div>
+                </div>
+                <div class="fa">
+                    <h4>Signatures (all remotes, applied live)</h4>
                     <div class="ctl-row">
                         <button class="btn ghost" id="fPush" title="Copies the home node's filter list to every remote">Push home filters</button>
                         <select id="fPreset" class="field"></select>
@@ -294,7 +305,7 @@
             </div>
             <div class="ctl-row">
                 <select id="dPreset" class="field"></select>
-                <button class="btn ghost" id="dPresetGo" title="Firmware preset: installs now, node reboots. Database vendor: staged in the editor, then Push">Install</button>
+                <button class="btn ghost" id="dPresetGo" title="Firmware preset: installs live on the node. Database vendor: staged in the editor, then Push">Install</button>
                 <button class="btn ghost danger" id="dReboot">Reboot</button>
             </div>
             <div class="rb-head">
@@ -304,6 +315,14 @@
             <div class="ctl-row">
                 <button class="btn ghost" id="dFiltRead">Read from node</button>
                 <button class="btn ghost" id="dFiltEdit">Edit</button>
+            </div>
+            <div class="ctl-row qadd">
+                <select id="dQType" class="field qtype" title="Auto: 6 hex digits = OUI, 12 = full MAC"></select>
+                <input id="dQId" class="field qid" placeholder="OUI or MAC" title="OUI or MAC in any format (aa:bb:cc, AA-BB-CC...), or pick a type for a CID, UUID or name" spellcheck="false" autocomplete="off">
+                <input id="dQDesc" class="field qdesc" placeholder="description (optional)" maxlength="48">
+                <label class="switch" title="An OUI is also added (and removed) as a WiFi probe filter"><input type="checkbox" id="dQWifi"><span></span>WiFi too</label>
+                <button class="btn" id="dQAdd">Add live</button>
+                <button class="btn ghost danger" id="dQDel">Remove</button>
             </div>
             <div id="dFilters"></div>
             <h4>Commands</h4>

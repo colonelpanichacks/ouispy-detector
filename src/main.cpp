@@ -14,6 +14,7 @@
 #include <nvs_flash.h>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include "mqtt.h"
@@ -219,6 +220,30 @@ static bool wifiOuiInTargets(const uint8_t oui[3]);
 static void rebuildWifiOuiTable();
 static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi);
 
+// Live filter edits (a mesh push, add or remove) change targetFilters while
+// the radio runs. The BLE and WiFi callbacks register as readers before
+// they touch the list and skip the frame while an edit is in progress; the
+// editor (loop context only) raises the flag, waits for the readers in
+// flight to finish, swaps the list and drops the flag. Order matters: a
+// reader counts itself in BEFORE it checks the flag, the editor raises the
+// flag BEFORE it checks the count, so one of them always sees the other.
+static std::atomic<int>  filterReaders{0};
+static std::atomic<bool> filterEditing{false};
+struct FilterReadGuard {
+    bool ok;
+    FilterReadGuard() { filterReaders.fetch_add(1); ok = !filterEditing.load(); }
+    ~FilterReadGuard() { filterReaders.fetch_sub(1); }
+};
+static void filterEditBegin() {
+    filterEditing.store(true);
+    while (filterReaders.load() > 0) delay(1);
+}
+static void filterEditEnd() {
+    rebuildWifiOuiTable();
+    filterEditing.store(false);
+}
+static bool liveEditNeedsRestart();
+
 // LittleFS session forwards (definitions live further down)
 static void ensureSessionFS();
 static void rotateSessionFiles();
@@ -398,13 +423,17 @@ static void serialConsoleTick() {
         else if (name == "ipro")    { table = PRESET_IPRO;    count = PRESET_IPRO_COUNT;    label = "I-PRO body cam"; }
         else if (name == "verkada") { table = PRESET_VERKADA; count = PRESET_VERKADA_COUNT; label = "Verkada camera"; }
         if (!table) { Serial.println("ERR unknown preset (axon|meta|ipro|verkada)"); return; }
+        filterEditBegin();
         int added = applyPreset(table, count, label);
+        filterEditEnd();
         saveConfiguration();
-        rebuildWifiOuiTable();
-        Serial.printf("OK preset %s installed (%d signatures) — rebooting\n", name.c_str(), added);
-        Serial.flush();
-        delay(300);
-        ESP.restart();
+        if (liveEditNeedsRestart()) {
+            Serial.printf("OK preset %s installed (%d signatures) — rebooting to start the BLE scanner\n", name.c_str(), added);
+            Serial.flush();
+            delay(300);
+            ESP.restart();
+        }
+        Serial.printf("OK preset %s installed live (%d signatures)\n", name.c_str(), added);
         return;
     }
 
@@ -1155,10 +1184,8 @@ void meshReport(const char* mac, const char* ident, const char* desc,
 // Mesh remote management (executed on remote nodes)
 // ================================
 // Binary filter record (wire format): u8 type, u8 flags (bit0 = full MAC),
-// u8 idLen, u8 descLen, id[idLen], desc[descLen]. Pushed filter lists are
-// written straight to NVS using saveConfiguration's key scheme; the node
-// then reboots so the list loads through the normal boot path — the live
-// targetFilters vector is never mutated while the radio is running.
+// u8 idLen, u8 descLen, id[idLen], desc[descLen]. Pushed lists, adds and
+// removes are applied to the running list (filtersEditLive) and saved.
 // Validate one filter record list (MESH_CMD_FILTERS wire format) without
 // touching NVS. Identifier rules follow the filter type: OUIs and WiFi
 // signatures are 6 hex, full MACs 12 hex, company IDs / 16-bit service
@@ -1195,39 +1222,89 @@ static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countO
     return count > 0;
 }
 
-// Writes a pushed filter list to NVS using saveConfiguration's key scheme.
-// The whole list is validated FIRST: a list this firmware can't take is
-// refused before a single key changes (writing record by record used to
-// leave a half-overwritten list behind when a later record failed).
-static bool meshWriteFiltersToNvs(const uint8_t* buf, uint16_t len, uint8_t& countOut) {
-    countOut = 0;
+// Live filter edits: a pushed list replaces the running one, an add merges
+// into it, a remove takes entries out. The new list is built on the side
+// and swapped in under the read guard, then saved; the node keeps scanning.
+// The one exception: a node that booted with no BLE filters never started
+// its BLE scanner, so its first BLE filter needs a restart (see
+// liveEditNeedsRestart).
+enum LiveFilterOp { LIVE_REPLACE, LIVE_ADD, LIVE_REMOVE };
+
+static TargetFilter filterFromRecord(const uint8_t* buf, uint16_t& off) {
+    TargetFilter f;
+    f.type = (FilterType)buf[off];
+    f.isFullMAC = (buf[off + 1] & 0x01) != 0;
+    uint8_t idLen = buf[off + 2], descLen = buf[off + 3];
+    off += 4;
+    char ident[17], desc[49];
+    memcpy(ident, buf + off, idLen);
+    ident[idLen] = '\0';
+    memcpy(desc, buf + off + idLen, descLen);
+    desc[descLen] = '\0';
+    off += idLen + descLen;
+    f.identifier = ident;
+    f.description = desc;
+    return f;
+}
+
+// Returns the installed count after the edit, or -1 when refused: records
+// this firmware can't take, or an edit that would leave nothing to scan for.
+// `changed` counts entries added, removed or re-described.
+static int filtersEditLive(LiveFilterOp op, const uint8_t* buf, uint16_t len, int& changed) {
+    changed = 0;
     uint8_t total = 0;
-    if (!filterRecordsValid(buf, len, total)) return false;
-    Preferences p;
-    p.begin("ouispy", false);
+    if (!filterRecordsValid(buf, len, total)) return -1;
+    std::vector<TargetFilter> next;
+    if (op != LIVE_REPLACE) next = targetFilters;   // loop is the only writer: a plain copy is safe
     uint16_t off = 0;
-    for (uint8_t count = 0; count < total; count++) {
-        uint8_t type = buf[off];
-        bool fullMac = (buf[off + 1] & 0x01) != 0;
-        uint8_t idLen = buf[off + 2];
-        uint8_t descLen = buf[off + 3];
-        off += 4;
-        char ident[17];
-        memcpy(ident, buf + off, idLen);
-        ident[idLen] = '\0';
-        char desc[49];
-        memcpy(desc, buf + off + idLen, descLen);
-        desc[descLen] = '\0';
-        off += idLen + descLen;
-        p.putString(("id_"   + String(count)).c_str(), ident);
-        p.putBool  (("mac_"  + String(count)).c_str(), fullMac);
-        p.putString(("desc_" + String(count)).c_str(), desc);
-        p.putUChar (("type_" + String(count)).c_str(), type);
+    for (uint8_t i = 0; i < total; i++) {
+        TargetFilter r = filterFromRecord(buf, off);
+        auto it = std::find_if(next.begin(), next.end(), [&](const TargetFilter& f) {
+            return f.type == r.type && f.identifier.equalsIgnoreCase(r.identifier);
+        });
+        if (op == LIVE_REMOVE) {
+            if (it != next.end()) { next.erase(it); changed++; }
+        } else if (it != next.end()) {
+            if (r.description.length() && it->description != r.description) {
+                it->description = r.description;
+                changed++;
+            }
+        } else if (next.size() < 100) {
+            next.push_back(r);
+            changed++;
+        }
     }
-    p.putInt("filterCount", total);
-    p.end();
-    countOut = total;
-    return true;
+    if (next.empty()) return -1;
+    filterEditBegin();
+    targetFilters.swap(next);
+    filterEditEnd();
+    saveConfiguration();
+    return (int)targetFilters.size();
+}
+
+// True when the running scanner can't see part of the live list: scanning
+// without a BLE scanner (none was started at boot) while BLE filters exist.
+static bool liveEditNeedsRestart() {
+    if (currentMode != SCANNING_MODE || pBLEScan) return false;
+    for (const TargetFilter& f : targetFilters) {
+        if (!isWifiDomain(f.type)) return true;
+    }
+    return false;
+}
+
+// Ack first (flushed so it leaves the radio), then restart.
+static void restartAfterAck(const char* why) {
+    for (int i = 0; i < 30 && meshTxPending() > 0; i++) {
+        meshFlushTxNow();
+        delay(100);
+    }
+    if (isSerialConnected()) {
+        Serial.printf("[MESH] %s — restarting to start the BLE scanner\n", why);
+        Serial.flush();
+    }
+    mesh_deinit();
+    delay(200);
+    ESP.restart();
 }
 
 // Remote management state + helpers (definitions below meshApplyCommand).
@@ -1280,25 +1357,26 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         meshSendAck(cmd, cmdId, 0, 0);
         break;
     }
-    case MESH_CMD_FILTERS: {
-        uint8_t count = 0;
-        bool ok = meshWriteFiltersToNvs(payload, len, count);
-        meshSendAck(cmd, cmdId, ok ? 0 : 1, count);
-        // The flush only goes out while the mesh window is open — wait for
-        // one if a sweep currently owns the radio, so the ack isn't lost.
-        for (int i = 0; i < 30 && meshTxPending() > 0; i++) {
-            meshFlushTxNow();
-            delay(100);
-        }
-        if (ok) {
+    case MESH_CMD_FILTERS:
+    case MESH_CMD_FILTER_ADD:
+    case MESH_CMD_FILTER_DEL: {
+        LiveFilterOp op = cmd == MESH_CMD_FILTERS ? LIVE_REPLACE :
+                          cmd == MESH_CMD_FILTER_ADD ? LIVE_ADD : LIVE_REMOVE;
+        static const char* const OP_NAMES[] = { "replaced", "added", "removed" };
+        int changed = 0;
+        int n = filtersEditLive(op, payload, len, changed);
+        meshSendAck(cmd, cmdId, n < 0 ? 1 : 0, n < 0 ? 0 : (uint8_t)n);
+        if (n < 0) {
             if (isSerialConnected()) {
-                Serial.printf("[MESH] %d filters pushed by home — rebooting to apply\n", count);
-                Serial.flush();
+                Serial.println("[MESH] filter edit from home refused (invalid, or it would leave no filters)");
             }
-            mesh_deinit();   // says goodbye to the mesh
-            delay(200);
-            ESP.restart();
+            break;
         }
+        if (isSerialConnected()) {
+            Serial.printf("[MESH] filters %s live by home: %d changed, %d installed\n",
+                          OP_NAMES[op], changed, n);
+        }
+        if (liveEditNeedsRestart()) restartAfterAck("first BLE filter installed");
         break;
     }
     case MESH_CMD_REBOOT:
@@ -1384,20 +1462,14 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
             meshSendAck(cmd, cmdId, 1, 0);
             return;
         }
-        int added = applyPreset(table, count, label);
-        saveConfiguration();
+        filterEditBegin();
+        int added = applyPreset(table, count, label);   // saves when it adds
+        filterEditEnd();
         meshSendAck(cmd, cmdId, 0, (uint8_t)added);
-        for (int i = 0; i < 30 && meshTxPending() > 0; i++) {
-            meshFlushTxNow();
-            delay(100);
-        }
         if (isSerialConnected()) {
-            Serial.printf("[MESH] preset %s installed by home (%d new) — rebooting\n", PRESET_NAMES[payload[0]], added);
-            Serial.flush();
+            Serial.printf("[MESH] preset %s installed live by home (%d new)\n", PRESET_NAMES[payload[0]], added);
         }
-        mesh_deinit();
-        delay(200);
-        ESP.restart();
+        if (liveEditNeedsRestart()) restartAfterAck("first BLE filter installed");
         break;
     }
     case MESH_CMD_GETFILTERS:
@@ -1670,13 +1742,16 @@ static bool sendMgmt(const char* op, const uint8_t t[3], bool all, uint8_t cmd,
     return true;
 }
 
-// Staged filter upload from the dashboard: mfbegin <target|self|all>, then
+// Staged filter upload from the dashboard: mfbegin <target|self|all>
+// (replace the list), mfadd (merge into it) or mfdel (remove from it), then
 // mfdata <hex> lines (short enough for the USB RX buffer, each answered
-// "OK mfdata <bytes>" so the sender paces itself), then mfend.
+// "OK mfdata <bytes>" so the sender paces itself), then mfend. Every one
+// applies live on the node: no reboot.
 static uint8_t* mfBuf = nullptr;
 static uint16_t mfLen = 0;
 static uint8_t mfTarget[3];
 static bool mfAll = false, mfSelf = false;
+static LiveFilterOp mfOp = LIVE_REPLACE;   // mfbegin = replace, mfadd = merge, mfdel = remove
 
 static void localReboot(const char* why) {
     Serial.printf("OK %s — rebooting\n", why);
@@ -1770,11 +1845,15 @@ static bool remoteConsoleCommand(const String& line) {
         return true;
     }
 
-    if (verb == "mfbegin") {
+    // mfadd / mfdel are their own verbs (not an mfbegin argument) so an
+    // older home answers "unknown command" instead of replacing a remote's
+    // whole list with the one filter meant to be added.
+    if (verb == "mfbegin" || verb == "mfadd" || verb == "mfdel") {
         String a = arg[0];
         a.toUpperCase();
         mfSelf = (a == "SELF" || a == String(selfHex));
         if (!mfSelf && !parseTarget(arg[0], mfTarget, mfAll)) { Serial.println("ERR mfbegin: target must be a node ID, self or all"); return true; }
+        mfOp = verb == "mfadd" ? LIVE_ADD : verb == "mfdel" ? LIVE_REMOVE : LIVE_REPLACE;
         if (!mfBuf) mfBuf = (uint8_t*)malloc(4096);
         if (!mfBuf) { Serial.println("ERR out of memory"); return true; }
         mfLen = 0;
@@ -1797,14 +1876,17 @@ static bool remoteConsoleCommand(const String& line) {
         if (!filterRecordsValid(mfBuf, mfLen, count)) {
             Serial.println("ERR mfend: filter list invalid");
         } else if (mfSelf) {
-            uint8_t written = 0;
-            bool ok = meshWriteFiltersToNvs(mfBuf, mfLen, written);
+            int changed = 0;
+            int n = filtersEditLive(mfOp, mfBuf, mfLen, changed);
             free(mfBuf); mfBuf = nullptr;
-            if (ok) { localReboot("filters written to this node"); return true; }
-            Serial.println("ERR mfend: NVS write failed");
+            if (n < 0) { Serial.println("ERR mfend: refused (it would leave this node with no filters)"); return true; }
+            if (liveEditNeedsRestart()) { localReboot("filters applied; restarting to start the BLE scanner"); return true; }
+            Serial.printf("OK filters applied live: %d changed, %d installed\n", changed, n);
             return true;
         } else {
-            sendMgmt("filters", mfTarget, mfAll, MESH_CMD_FILTERS, mfBuf, mfLen);
+            static const char* const OPS[] = { "filters", "fadd", "fdel" };
+            static const uint8_t CMDS[] = { MESH_CMD_FILTERS, MESH_CMD_FILTER_ADD, MESH_CMD_FILTER_DEL };
+            sendMgmt(OPS[mfOp], mfTarget, mfAll, CMDS[mfOp], mfBuf, mfLen);
         }
         free(mfBuf);
         mfBuf = nullptr;
@@ -2318,6 +2400,8 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
     // Source MAC is always in addr2 for probe requests and beacons.
     // 3-byte OUI pre-check against target table.
     uint8_t oui[3] = { hdr->addr2[0], hdr->addr2[1], hdr->addr2[2] };
+    FilterReadGuard guard;
+    if (!guard.ok) return;   // a live filter edit is swapping the list
     if (!wifiOuiInTargets(oui)) return;
 
     // Rare path: full match + enqueue (fixed stack buffers only)
@@ -2338,9 +2422,13 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         String matchedDescription;
         String matchedIdent;
         FilterType matchedTypeOut = FT_MAC_PREFIX;
-        bool matchFound = matchesTargetFilter(advertisedDevice, mac,
-                                              matchedDescription, matchedIdent,
-                                              matchedTypeOut);
+        bool matchFound = false;
+        {
+            FilterReadGuard guard;   // skipped while a live filter edit swaps the list
+            if (guard.ok) matchFound = matchesTargetFilter(advertisedDevice, mac,
+                                                           matchedDescription, matchedIdent,
+                                                           matchedTypeOut);
+        }
 
         // Meta / Ray-Ban composite detection runs inside matchesTargetFilter
         // when (and only when) the META preset is installed — no filter, no
@@ -4504,7 +4592,7 @@ const char MESH_MGMT_HTML[] PROGMEM = R"meshmgmt(
                 window.meshPushFilters=function(){
                     if(typeof buildFilterList==='function')buildFilterList();
                     var f=document.getElementById('filtersJson')?document.getElementById('filtersJson').value:'[]';
-                    if(!confirm('Replace filters on ALL remote nodes with the list currently in this form? Remotes save and reboot to apply.'))return;
+                    if(!confirm('Replace filters on ALL remote nodes with the list currently in this form? Remotes apply it live and keep scanning.'))return;
                     status('pushing filters…');
                     fetch('/api/mesh/push-filters',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'filters='+encodeURIComponent(f)})
                         .then(function(r){return r.json();}).then(function(d){

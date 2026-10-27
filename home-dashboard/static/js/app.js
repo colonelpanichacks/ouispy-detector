@@ -1088,7 +1088,7 @@ function renderFilters(n) {
                 <button class="btn" id="fePush">Push to ${esc(n.alias || n.id)}</button>
                 <button class="btn ghost" id="feCancel">Cancel</button>
             </div>
-            <div class="help-text">Pushing replaces the node's whole filter list; it reboots to apply. CIDs and service UUIDs are 4 hex digits, OUIs 6, full MACs 12, names 1-16 characters.</div>
+            <div class="help-text">Pushing replaces the node's whole filter list, live: the node keeps scanning. CIDs and service UUIDs are 4 hex digits, OUIs 6, full MACs 12, names 1-16 characters.</div>
         </div>`;
         renderGroups();
         wireEditor(n);
@@ -1101,9 +1101,77 @@ function renderFilters(n) {
     }
     box.innerHTML = n.filters.length
         ? `<div class="flist">${n.filters.map((f) => `<div class="frow"><span class="ft ${esc(f.t)}">${esc(f.t)}</span>
-            <span class="fid">${esc(f.id)}</span><span class="fd" title="${esc(f.d)}">${esc(f.d)}</span></div>`).join("")}</div>`
+            <span class="fid">${esc(f.id)}</span><span class="fd" title="${esc(f.d)}">${esc(f.d)}</span>
+            ${n.filters.length > 1 ? `<button class="rm-live" data-t="${esc(f.t)}" data-id="${esc(f.id)}" title="Remove from this node (live)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>` : ""}</div>`).join("")}</div>`
         : `<div class="cfg-empty">No filters: this node has nothing to scan for.</div>`;
+    // Two taps: the first arms the button, the second (within 3.5 s) removes.
+    box.querySelectorAll(".rm-live").forEach((b) => b.onclick = () => {
+        if (!b.classList.contains("armed")) {
+            b.classList.add("armed");
+            b.title = "Tap again to remove";
+            setTimeout(() => { b.classList.remove("armed"); b.title = "Remove from this node (live)"; }, 3500);
+            return;
+        }
+        command(n.id, "filters_del", { filters: [{ t: b.dataset.t, id: b.dataset.id, d: "" }] });
+    });
 }
+
+// Live add / remove of one identifier, from the quick row in the node
+// drawer ("d") or the fleet tab ("f"). Applied on the node at once, no
+// reboot. Auto picks the type from the hex length: 6 = OUI, 12 = full MAC.
+function quickTypeOptions(sel) {
+    const types = (S.filterMeta && S.filterMeta.types) || {};
+    sel.innerHTML = `<option value="AUTO">Auto</option>` + Object.entries(types)
+        .filter(([t]) => t !== "META")
+        .map(([t, label]) => `<option value="${t}">${esc(label)}</option>`).join("");
+}
+function quickResolve(pre) {
+    const raw = $(pre + "QId").value.trim();
+    const hex = raw.replace(/[:\-\s.]/g, "").replace(/^0x/i, "").toUpperCase();
+    let t = $(pre + "QType").value;
+    if (t === "AUTO") t = /^[0-9A-F]{6}$/.test(hex) ? "OUI" : /^[0-9A-F]{12}$/.test(hex) ? "MAC" : "";
+    const hexLen = (S.filterMeta && S.filterMeta.hex) || {};
+    return { t, id: hexLen[t] ? hex : raw, raw };
+}
+function quickRecords(pre, removing) {
+    const { t, id, raw } = quickResolve(pre);
+    if (!raw) { toast("bad", "Nothing to send", "Type an OUI, MAC or other identifier first"); return null; }
+    if (!t) { toast("bad", "Pick a type", "Auto knows 6 hex digits (an OUI) and 12 (a full MAC)"); return null; }
+    const d = removing ? "" : ($(pre + "QDesc").value.trim() || "Added live");
+    const recs = [{ t, id, d }];
+    if (t === "OUI" && $(pre + "QWifi").checked) {
+        recs.push({ t: "PROBE", id, d });
+        if (removing) recs.push({ t: "BEACON", id, d });
+    }
+    return recs;
+}
+function wireQuick(pre, send) {
+    const input = $(pre + "QId");
+    const check = () => {
+        const { t, raw } = quickResolve(pre);
+        input.classList.toggle("bad", !!raw && !t);
+    };
+    input.addEventListener("input", check);
+    $(pre + "QType").addEventListener("change", check);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") $(pre + "QAdd").click(); });
+    $(pre + "QAdd").onclick = async () => {
+        const recs = quickRecords(pre, false);
+        if (!recs) return;
+        if (await send("filters_add", recs)) { input.value = ""; $(pre + "QDesc").value = ""; check(); }
+    };
+    $(pre + "QDel").onclick = () => {
+        const recs = quickRecords(pre, true);
+        if (recs) twoTap($(pre + "QDel"), () => send("filters_del", recs));
+    };
+}
+wireQuick("d", async (op, recs) => (await command(S.selected, op, { filters: recs })).ok);
+// Fleet-wide: every remote over the mesh, and the home itself over USB.
+wireQuick("f", async (op, recs) => {
+    const h = homeNode();
+    const r = await command("all", op, { filters: recs });
+    const rh = h ? await command(h.id, op, { filters: recs }) : { ok: false };
+    return r.ok || rh.ok;
+});
 function readEditor() {
     S.editing = [...document.querySelectorAll("#fRows .frow")].map((r) => ({
         t: r.querySelector(".ftype").value, id: r.querySelector(".fi").value.trim(), d: r.querySelector(".fdesc").value,
@@ -1568,6 +1636,8 @@ async function boot() {
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     vendorOptions($("dPreset"));
     presetOptions($("fPreset"));
+    quickTypeOptions($("dQType"));
+    quickTypeOptions($("fQType"));
     loadFleetKeyStatus();
     const badge = $("modeBadge");
     badge.textContent = st.mode.toUpperCase();

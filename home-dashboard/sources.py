@@ -491,9 +491,8 @@ class DemoSource(Source):
         elif verb == "ident":
             self._say(f"OK identify {a[0] if a else 10} s")
         elif verb == "preset" and a and a[0] in self.flt.PRESETS:
-            self._merge(DEMO_HOME, a[0])
-            self._say(f"OK preset {a[0]} installed - rebooting")
-            self._reboot(DEMO_HOME, 6)
+            added = self._merge(DEMO_HOME, a[0])
+            self._say(f"OK preset {a[0]} installed live ({added} signatures)")
         elif verb == "meshrechan" and a:
             self.ch = int(a[0])
             self._say(f"OK re-channeled fleet to {self.ch} - rebooting onto it")
@@ -505,7 +504,6 @@ class DemoSource(Source):
             for n in self._targets("all"):
                 self.nodes[n]["filters"] = [dict(f) for f in home["filters"]]
                 self._ack(n, 2, cid, 0, len(home["filters"]))
-                self._reboot(n)
         elif verb in ("rstatus", "raudio", "rreboot", "rident", "rpreset", "rfilters") and a:
             t = a[0]
             codes = {"rstatus": 6, "raudio": 1, "rreboot": 3, "rident": 7, "rpreset": 8, "rfilters": 9}
@@ -532,33 +530,51 @@ class DemoSource(Source):
                 elif verb == "rpreset":
                     added = self._merge(n, a[1])
                     self._ack(n, code, cid, 0, added)
-                    self._reboot(n)
-        elif verb == "mfbegin" and a:
-            self.mf = {"t": a[0], "buf": bytearray()}
+        elif verb in ("mfbegin", "mfadd", "mfdel") and a:
+            self.mf = {"t": a[0], "op": verb, "buf": bytearray()}
             self._say("OK mfbegin")
         elif verb == "mfdata" and self.mf is not None and a:
             self.mf["buf"] += bytes.fromhex(a[0])
             self._say(f"OK mfdata {len(self.mf['buf'])}")
         elif verb == "mfend" and self.mf is not None:
             lst = self.flt.decode(bytes(self.mf["buf"]))
-            t, self.mf = self.mf["t"], None
+            t, op, self.mf = self.mf["t"], self.mf["op"], None
             if t.lower() == "self" or t.upper() == DEMO_HOME:
-                home["filters"] = lst
-                self._say("OK filters written to this node - rebooting")
-                self._reboot(DEMO_HOME, 6)
+                n = self._edit(DEMO_HOME, op, lst)
+                self._say(f"OK filters applied live: {n} installed" if n >= 0 else
+                          "ERR mfend: refused (it would leave this node with no filters)")
             else:
-                cid = self._cmd("filters", t, 2)
+                code = {"mfbegin": 2, "mfadd": 11, "mfdel": 12}[op]
+                cid = self._cmd({"mfbegin": "filters", "mfadd": "fadd", "mfdel": "fdel"}[op], t, code)
                 for n in self._targets(t):
                     c = self.nodes[n]
-                    if c["old"] and t != "all":
-                        self._ack(n, 5, cid, 1)
+                    if c["old"] and (t != "all" or op != "mfbegin"):
+                        self._ack(n, code if t == "all" else 5, cid, 1)
                         continue
-                    c["filters"] = [dict(f) for f in lst]
-                    self._ack(n, 2, cid, 0, len(lst))
-                    self._reboot(n)
+                    k = self._edit(n, op, lst)
+                    self._ack(n, code, cid, 0 if k >= 0 else 1, max(k, 0))
         else:
             self._say(f"ERR unknown command: {line.strip()[:40]}")
         return True
+
+    def _edit(self, n, op, lst):
+        """Firmware filtersEditLive: installed count afterwards, or -1 if refused."""
+        key = lambda f: (f["t"], f["id"].upper())
+        cur = [] if op == "mfbegin" else [dict(f) for f in self.nodes[n]["filters"]]
+        for r in lst:
+            hit = next((f for f in cur if key(f) == key(r)), None)
+            if op == "mfdel":
+                if hit:
+                    cur.remove(hit)
+            elif hit:
+                if r["d"]:
+                    hit["d"] = r["d"]
+            elif len(cur) < 100:
+                cur.append(dict(r))
+        if not cur:
+            return -1
+        self.nodes[n]["filters"] = cur
+        return len(cur)
 
     def _merge(self, n, preset):
         have = {(f["t"], f["id"].upper()) for f in self.nodes[n]["filters"]}

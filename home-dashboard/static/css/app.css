@@ -464,6 +464,14 @@ input[type="checkbox"]:checked::after {
 .cfg-empty { grid-column: 1 / -1; font-size: 12px; color: var(--faint); padding: 6px 0; }
 .ctl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .ctl-row .field { width: auto; flex: 1; min-width: 110px; }
+.qadd .qtype { flex: 0 0 auto; min-width: 96px; }
+.qadd .qid { flex: 2; min-width: 150px; font-family: var(--mono); }
+.qadd .qid.bad { border-color: var(--pink, #ff2e88); box-shadow: 0 0 8px rgba(255,46,136,0.35); }
+.frow .rm-live { margin-left: auto; flex: 0 0 auto; background: none; border: 1px solid transparent; border-radius: 4px;
+                 color: var(--muted, #8a8fa3); cursor: pointer; padding: 1px 4px; line-height: 0; }
+.frow .rm-live svg { width: 12px; height: 12px; stroke: currentColor; stroke-width: 2.4; fill: none; }
+.frow .rm-live:hover { color: #ff2e88; border-color: rgba(255,46,136,0.5); box-shadow: 0 0 8px rgba(255,46,136,0.35); }
+.frow .rm-live.armed { color: #ff2e88; border-color: #ff2e88; }
 .switch { display: inline-flex; align-items: center; gap: 7px; margin: 0; font-size: 12px; color: var(--soft); cursor: pointer; user-select: none; }
 .switch input { display: none; }
 .switch span {

@@ -133,7 +133,7 @@ void meshSetHealAllowed(bool allowed);
 //
 // Commands (home -> all nodes):
 #define MESH_CMD_AUDIO   1   // payload: u8 buzzerOn, u8 ledOn (live, persisted)
-#define MESH_CMD_FILTERS 2   // payload: binary TargetFilter records (reboot to apply)
+#define MESH_CMD_FILTERS 2   // payload: binary TargetFilter records; replaces the list (live)
 #define MESH_CMD_REBOOT  3   // payload: none
 #define MESH_CMD_SETCHAN 4   // payload: u8 channel 1-11 (NVS + reboot to apply)
 // Remote management (v3 extension; older firmware acks these as rejected):
@@ -143,10 +143,14 @@ void meshSetHealAllowed(bool allowed);
                              // stay silent. SETCHAN is fleet-wide only.
 #define MESH_CMD_STATUS  6   // payload: none. Node floods a STATUS packet (jittered).
 #define MESH_CMD_IDENTIFY 7  // payload: u8 seconds, u8 flags (bit0 beep, bit1 light)
-#define MESH_CMD_PRESET  8   // payload: u8 preset (0 axon, 1 meta, 2 ipro, 3 verkada); reboots
+#define MESH_CMD_PRESET  8   // payload: u8 preset (0 axon, 1 meta, 2 ipro, 3 verkada); live
 #define MESH_CMD_GETFILTERS 9      // payload: none. Node answers with FILTERS_REPORT.
 #define MESH_CMD_FILTERS_REPORT 10 // payload: filter records (node -> home). Never
                                    // applied or acked; the home prints it.
+#define MESH_CMD_FILTER_ADD 11     // payload: filter records merged into the list (live)
+#define MESH_CMD_FILTER_DEL 12     // payload: filter records removed by (type, id) (live)
+// Filter edits ack with count = filters installed afterwards; status 1 when
+// refused (invalid records, or the node would be left with no filters).
 // Ack body (remote -> home): u8 cmd, u16 cmdId, u8 status, u8 count
 // status: 0 = applied, 1 = rejected, 2 = fleet key mismatch, 3 = replayed
 

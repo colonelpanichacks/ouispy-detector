@@ -27,7 +27,8 @@ REPLY_WINDOW = {"ack": 20, "rst": 12, "rfl": 30}
 LABELS = {
     "status": "Read status", "audio": "Set buzzer/LED", "identify": "Identify",
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
-    "filters_set": "Push filters", "rechan": "Re-channel fleet", "meshpush": "Push home filters",
+    "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
+    "rechan": "Re-channel fleet", "meshpush": "Push home filters",
     "setkey": "Set fleet key",
 }
 
@@ -71,16 +72,24 @@ def plan(op, target, args, home_id):
     if op == "filters_get":
         return ([("filters", "RFL:self")], "local", label) if local else \
                ([(f"rfilters {tgt}", "CMD")], "rfl", label)
-    if op == "filters_set":
+    if op in ("filters_set", "filters_add", "filters_del"):
+        # Replace / merge / remove, all applied live on the node. Add and
+        # remove use their own console verbs: an older home answers
+        # "unknown command" instead of treating them as a full replace.
         try:
             buf = flt.encode(args.get("filters") or [])
         except flt.FilterError as e:
             raise PlanError(str(e))
-        lines = [(f"mfbegin {'self' if local else tgt}", "OK")]
+        verb = {"filters_set": "mfbegin", "filters_add": "mfadd", "filters_del": "mfdel"}[op]
+        lines = [(f"{verb} {'self' if local else tgt}", "OK")]
         lines += [(f"mfdata {h}", "OK") for h in flt.chunks(buf)]
         lines.append(("mfend", "OK" if local else "CMD"))
-        n = len(flt.decode(buf))
-        return lines, "local" if local else "ack", f"Push {n} filters"
+        recs = flt.decode(buf)
+        n = len(recs)
+        what = f"{recs[0]['t']} {recs[0]['id']}" if n == 1 else f"{n} filters"
+        label = {"filters_set": f"Push {n} filters", "filters_add": f"Add {what}",
+                 "filters_del": f"Remove {what}"}[op]
+        return lines, "local" if local else "ack", label
     if op == "rechan":
         ch = int(args.get("ch") or 0)
         if not 1 <= ch <= 11:
@@ -112,6 +121,7 @@ class Commander(threading.Thread):
         self.ids = itertools.count(int(time.time()) % 100000)
         self.last_poll = 0.0
         self.join_polls = {}                     # node -> due time for a status read
+        self.filter_polls = {}                   # node or "all" -> due time for a filter-list read
 
     # ------------------------------------------------------------------
     # public
@@ -307,10 +317,14 @@ class Commander(threading.Thread):
     def _refresh_after(self, job):
         """Re-read settings a change touched, so the drawer shows the result."""
         op, tgt = job["op"], job["target"]
-        rebooting = op in ("reboot", "preset", "filters_set", "rechan", "meshpush")
         if op in ("audio", "setkey"):
             self.join_polls[tgt] = time.time() + 1.5
-        elif rebooting and tgt == self.fleet.home_id:
+        elif op in ("filters_set", "filters_add", "filters_del", "preset", "meshpush"):
+            # Applied live (no reboot): read the new list and its CRC back.
+            who = "all" if op == "meshpush" else tgt
+            self.join_polls[who] = time.time() + 2
+            self.filter_polls[who] = time.time() + 3
+        elif op in ("reboot", "rechan") and tgt == self.fleet.home_id:
             self.join_polls[tgt] = time.time() + 12   # home is back on USB by then
         # Rebooted remotes are read again when they rejoin (node_joined).
 
@@ -322,6 +336,10 @@ class Commander(threading.Thread):
             if now >= due:
                 del self.join_polls[nid]
                 self._quiet("status", nid)
+        for nid, due in list(self.filter_polls.items()):
+            if now >= due:
+                del self.filter_polls[nid]
+                self._quiet("filters_get", nid)
         every = int(self.get_settings().get("status_poll") or 0)
         if every and now - self.last_poll >= every and not self.queue:
             self.last_poll = now

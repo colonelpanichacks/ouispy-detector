@@ -100,6 +100,18 @@ class PlanTest(unittest.TestCase):
             "filters_set", "A1B2C3", {"filters": [{"t": "OUI", "id": "0025DF"}]}, "A1B2C3")
         self.assertEqual((lines[0][0], lines[-1][1], expect), ("mfbegin self", "OK", "local"))
 
+    def test_filters_add_del_use_their_own_verbs(self):
+        # An older home would read "mfbegin <t> add" as a full replace; the
+        # dedicated verbs make it answer "unknown command" instead.
+        one = {"filters": [{"t": "MAC", "id": "aa:bb:cc:dd:ee:ff", "d": "watched"}]}
+        lines, expect, label = commands.plan("filters_add", "D4E5F6", one, "A1B2C3")
+        self.assertEqual((lines[0], lines[-1], expect), (("mfadd D4E5F6", "OK"), ("mfend", "CMD"), "ack"))
+        self.assertEqual(label, "Add MAC AABBCCDDEEFF")
+        lines, expect, _ = commands.plan("filters_del", "all", one, "A1B2C3")
+        self.assertEqual(lines[0], ("mfdel all", "OK"))
+        lines, expect, _ = commands.plan("filters_add", "A1B2C3", one, "A1B2C3")
+        self.assertEqual((lines[0][0], lines[-1][1], expect), ("mfadd self", "OK", "local"))
+
     def test_key_never_over_the_mesh(self):
         with self.assertRaises(commands.PlanError):
             commands.plan("setkey", "D4E5F6", {"key": "k" * 32}, "A1B2C3")
@@ -173,6 +185,23 @@ class CommanderDemoTest(unittest.TestCase):
         j = self.wait(self.cmd.submit("filters_get", "DE0C03"))
         self.assertEqual(j["replies"]["DE0C03"]["text"], "2 filters")
         self.assertEqual([f["id"] for f in self.node("DE0C03")["filters"]], ["D42DC5", "D42DC5"])
+
+    def test_live_add_and_remove(self):
+        base = [{"t": "OUI", "id": "D42DC5", "d": "I-PRO"}]
+        self.wait(self.cmd.submit("filters_set", "DE0C03", {"filters": base}))
+        add = [{"t": "MAC", "id": "AABBCCDDEEFF", "d": "watched"}]
+        j = self.wait(self.cmd.submit("filters_add", "DE0C03", {"filters": add}))
+        self.assertEqual((j["state"], j["replies"]["DE0C03"]["n"]), ("done", 2))
+        self.assertNotIn("DE0C03", self.demo.down_until)        # live: no reboot
+        self.wait(self.cmd.submit("filters_get", "DE0C03"))
+        self.assertEqual([f["id"] for f in self.node("DE0C03")["filters"]], ["D42DC5", "AABBCCDDEEFF"])
+        j = self.wait(self.cmd.submit("filters_del", "DE0C03", {"filters": add}))
+        self.assertEqual((j["state"], j["replies"]["DE0C03"]["n"]), ("done", 1))
+        # Removing the last filter is refused: the node would scan for nothing.
+        j = self.wait(self.cmd.submit("filters_del", "DE0C03", {"filters": base}))
+        self.assertEqual(j["state"], "failed")
+        self.wait(self.cmd.submit("filters_get", "DE0C03"))
+        self.assertEqual([f["id"] for f in self.node("DE0C03")["filters"]], ["D42DC5"])
 
     def test_local_home_status(self):
         j = self.wait(self.cmd.submit("status", DEMO_HOME))
