@@ -4,6 +4,8 @@ A local web dashboard for the OUI-SPY Detector **home node**. It shows the whole
 mesh fleet live, puts the nodes on a map, and keeps a searchable history of every
 detection. It runs entirely on your machine: no cloud, no accounts, no telemetry.
 
+![OUI-SPY Mesh dashboard](../docs/ouispy-mesh-dashboard.webp)
+
 ## Run
 
 Works the same on Linux, macOS and Windows: Python 3.9+ and a terminal. Run
@@ -34,6 +36,8 @@ network links.
 |---|---|
 | *(none)* | Live mode: auto-detects the home node on USB (Espressif VID `0x303A`), plus MQTT if set up in Settings |
 | `--demo` | Simulated 5-node fleet with 24 h of backfilled history. Needs no hardware and uses its own database |
+| `--demo-center LAT,LON` | Where the demo fleet sits on the map (default Portland, OR) |
+| `--demo-showcase` | Screenshot-safe demo data: no police or ALPR vendors, and every MAC ends in a synthetic `00:00:xx` |
 | `--serial PORT` | A specific serial port: `COM5` (Windows), `/dev/ttyACM0` (Linux), `/dev/cu.usbmodem1101` (macOS). `--serial off` turns serial off |
 | `--mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
 | `--record capture.log` | Also append every raw serial line (with a timestamp) to a file |

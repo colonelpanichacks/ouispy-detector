@@ -201,6 +201,11 @@ GND              →    GND (Ground)
 
 Link multiple OUI-SPY nodes so a detection heard by any node alerts everywhere and reports through one gateway.
 
+![OUI-SPY Mesh dashboard: live fleet, map and detection history](docs/ouispy-mesh-dashboard.webp)
+
+The **OUI-SPY Mesh** dashboard in [`home-dashboard/`](home-dashboard/) plugs into the home node over USB and turns the mesh into a live fleet view: every node on a map with link strength and trails, live detections, searchable history and fleet control. It runs on your own machine, nothing goes to the cloud:
+`pip install -r home-dashboard/requirements.txt && python home-dashboard/ouispymesh.py` (add `--demo` to try it without hardware).
+
 1. On each node, open the config portal and scroll to **Node Mesh (ESP-NOW Long Range)**.
 2. Enable the mesh, pick the role, and set the **same channel (1–11) on every node**.
    Optionally set the same **Fleet Key** on every node (see Security below).
