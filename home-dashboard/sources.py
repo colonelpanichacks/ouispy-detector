@@ -288,6 +288,29 @@ DEMO_TARGETS = [
     ("0C:9A:E6", "OUI", "DJI", "ble"), ("7C:2A:9E", "OUI", "META/RAYBAN SMARTGLASSES", "ble"),
 ]
 
+# --demo-showcase: screenshot-safe sample data. No police/ALPR vendors, and
+# every MAC ends in an obviously synthetic 00:00:xx, so nothing in a
+# published screenshot can point at a real device.
+SHOWCASE_TARGETS = [
+    ("60:60:1F", "OUI", "DJI", "ble"), ("60:60:1F", "BEACON", "DJI", "wifi"),
+    ("A0:14:3D", "OUI", "PARROT", "ble"), ("38:1D:14", "PROBE", "SKYDIO", "wifi"),
+    ("7C:2A:9E", "OUI", "META/RAYBAN SMARTGLASSES", "ble"), ("E0:A7:00", "BEACON", "Verkada", "wifi"),
+    ("DE:AD:BE", "BEACON", "PWNAGOTCHI", "wifi"),
+]
+SHOWCASE = False
+
+
+def use_showcase():
+    global SHOWCASE
+    SHOWCASE = True
+    DEMO_TARGETS[:] = SHOWCASE_TARGETS
+
+
+def demo_mac(oui):
+    if SHOWCASE:
+        return oui + ":00:00:" + f"{random.randint(1, 40):02X}"
+    return oui + ":" + ":".join(f"{random.randint(0, 255):02X}" for _ in range(3))
+
 
 class DemoSource(Source):
     kind = "demo"
@@ -304,8 +327,9 @@ class DemoSource(Source):
         self.macs = [self._mac(o) for o, *_ in DEMO_TARGETS for _ in range(2)]
         self.ch = 6
         self.down_until = {}          # node -> time it comes back from a reboot
+        swap = {"axon": "meta"} if SHOWCASE else {}
         preset = lambda *names: [{"t": t, "id": i, "d": d, "full": 0}
-                                 for n in names for t, i, d in flt.PRESETS[n]]
+                                 for n in names for t, i, d in flt.PRESETS[swap.get(n, n)]]
         # Simulated per-node settings. DE0C03 has drifted from the home's
         # filters; DE0E05 runs pre-remote-management firmware and refuses
         # every new command, so the UI's failure paths show up too.
@@ -325,7 +349,7 @@ class DemoSource(Source):
 
     @staticmethod
     def _mac(oui):
-        return oui + ":" + ":".join(f"{random.randint(0, 255):02X}" for _ in range(3))
+        return demo_mac(oui)
 
     def run(self):
         self.set_state(connected=True, detail="simulated fleet (5 nodes)")
