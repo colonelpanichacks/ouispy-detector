@@ -243,6 +243,37 @@ class CommanderDemoTest(unittest.TestCase):
         self.wait(self.cmd.submit("filters_get", "DE0C03"))
         self.assertEqual([f["id"] for f in self.node("DE0C03")["filters"]], ["D42DC5"])
 
+    def test_filters_by_crc_skip_the_mesh(self):
+        lst = [{"t": "OUI", "id": "00C0F4", "d": "crc twin"}, {"t": "CID", "id": "034D", "d": "Taser"}]
+        for nid in ("DE0C03", "DE0B02"):
+            self.wait(self.cmd.submit("filters_set", nid, {"filters": lst}))
+        self.demo.down_until.clear()
+        self.wait(self.cmd.submit("filters_get", "DE0C03"))                 # a real read
+        self.wait(self.cmd.submit("status", "DE0B02"))                      # its fcrc
+        self.assertEqual(self.node("DE0B02")["cfg"]["fcrc"], flt.crc(lst))
+        # Just edited: no fcrc vouches for a list yet (a status asked for
+        # before the edit could still arrive with the old one).
+        self.assertIsNone(self.fleet.filters_by_crc("DE0B02"))
+        self.fleet.fcrc_hold.clear()                                        # 15 s later
+        t = time.time()
+        j = self.wait(self.cmd.submit("filters_get", "DE0B02"))
+        self.assertLess(time.time() - t, 0.5)                                # no radio
+        self.assertIn("CRC verified", j["replies"]["DE0B02"]["text"])
+        n = self.node("DE0B02")
+        self.assertEqual(([f["id"] for f in n["filters"]], n["filters_fresh"]), (["00C0F4", "034D"], True))
+        self.assertIn(n["filters_via"], (None, "DE0C03"))   # its own read-back, else the twin
+        # A node never read at all borrows the twin's list.
+        with self.fleet.lock:
+            self.fleet.nodes["DE0B02"].update(filters=None)
+        self.wait(self.cmd.submit("filters_get", "DE0B02"))
+        self.assertEqual(self.node("DE0B02")["filters_via"], "DE0C03")
+        # Survives a dashboard restart.
+        again = Fleet(self.store, lambda e, p: None)
+        self.assertEqual([f["id"] for f in again.nodes["DE0B02"]["filters"]], ["00C0F4", "034D"])
+        # Right after an edit the old fcrc no longer vouches for the old list.
+        self.wait(self.cmd.submit("filters_add", "DE0B02", {"filters": [{"t": "OUI", "id": "AABBCC", "d": ""}]}))
+        self.assertIsNone(self.fleet.filters_by_crc("DE0B02"))
+
     def test_local_home_status(self):
         j = self.wait(self.cmd.submit("status", DEMO_HOME))
         self.assertEqual(j["state"], "done")

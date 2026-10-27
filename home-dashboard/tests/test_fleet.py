@@ -66,6 +66,22 @@ class FleetTest(unittest.TestCase):
         b = by_mac["00:25:DF:44:55:66"]
         self.assertEqual((b["node"], b["dom"]), ("A1B2C3", "wifi"))
 
+    def test_seen_by_and_closest(self):
+        self.fleet.feed_line(TLM)
+        def det(node, rssi):
+            self.fleet.feed_detection({"mac": "00:13:37:AA:BB:CC", "rssi": rssi, "type": "BEACON",
+                                       "desc": "Pineapple", "node": node, "dom": "wifi"})
+            return [p for e, p in self.events if e == "det"][-1]
+        d = det("A1B2C3", -70)
+        self.assertEqual((d["seen_by"], d["closest"]), ([["A1B2C3", -70, 0]], None))   # one node: no claim
+        d = det("D4E5F6", -48)
+        self.assertEqual([s[:2] for s in d["seen_by"]], [["D4E5F6", -48], ["A1B2C3", -70]])
+        self.assertEqual(d["closest"], "D4E5F6")
+        # A node's repeat inside the dedup window still updates its signal.
+        self.fleet.feed_detection({"mac": "00:13:37:AA:BB:CC", "rssi": -40, "type": "BEACON",
+                                   "desc": "Pineapple", "node": "A1B2C3", "dom": "wifi"})
+        self.assertEqual(self.fleet.sightings["00:13:37:AA:BB:CC"]["A1B2C3"][0], -40)
+
     def test_dedup_across_sources(self):
         line = '{"mac":"AA:BB:CC:DD:EE:FF","rssi":-60,"type":"OUI","match":"AABBCC","desc":"X"}'
         self.fleet.feed_line(line, "serial")

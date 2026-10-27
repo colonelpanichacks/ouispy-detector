@@ -406,6 +406,7 @@ def _filters():
 @app.route("/api/state")
 def api_state():
     total, recent = store.query_detections(limit=150)
+    store.annotate_seen_by(recent)
     return jsonify({"fleet": fleet.snapshot(), "sources": sources_status(),
                     "settings": public_settings(), "stats": store.detection_stats(),
                     "hourly": store.hourly(), "mac_aliases": store.mac_aliases(),

@@ -283,7 +283,7 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
     const tools = L.control({ position: "topright" });
     tools.onAdd = () => {
         const div = L.DomUtil.create("div", "map-tools");
-        ["mapLayer", "mapLinks", "mapTraffic", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
+        ["mapLayer", "mapLinks", "mapTraffic", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
         return div;
@@ -452,10 +452,10 @@ function renderMap() {
         let m = S.markers[n.id];
         if (!m) {
             m = L.marker([n.lat, n.lon], {
-                draggable: true, riseOnHover: true,
+                draggable: !S.mapLocked, riseOnHover: true,
                 icon: L.divIcon({ className: "", html: markerHtml(n), iconSize: [0, 0] }),
             }).addTo(map);
-            m.on("dragend", (e) => { const p = e.target.getLatLng(); setNodePos(n.id, p.lat, p.lng); });
+            m.on("dragend", (e) => { const p = e.target.getLatLng(); setNodePos(n.id, p.lat, p.lng); armRelock(); });
             m.on("click", () => selectNode(n.id, true));
             S.markers[n.id] = m;
         } else {
@@ -796,12 +796,42 @@ async function setNodePos(id, lat, lon) {
     renderMap();
     await api(`/api/nodes/${id}`, { method: "POST", body: { lat, lon } });
 }
+// Node positions are locked by default (per browser), so panning the map
+// can never drag a node by accident. Unlocking glows the button and the
+// markers; it locks itself again after 2 minutes without a move.
+const RELOCK_MS = 120000;
+let relockTimer = null;
+S.mapLocked = (() => { try { return localStorage.getItem("ouispy.mapUnlocked") !== "1"; } catch (e) { return true; } })();
+function armRelock() {
+    clearTimeout(relockTimer);
+    if (!S.mapLocked) relockTimer = setTimeout(() => setMapLocked(true), RELOCK_MS);
+}
+function setMapLocked(on) {
+    S.mapLocked = on;
+    try { localStorage.setItem("ouispy.mapUnlocked", on ? "0" : "1"); } catch (e) { /* private window */ }
+    for (const m of Object.values(S.markers)) {
+        if (m.dragging) on ? m.dragging.disable() : m.dragging.enable();
+    }
+    const b = $("mapLock");
+    b.classList.toggle("on", !on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.querySelector("span").textContent = on ? "Locked" : "Unlocked";
+    b.title = on ? "Node positions are locked. Click to unlock and drag nodes."
+                 : "Unlocked: drag nodes to move them. Click to lock (locks itself after 2 minutes idle).";
+    document.querySelector(".map-panel").classList.toggle("unlocked", !on);
+    if (!S.placing) setPlacing(false);   // refresh the hint
+    armRelock();
+}
+$("mapLock").onclick = () => setMapLocked(!S.mapLocked);
+setMapLocked(S.mapLocked);
+
 function setPlacing(on) {
     S.placing = on;
     document.querySelector(".map-panel").classList.toggle("placing", on);
     $("mapHint").textContent = on
         ? `Click the map to place ${nodeName(S.selected)}. Esc to cancel.`
-        : `Drag markers to move nodes. Select a node, then "Place on map".`;
+        : S.mapLocked ? `Node positions locked. Unlock on the map to drag nodes.`
+        : `Unlocked: drag markers to move nodes. Select a node, then "Place on map".`;
 }
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (S.placing) setPlacing(false); else { closeDrawer(); closeDevice(); hideFleetKey(); } }
@@ -841,6 +871,10 @@ function detHtml(d, fresh) {
             <span class="rssi-v">${d.rssi ?? "?"} dBm</span>
             <span class="det-node ${home ? "home" : ""}">via ${esc(nodeName(d.node))}</span>
         </div>
+        ${d.seen_by && d.seen_by.length > 1 ? `<div class="det-seen" title="Every node that heard it in the last minute, strongest signal first. Strongest = closest (roughly: walls and antennas skew it).">
+            <span class="closest">Closest: ${esc(nodeName(d.seen_by[0][0]))} ${d.seen_by[0][1]} dBm</span>
+            ${d.seen_by.slice(1).map((s) => `<span>${esc(nodeName(s[0]))} ${s[1]} dBm</span>`).join("")}
+        </div>` : ""}
     </div>`;
 }
 function renderFeed() {
@@ -958,7 +992,7 @@ function onDetection(d) {
     renderActivity();
     if (d.is_new) {
         toast("bad", `New device: ${devAlias(d.mac, d.descr || d.match)}`,
-              `${d.mac}  ${d.rssi} dBm  via ${nodeName(d.node)}`, () => openDevice(d.mac));
+              `${d.mac}  ${d.rssi} dBm  via ${nodeName(d.node)}${d.closest ? `, closest to ${nodeName(d.closest)}` : ""}`, () => openDevice(d.mac));
     }
     // Sound and screen flash are for news: a new device, or one back after
     // ALERT_QUIET_S of silence, at most once per ALERT_GAP_MS. A device a node
@@ -1443,7 +1477,10 @@ function renderGroups() {
 
 function renderFilters(n) {
     const box = $("dFilters");
-    $("dFiltInfo").textContent = n.filters ? `${n.filters.length} installed, read ${ago(n.filters_ts)}` : "";
+    $("dFiltInfo").textContent = !n.filters ? "" :
+        n.filters_fresh === false ? `${n.filters.length} shown, but the node now reports a different list: press Read` :
+        n.filters_via ? `${n.filters.length} installed, CRC-verified identical to ${nodeName(n.filters_via)} ${ago(n.filters_ts)}` :
+        `${n.filters.length} installed, read ${ago(n.filters_ts)}`;
     if (S.editing && S.editFor === n.id) {
         if (box.querySelector(".fedit")) return;   // keep focus while typing
         const types = (S.filterMeta && S.filterMeta.types) || {};

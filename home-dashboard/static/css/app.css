@@ -722,3 +722,16 @@ body.map-maxed .toasts { z-index: 1700; }
     .btn.mini { min-height: 32px; padding: 6px 12px; }
     .frow .rm-live { padding: 8px; }
 }
+
+/* Map lock: locked is the quiet default; unlocked glows hot pink, and so do
+   the draggable markers, so it is obvious the map will move nodes. */
+.map-lock-btn .i-unlock { display: none; }
+.map-lock-btn.on .i-lock { display: none; }
+.map-lock-btn.on .i-unlock { display: inline; }
+.map-lock-btn.on { opacity: 1; color: #ff4fd8; border-color: rgba(255,79,216,0.55) !important; box-shadow: 0 0 14px rgba(255,79,216,0.4); }
+.map-panel.unlocked .leaflet-marker-draggable { cursor: move; filter: drop-shadow(0 0 6px rgba(255,79,216,0.85)); }
+.map-panel.unlocked .leaflet-container { outline: 1px dashed rgba(255,79,216,0.45); outline-offset: -1px; }
+
+/* Multi-node sightings under a detection: the closest node glows. */
+.det-seen { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; color: var(--soft); }
+.det-seen .closest { color: #39ff88; text-shadow: 0 0 8px rgba(57,255,136,0.55); font-weight: 600; }

@@ -18,10 +18,13 @@ import re
 import threading
 import time
 
+import filters as flt
+
 HOME_TIMEOUT = 15        # s without TLM/heartbeat -> home offline
 NODE_STALE = 12          # s since last frame before a remote counts offline
 SAMPLE_EVERY = 60        # s between per-node RSSI/pkt samples in history
 DEDUP_WINDOW = 6         # s: same (node, mac, type) from two sources = one event
+SEEN_WINDOW = 60         # s: nodes that heard a device this recently count as "seen by"
 
 RE_HEARTBEAT = re.compile(r"\[HEARTBEAT\].*?\bmesh=(\d+) rx=(\d+) q=(\d+) dup=(\d+) "
                           r"self=(\d+) bad=(\d+) tx=(\d+)/(\d+)/(\d+).*?lrssi=(-?\d+)")
@@ -55,11 +58,13 @@ class Fleet:
         self.tlm_seen = 0.0              # last TLM line (firmware with telemetry)
         self.nodes = {}                  # id -> live state
         self.recent = {}                 # dedup key -> ts
+        self.sightings = {}              # mac -> {node: (rssi, ts)}, last SEEN_WINDOW s
         self.last_sample = {}
         self.legacy = False              # True once we parse pre-TLM firmware
         self.console = []                # ring of recent raw lines
         self.on_line = None              # Commander.feed_line, set by ouispymesh.py
         self.on_join = None              # Commander.node_joined
+        self.fcrc_hold = {}              # node or "all" -> time its fcrc is trusted again
         meta = store.nodes_meta()
         for nid, m in meta.items():
             self.nodes[nid] = self._blank(nid, m.get("role"))
@@ -68,12 +73,19 @@ class Fleet:
         for nid, rec in (store.get_setting("ota_last") or {}).items():
             if nid in self.nodes:
                 self.nodes[nid]["ota"] = rec
+        # Last filter list read from each node, so a restart doesn't blank
+        # every drawer (fcrc in the next RST says whether it is still current).
+        for nid, rec in (store.get_setting("filter_lists") or {}).items():
+            if nid in self.nodes and isinstance(rec.get("filters"), list):
+                self.nodes[nid].update(filters=rec["filters"], filters_ts=rec.get("ts"),
+                                       filters_via=rec.get("via"))
 
     @staticmethod
     def _blank(nid, role=None):
         return {"id": nid, "role": role or "remote", "online": False, "last_seen": 0,
                 "pkts": 0, "rssi": None, "since": None,
-                "cfg": None, "cfg_ts": None, "filters": None, "filters_ok": True, "filters_ts": None}
+                "cfg": None, "cfg_ts": None, "filters": None, "filters_ok": True, "filters_ts": None,
+                "filters_via": None}
 
     # ------------------------------------------------------------------
     # line ingestion
@@ -197,6 +209,7 @@ class Fleet:
         if dom not in ("ble", "wifi"):
             dom = "wifi" if str(d.get("type", "")).upper() in ("PROBE", "BEACON") else "ble"
         key = (node, mac, d.get("type"))
+        seen_by = self._sighting(mac, node, d.get("rssi"), now)
         with self.lock:
             for k, ts in list(self.recent.items()):
                 if now - ts > DEDUP_WINDOW:
@@ -209,6 +222,10 @@ class Fleet:
             "rssi": d.get("rssi"), "type": d.get("type"), "match": d.get("match"),
             "descr": descr.strip(), "dom": dom, "source": source,
             "is_new": not self.store.mac_known(mac),
+            # Every node that heard this device lately, strongest first; with
+            # two or more, the strongest is the one it is closest to.
+            "seen_by": seen_by,
+            "closest": seen_by[0][0] if len(seen_by) > 1 else None,
         }
         det["id"] = self.store.add_detection(det)
         # A detection proves its node is alive even without telemetry.
@@ -216,6 +233,20 @@ class Fleet:
         self._node_seen(node, role, 0, None, None, now, from_det=True)
         self.emit("det", det)
         self._broadcast()
+
+    def _sighting(self, mac, node, rssi, now):
+        """Record that `node` heard `mac` (repeats the dedup drops count too),
+        and return [[node, rssi, age_s], ...] for the window, strongest first."""
+        with self.lock:
+            for m in [m for m, per in self.sightings.items()
+                      if all(now - ts > SEEN_WINDOW for _, ts in per.values())]:
+                del self.sightings[m]
+            per = self.sightings.setdefault(mac, {})
+            if isinstance(rssi, (int, float)):
+                per[node] = (int(rssi), now)
+            rows = [[n, r, round(now - ts)] for n, (r, ts) in per.items() if now - ts <= SEEN_WINDOW]
+        rows.sort(key=lambda x: -x[1])
+        return rows
 
     # ------------------------------------------------------------------
     # node bookkeeping
@@ -260,6 +291,11 @@ class Fleet:
             st["cfg_ts"] = now
             if cfg.get("role") in ("home", "remote") and nid != self.home_id:
                 st["role"] = cfg["role"]
+        # The alias stored on the node (set by the web flasher) names it
+        # here, unless one was already given on the dashboard: that wins.
+        alias = str(cfg.get("alias") or "").strip()[:32]
+        if alias and not (self.store.nodes_meta().get(nid) or {}).get("alias"):
+            self.store.update_node(nid, alias=alias)
         if nid != self.home_id:
             # A status reply is a frame from that node: it is alive.
             self._node_seen(nid, cfg.get("role"), 0, None, None, now, from_det=True)
@@ -294,18 +330,77 @@ class Fleet:
             self.store.set_setting("ota_last", last)
         self._broadcast()
 
-    def _node_filters(self, obj):
+    def _node_filters(self, obj, via=None):
+        """A node's filter list: read from it (RFL), or `via` another node
+        whose list has exactly the CRC this node reports."""
         nid = str(obj.get("node", "")).upper()
         if len(nid) != 6:
             return
+        ok = bool(obj.get("ok", 1))
         with self.lock:
             st = self.nodes.get(nid)
             if st is None:
                 st = self.nodes[nid] = self._blank(nid)
             st["filters"] = obj.get("filters", [])
-            st["filters_ok"] = bool(obj.get("ok", 1))
+            st["filters_ok"] = ok
             st["filters_ts"] = time.time()
+            st["filters_via"] = via
+            rec = {"filters": st["filters"], "ts": st["filters_ts"], "via": via}
+        if ok:
+            lists = self.store.get_setting("filter_lists") or {}
+            lists[nid] = rec
+            self.store.set_setting("filter_lists", lists)
         self._broadcast()
+
+    def forget_fcrc(self, nid, hold=15):
+        """A filter edit just went to `nid` (or "all"): the fcrc we hold is
+        the old list's. A status asked for before the edit can still land
+        after it carrying that old fcrc, so for `hold` seconds no fcrc of the
+        node vouches for any list (reads go over the radio)."""
+        with self.lock:
+            self.fcrc_hold[nid] = time.time() + hold
+            for n, st in self.nodes.items():
+                if nid in ("all", n) and st.get("cfg"):
+                    st["cfg"] = dict(st["cfg"], fcrc=None)
+
+    def fcrc_trusted(self, nid):
+        now = time.time()
+        with self.lock:
+            return all(self.fcrc_hold.get(k, 0) <= now for k in (nid, "all"))
+
+    @staticmethod
+    def list_crc(filters):
+        try:
+            return flt.crc(filters)
+        except Exception:
+            return None
+
+    def filters_current(self, nid):
+        """True when the list we hold for a node matches the fcrc it reports."""
+        with self.lock:
+            st = self.nodes.get(nid)
+            if not st or st["filters"] is None or not st["filters_ok"]:
+                return False
+            fcrc = (st.get("cfg") or {}).get("fcrc")
+            lst = st["filters"]
+        return bool(fcrc) and self.list_crc(lst) == fcrc
+
+    def filters_by_crc(self, nid):
+        """A list held for any node whose CRC equals the fcrc `nid` reports:
+        (filters, source node) or None. The CRC covers every byte the node
+        stores (type, id, description), so a match is the same list."""
+        with self.lock:
+            fcrc = ((self.nodes.get(nid) or {}).get("cfg") or {}).get("fcrc")
+            cands = [(n, st["filters"]) for n, st in self.nodes.items()
+                     if st["filters"] is not None and st["filters_ok"]]
+        if not fcrc or not self.fcrc_trusted(nid):
+            return None
+        # The node's own last read first, then the home, then anyone.
+        cands.sort(key=lambda c: (c[0] != nid, c[0] != self.home_id))
+        for src, lst in cands:
+            if self.list_crc(lst) == fcrc:
+                return [dict(f) for f in lst], src
+        return None
 
     def _node_offline(self, nid):
         with self.lock:
@@ -366,6 +461,11 @@ class Fleet:
             home.update({"id": self.home_id, "alive": now - self.home_seen < HOME_TIMEOUT,
                          "age": round(now - self.home_seen, 1) if self.home_seen else None,
                          "legacy": self.legacy})
+        for n in nodes:
+            # Does the list we show still match the fcrc the node reports?
+            fcrc = (n.get("cfg") or {}).get("fcrc")
+            n["filters_fresh"] = (None if n["filters"] is None or not fcrc
+                                  else self.list_crc(n["filters"]) == fcrc)
         nodes.sort(key=lambda n: (not n["is_home"], not n["online"], n["id"]))
         return {"home": home, "nodes": nodes, "ts": now}
 

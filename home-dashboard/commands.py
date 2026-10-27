@@ -151,6 +151,7 @@ class Commander(threading.Thread):
         self.last_poll = 0.0
         self.join_polls = {}                     # node -> due time for a status read
         self.filter_polls = {}                   # node or "all" -> due time for a filter-list read
+        self.list_reads = {}                     # node -> last automatic filter-list read
 
     # ------------------------------------------------------------------
     # public
@@ -169,6 +170,19 @@ class Commander(threading.Thread):
                "created": time.time(), "finished": None, "auto": auto,
                "args": {} if op == "setkey" else (args or {})}   # a key is never kept in a job
         self._remember(job)
+        if op == "filters_get" and target not in ("all", home) and not (args or {}).get("force"):
+            # The node's fcrc says exactly which list it holds: when we already
+            # have a list with that CRC (the home's, read over USB in a blink,
+            # or this node's last read), show it without a mesh round trip.
+            hit = self.fleet.filters_by_crc(target)
+            if hit:
+                lst, src = hit
+                self.fleet._node_filters({"node": target, "ok": 1, "filters": lst},
+                                         via=None if src == target else src)
+                job["replies"][target] = {"st": 0, "ts": time.time(),
+                                          "text": f"{len(lst)} filters (CRC verified, no mesh read needed)"}
+                self._finish(job, "done")
+                return self.public(job)
         with self.cv:
             self.queue.append(job)
             self.cv.notify_all()
@@ -454,11 +468,33 @@ class Commander(threading.Thread):
         elif op in ("filters_set", "filters_add", "filters_del", "preset", "meshpush"):
             # Applied live (no reboot): read the new list and its CRC back.
             who = "all" if op == "meshpush" else tgt
+            self.fleet.forget_fcrc(who)   # until the next RST: no CRC shortcut to the old list
             self.join_polls[who] = time.time() + 2
             self.filter_polls[who] = time.time() + 3
         elif op in ("reboot", "rechan") and tgt == self.fleet.home_id:
             self.join_polls[tgt] = time.time() + 12   # home is back on USB by then
         # Rebooted remotes are read again when they rejoin (node_joined).
+
+    def _keep_lists_current(self, now):
+        """Every drawer shows the node's real list without anyone pressing Read:
+        the home is re-read over USB whenever its fcrc moves, and a remote whose
+        fcrc matches a list we hold gets that list (CRC-verified, no radio)."""
+        home = self.fleet.home_id
+        nodes = self.fleet.snapshot()["nodes"]
+        for n in nodes:
+            nid = n["id"]
+            if not (n.get("cfg") or {}).get("fcrc") or self.fleet.filters_current(nid):
+                continue
+            if nid == home:
+                if now - self.list_reads.get(nid, 0) >= 20:
+                    self.list_reads[nid] = now
+                    self._quiet("filters_get", nid)
+                continue
+            hit = self.fleet.filters_by_crc(nid)
+            if hit:
+                lst, src = hit
+                self.fleet._node_filters({"node": nid, "ok": 1, "filters": lst},
+                                         via=None if src == nid else src)
 
     def _auto_poll(self):
         if not self.get_sender() or not self.fleet.home_id:
@@ -472,6 +508,7 @@ class Commander(threading.Thread):
             if now >= due:
                 del self.filter_polls[nid]
                 self._quiet("filters_get", nid)
+        self._keep_lists_current(now)
         every = int(self.get_settings().get("status_poll") or 0)
         if every and now - self.last_poll >= every and not self.queue:
             self.last_poll = now

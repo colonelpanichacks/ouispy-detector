@@ -173,6 +173,33 @@ class Store:
             return self.db.execute("SELECT 1 FROM detections WHERE mac=? LIMIT 1",
                                    (mac,)).fetchone() is not None
 
+    def annotate_seen_by(self, rows, window=60):
+        """Give each detection row the nodes that heard the same device in the
+        `window` seconds up to it (latest RSSI each, strongest first) and the
+        closest one when two or more did: the live feed's "seen by" line,
+        rebuilt from history so a reload or restart shows the same thing."""
+        if not rows:
+            return rows
+        macs = sorted({r["mac"] for r in rows})
+        lo = min(r["ts"] for r in rows) - window
+        hi = max(r["ts"] for r in rows)
+        with self.lock:
+            hist = self.db.execute(
+                f"SELECT ts, node, mac, rssi FROM detections WHERE ts BETWEEN ? AND ? "
+                f"AND mac IN ({','.join('?' * len(macs))}) ORDER BY ts", (lo, hi, *macs)).fetchall()
+        by_mac = {}
+        for h in hist:
+            by_mac.setdefault(h["mac"], []).append(h)
+        for r in rows:
+            per = {}
+            for h in by_mac.get(r["mac"], []):
+                if r["ts"] - window <= h["ts"] <= r["ts"] and h["rssi"] is not None:
+                    per[h["node"]] = (h["rssi"], h["ts"])
+            seen = sorted(([n, rs, round(r["ts"] - t)] for n, (rs, t) in per.items()), key=lambda x: -x[1])
+            r["seen_by"] = seen
+            r["closest"] = seen[0][0] if len(seen) > 1 else None
+        return rows
+
     def add_detection(self, d):
         with self.lock:
             cur = self.db.execute(
