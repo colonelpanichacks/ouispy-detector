@@ -135,7 +135,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
     .grid { grid-template-columns: 1fr; grid-template-rows: auto;
             grid-template-areas: "map" "feed" "fleet" "tabs"; padding: 8px; }
     .map-panel { height: 62vh; }
-    .topbar { padding: 10px 12px; gap: 10px; }
+    .topbar { padding: 8px 12px; gap: 8px 10px; }
     .brand h1, .brand-sub { font-size: 18px; letter-spacing: 3px; }
 }
 
@@ -606,3 +606,23 @@ input[type="checkbox"]:checked::after {
 }
 
 .disclaimer { text-align: center; font-size: 10.5px; color: var(--faint); padding: 4px 16px 18px; letter-spacing: 0.3px; }
+
+/* ---------- phones and touchscreens ----------
+   Last in the file on purpose: these override the base rules above. */
+@media (max-width: 760px) {
+    /* Two-row top bar: wordmark, then the feed pill (state only; the
+       detail is in its tooltip) beside icon-only Sound / Flash. */
+    .chip-btn span, .src-pill .src-detail { display: none; }
+    .chip-btn { padding: 6px 9px; }
+    .sources { flex: 1 1 auto; min-width: 0; }
+    /* Toasts span the bottom edge and never stack more than three high. */
+    .toasts { left: 8px; right: 8px; bottom: 8px; }
+    .toast { min-width: 0; max-width: none; }
+    .toast:nth-child(n+4) { display: none; }
+}
+@media (pointer: coarse) {
+    /* Every control gets a finger-sized tap area. */
+    .btn, .chip-btn, .icon-btn, .tab, select.field, input.field { min-height: 36px; }
+    .btn.mini { min-height: 32px; padding: 6px 12px; }
+    .frow .rm-live { padding: 8px; }
+}

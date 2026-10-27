@@ -140,12 +140,12 @@ function renderSources() {
         if (s.kind === "serial") {
             const [cls, word] = serialPillState(s);
             return `<span class="src-pill" data-kind="serial" title="${esc(s.detail)}"><span class="dot ${cls}"></span>` +
-                `<b>USB</b> <span class="state">${word}</span> ${esc(s.connected ? s.port || "" : s.detail || "")}</span>`;
+                `<b>USB</b> <span class="state">${word}</span> <span class="src-detail">${esc(s.connected ? s.port || "" : s.detail || "")}</span></span>`;
         }
         let extra = "";
         if (s.kind === "mqtt" && s.availability) extra = ` | ${esc(s.device)}: ${esc(s.availability)}`;
         return `<span class="src-pill" title="${esc(s.detail)}"><span class="dot ${s.connected ? "on" : "warn"}"></span>` +
-            `<b>${esc(s.kind.toUpperCase())}</b> ${esc(s.detail || "")}${extra}</span>`;
+            `<b>${esc(s.kind.toUpperCase())}</b> <span class="src-detail">${esc(s.detail || "")}${extra}</span></span>`;
     }).join("");
 }
 
