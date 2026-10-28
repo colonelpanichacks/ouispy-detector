@@ -46,7 +46,9 @@ HOME_STAT_KEYS = ("rx", "q", "dup", "self", "bad", "tx", "txf", "txcb", "pend",
                   # ESP-NOW TX rate in force (lr250k / lr500k / 1m / lr-failed) and stray sightings
                   "rate", "strays",
                   # fleet-key encryption on/off + frames rejected: plaintext, failed auth, replay
-                  "enc", "eplain", "eauth", "ereplay")
+                  "enc", "eplain", "eauth", "ereplay",
+                  # free NVS entries (32 B each): low = settings writes start failing
+                  "nvs")
 
 
 class Fleet:

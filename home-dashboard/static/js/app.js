@@ -214,6 +214,7 @@ function renderHome() {
             cells.push(["Rejected", `${h.eauth || 0} auth / ${h.ereplay || 0} replay / ${h.eplain || 0} plain`, "warn", true]);
         }
     }
+    if (h.nvs != null) cells.push(["NVS free", `${h.nvs}`, h.nvs < 40 ? "bad" : h.nvs < 120 ? "warn" : "good"]);
     if (h.legacy) cells.push(["Firmware", "legacy (no TLM)", "warn", true]);
     // A strong node next door leaks into the channels beside its own, so the
     // home's sweep can "hear" it elsewhere. Trust the node's own fresh
