@@ -677,7 +677,10 @@ static void serialConsoleTick() {
     }
 
     if (line == "provisiondone") {
-        if (targetFilters.size() == 0) {
+        // A mesh node may start with no filters (the web flasher sets them
+        // up that way): it joins the mesh and gets its list from the
+        // dashboard. Without the mesh it would have nothing to do.
+        if (targetFilters.size() == 0 && !meshCfg.enabled) {
             Serial.println("ERR no filters installed");
             return;
         }
@@ -695,7 +698,7 @@ static void serialConsoleTick() {
         // Same end state as the portal's Burn In button: everything staged
         // gets persisted, the lock is set, and the node boots straight into
         // scanning from here on (BOOT-hold at power-on to unlock).
-        if (targetFilters.size() == 0) {
+        if (targetFilters.size() == 0 && !meshCfg.enabled) {
             Serial.println("ERR no filters installed");
             return;
         }
@@ -1402,7 +1405,12 @@ static int filtersEditLive(LiveFilterOp op, const uint8_t* buf, uint16_t len, in
 
 // True when the running scanner can't see part of the live list: scanning
 // without a BLE scanner (none was started at boot) while BLE filters exist.
+// Set when scanning started with no filters (a mesh-only node waiting for
+// its list): neither scanner was set up, so the first list restarts it.
+static bool g_startedEmpty = false;
+
 static bool liveEditNeedsRestart() {
+    if (currentMode == SCANNING_MODE && g_startedEmpty && !targetFilters.empty()) return true;
     if (currentMode != SCANNING_MODE || pBLEScan) return false;
     for (const TargetFilter& f : targetFilters) {
         if (!isWifiDomain(f.type)) return true;
@@ -6175,6 +6183,14 @@ void startScanningMode() {
         scan_to_wifi_sweep();
     } else if (hasBleFilters) {
         scan_to_ble_scan();
+    } else if (meshCfg.enabled) {
+        // Mesh-only (no filters yet): sit on the mesh channel so the node
+        // joins, answers the dashboard and takes its filter list live.
+        g_startedEmpty = true;
+        meshParkChannel();
+        if (isSerialConnected()) {
+            Serial.println("[MESH] no filters yet: mesh-only, waiting for a filter list from the dashboard");
+        }
     }
 }
 
@@ -6558,6 +6574,10 @@ void loop() {
             // relay — keep the radio parked on the mesh channel and service
             // the mesh instead of powering the radio down.
             if (meshCfg.enabled) {
+                // Frames only go out while parked; nothing else moves the
+                // channel on a mesh-only node, so park once.
+                static bool reliefParked = false;
+                if (!reliefParked) { meshParkChannel(); reliefParked = true; }
                 meshTick();
                 remoteMgmtTick();
                 serialConsoleTick();
