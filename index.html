@@ -42,7 +42,7 @@
       var(--bg);
     padding: 0 16px 48px;
   }
-  main { max-width: 780px; margin: 0 auto; }
+  main { max-width: 1180px; margin: 0 auto; }
   a { color: var(--green); text-decoration: none; border-bottom: 1px dotted rgba(255,43,158,0.4); }
   a:hover { color: var(--white); border-bottom-color: var(--white); }
   b { color: var(--white); font-weight: normal; }
@@ -98,7 +98,7 @@
     border: 1px solid rgba(255,43,158,0.22);
     background: var(--panel);
     margin: 24px auto;
-    max-width: 720px;
+    max-width: 1140px;
   }
   .panel > header {
     padding: 10px 20px;
@@ -373,6 +373,34 @@
     .banner { font-size: 5.5px; }
     .subtitle { letter-spacing: 3px; font-size: 11px; }
   }
+
+  /* ─── WIDE LAYOUT: sections use the width on desktop ─── */
+  .meshdash { text-align: left; border: 1px solid rgba(255,43,158,0.22); background: rgba(255,43,158,0.03); padding: 16px 18px; }
+  .meshdash h4 { margin: 0 0 10px; color: var(--green); letter-spacing: 3px; text-transform: uppercase; font-size: 12px; font-weight: 500; }
+  .meshdash p { max-width: none; font-size: 13px; line-height: 1.6; margin: 0 0 10px; }
+  .meshdash .shot { display: block; border: 1px solid rgba(255,43,158,0.3); margin: 4px 0 12px; line-height: 0; }
+  .meshdash .shot img { width: 100%; max-width: 460px; height: auto; display: block; }
+  .meshdash .runlbl { margin-bottom: 6px; }
+  .meshdash .os { font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin: 8px 0 4px; }
+  .meshdash pre.cmd { margin: 0 0 6px; padding: 10px 12px; background: #050f08; border: 1px dashed var(--magenta); color: var(--white);
+    font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre; }
+  .meshdash .url { color: var(--green); }
+  .meshcols { width: 100%; display: grid; gap: 22px; margin-top: 6px; }
+  .meshleft { min-width: 0; }
+  @media (min-width: 980px) {
+    .panel > .body.steps3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 26px; }
+    .panel > .body.steps3 > .step { border-bottom: none; justify-content: flex-start; }
+    .panel > .body.steps3 > .step p { max-width: none; }
+    .panel > .body.steps3 > #meshStep { grid-column: 1 / -1; border-top: 1px dashed rgba(255,43,158,0.12); }
+    .meshcols { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+    .meshleft .meshform { max-width: none; }
+    .panel > .body.modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 30px; }
+    .panel > .body.modes > .mode { border-bottom: 1px dashed rgba(255,43,158,0.12); }
+    .panel > .body.modes .mode p { max-width: none; }
+    .panel > .body.trouble { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 30px; }
+    .panel > .body.trouble > .step { border-bottom: none; }
+    .panel > .body.trouble > .step p { max-width: none; }
+  }
 </style>
 </head>
 <body>
@@ -400,7 +428,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
 
 <section class="panel">
   <header><span>Install</span><span class="right">3 steps + mesh</span></header>
-  <div class="body">
+  <div class="body steps3">
 
     <div class="step">
       <div class="n">1</div>
@@ -439,6 +467,8 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
       <p>Sets the node up over USB right after flashing so it boots straight into the ESP-NOW long-range mesh. <b>No filters are installed</b>: the node ships empty, and you add filters later from the OUI-SPY Mesh dashboard, live over the mesh.</p>
       <p class="hint" style="color:var(--muted);font-size:12px">Close the flasher dialog first so the serial port is free. Leave the board plugged in.</p>
 
+      <div class="meshcols">
+      <div class="meshleft">
       <form class="meshform" id="meshForm" autocomplete="off" onsubmit="return false">
         <div class="row">
           <label class="lbl">Role</label>
@@ -486,6 +516,28 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
         <details class="meshlog"><summary>Serial log</summary><pre id="meshLog"></pre></details>
       </form>
       <span class="unsupported" id="meshUnsupported" hidden>Mesh setup needs Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
+      </div>
+
+      <aside class="meshdash">
+        <h4>Then: run the dashboard</h4>
+        <p><b>OUI-SPY Mesh</b> is the control room for the fleet: a local web app you run on the computer the <b>home</b> node is plugged into. It puts every node on a live map, shows each detection the moment any node hears it and which node it is closest to, keeps a searchable history, and runs the fleet over the mesh: add or remove filters live, mute, identify, reboot, and update firmware over the air. It runs on your machine only: no cloud, no accounts.</p>
+        <a class="shot" href="https://github.com/colonelpanichacks/ouispy-detector/blob/main/docs/ouispy-mesh-dashboard.webp" target="_blank" rel="noopener"><img src="docs/ouispy-mesh-dashboard.webp" alt="OUI-SPY Mesh dashboard: live map of the mesh, detections and fleet" loading="lazy"></a>
+        <p class="runlbl">Python 3.9+. Plug the home node in over USB, then:</p>
+        <div class="os">Linux / macOS</div>
+<pre class="cmd">git clone https://github.com/colonelpanichacks/ouispy-detector
+cd ouispy-detector/home-dashboard
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python ouispymesh.py</pre>
+        <div class="os">Windows (PowerShell)</div>
+<pre class="cmd">git clone https://github.com/colonelpanichacks/ouispy-detector
+cd ouispy-detector\home-dashboard
+py -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python ouispymesh.py</pre>
+        <p>Open <span class="url">http://127.0.0.1:5077</span>. It finds the home node on USB by itself; the terminal also prints links for your phone on the same network. No hardware yet? Add <code>--demo</code> for a simulated fleet. Full guide: <a href="https://github.com/colonelpanichacks/ouispy-detector/tree/main/home-dashboard" target="_blank" rel="noopener">home-dashboard README</a>.</p>
+      </aside>
+      </div>
     </div>
 
   </div>
@@ -493,7 +545,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
 
 <section class="panel">
   <header><span>The Detector</span><span class="right">Dual Domain Edition</span></header>
-  <div class="body">
+  <div class="body modes">
 
     <div class="mode">
       <span class="tag">[ BLE ]</span>
