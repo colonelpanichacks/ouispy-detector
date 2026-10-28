@@ -71,7 +71,9 @@
   .banner {
     color: #00e7ff;
     text-shadow: 0 0 8px #00e7ff;
-    font-size: 10px;
+    /* The widest art line is ~105 monospace columns (0.6em each): size the
+       art to the screen so it never clips, up to its 10px desktop size. */
+    font-size: min(10px, calc((100vw - 28px) / 64));
     line-height: 1.05;
     white-space: pre;
     margin: 0 auto;
@@ -370,8 +372,27 @@
   @media (max-width: 520px) {
     .keyrow { flex-wrap: wrap; }
     .keyrow input { flex-basis: 100%; }
-    .banner { font-size: 5.5px; }
-    .subtitle { letter-spacing: 3px; font-size: 11px; }
+  }
+  /* ─── PHONES: readable text, full use of the width ─── */
+  @media (max-width: 640px) {
+    body { padding: 0 10px 36px; }
+    .terminal { margin: 0 -10px 20px; padding: 20px 10px 16px; }
+    .subtitle { letter-spacing: 2px; font-size: 10px; }
+    .panel { margin: 16px auto; }
+    .panel > header { padding: 9px 14px; letter-spacing: 2.5px; }
+    .panel > .body { padding: 14px 14px; }
+    .step { align-items: stretch; padding: 14px 0; }
+    .step .n { align-self: center; }
+    .step h3, .mode h3 { font-size: 13px; letter-spacing: 1.5px; }
+    .step p, .mode p, .meshdash p { text-align: left; font-size: 13.5px; line-height: 1.6; letter-spacing: 0; max-width: none; }
+    .mode { padding: 16px 0; text-align: left; }
+    .mode .tag { font-size: 12px; }
+    .creds { max-width: none; font-size: 12px; }
+    .meshform { gap: 12px; }
+    .meshdash { padding: 12px; }
+    .meshdash pre.cmd { font-size: 11px; padding: 8px; }
+    .mbtn.big { padding: 12px 14px; letter-spacing: 2px; font-size: 13px; width: 100%; }
+    .fineprint { padding: 0 6px; }
   }
 
   /* ─── WIDE LAYOUT: sections use the width on desktop ─── */
@@ -385,8 +406,8 @@
   .meshdash pre.cmd { margin: 0 0 6px; padding: 10px 12px; background: #050f08; border: 1px dashed var(--magenta); color: var(--white);
     font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre; }
   .meshdash .url { color: var(--green); }
-  .meshcols { width: 100%; display: grid; gap: 22px; margin-top: 6px; }
-  .meshleft { min-width: 0; }
+  .meshcols { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; margin-top: 6px; }
+  .meshleft, .meshdash { min-width: 0; }   /* long command lines scroll inside their block, not the page */
   @media (min-width: 980px) {
     .panel > .body.steps3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 26px; }
     .panel > .body.steps3 > .step { border-bottom: none; justify-content: flex-start; }
