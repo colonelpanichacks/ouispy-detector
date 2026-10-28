@@ -231,31 +231,64 @@ function renderNodes() {
     $("fleetCount").textContent = `${online} / ${nodes.length} online`;
     if (!nodes.length) {
         list.innerHTML = `<div class="empty">No nodes yet. Plug in the home node or start an MQTT feed.</div>`;
+        delete list.dataset.ids;
         return;
     }
     const perNode = (S.statsBase && S.statsBase.per_node) || {};
-    list.innerHTML = nodes.map((n) => {
+    // Stable cards: Home first, then by name, never reordered by status; every
+    // card has the same fixed columns (tabular digits), and an update patches
+    // the card in place instead of rebuilding the list.
+    const order = [...nodes].sort((a, b) => (b.is_home - a.is_home) ||
+        (a.alias || a.id).localeCompare(b.alias || b.id, undefined, { sensitivity: "base" }));
+    if (list.querySelector(".empty")) list.innerHTML = "";
+    const ids = order.map((n) => n.id).join(",");
+    if (list.dataset.ids !== ids) {
+        list.dataset.ids = ids;
+        const have = {};
+        list.querySelectorAll(".node").forEach((el) => { have[el.dataset.id] = el; });
+        for (const n of order) {
+            let el = have[n.id];
+            if (!el) {
+                el = document.createElement("div");
+                el.className = "node";
+                el.dataset.id = n.id;
+                el.onclick = () => selectNode(n.id, true);
+            }
+            list.appendChild(el);                 // moves existing cards into order
+            delete have[n.id];
+        }
+        Object.values(have).forEach((el) => el.remove());
+    }
+    for (const n of order) {
+        const el = list.querySelector(`.node[data-id="${CSS.escape(n.id)}"]`);
+        if (!el) continue;
         const st = nodeState(n);
         const role = n.is_home ? "home" : (n.role || "remote");
         const dc = perNode[n.id] ? perNode[n.id].count : 0;
-        return `<div class="node ${st === "offline" ? "offline" : ""} ${S.selected === n.id ? "sel" : ""} ${n.color != null ? "custom" : ""}" data-id="${esc(n.id)}" style="${n.color != null ? "--nc:" + nodeColor(n) : ""}">
+        const cls = `node ${st === "offline" ? "offline" : ""} ${S.selected === n.id ? "sel" : ""} ${n.color != null ? "custom" : ""}`
+            + (el.classList.contains("hit") ? " hit" : "");
+        if (el.className !== cls) el.className = cls;
+        const style = n.color != null ? "--nc:" + nodeColor(n) : "";
+        if ((el.getAttribute("style") || "") !== style) el.setAttribute("style", style);
+        const html = `
             <div class="node-top">
                 <span class="dot ${st === "online" ? "on" : st === "stale" ? "warn" : ""}"></span>
                 <span class="node-name">${esc(n.alias || n.id)}</span>
                 ${n.alias ? `<span class="node-id">${esc(n.id)}</span>` : ""}
+                <span class="node-tags">
+                    ${n.cfg && n.cfg.buzzer === 0 ? `<span class="ntag muted" title="Buzzer muted">MUTED</span>` : ""}
+                    ${syncState(n) === "drift" ? `<span class="ntag drift" title="Filter list differs from the home node">DRIFT</span>` : ""}
+                </span>
                 <span class="role ${role}">${role}</span>
             </div>
             <div class="node-meta">
-                <span>${n.is_home ? "" : bars(n.rssi)}${n.is_home ? "local" : n.rssi ? `<b>${n.rssi}</b> dBm` : "no rssi"}</span>
-                <span data-age="${n.last_seen || 0}">${st === "offline" ? "last " : ""}${ago(n.last_seen)}</span>
-                ${n.is_home ? "" : `<span><b>${n.pkts || 0}</b> pkts</span>`}
-                <span><b>${dc}</b> det</span>
-                ${n.cfg && n.cfg.buzzer === 0 ? `<span class="ntag muted" title="Buzzer muted">MUTED</span>` : ""}
-                ${syncState(n) === "drift" ? `<span class="ntag drift" title="Filter list differs from the home node">DRIFT</span>` : ""}
-            </div>
-        </div>`;
-    }).join("");
-    list.querySelectorAll(".node").forEach((el) => el.onclick = () => selectNode(el.dataset.id, true));
+                <span class="nm-sig">${n.is_home ? `<span class="nm-usb">USB</span>` : `${bars(n.rssi)}${n.rssi ? `<b>${n.rssi}</b>` : "<b>-</b>"}<i>dBm</i>`}</span>
+                <span class="nm-age" data-age="${n.last_seen || 0}">${st === "offline" ? "last " : ""}${ago(n.last_seen)}</span>
+                <span class="nm-pkt">${n.is_home ? "<b>-</b>" : `<b>${n.pkts || 0}</b>`}<i>pkts</i></span>
+                <span class="nm-det"><b>${dc}</b><i>det</i></span>
+            </div>`;
+        if (el._html !== html) { el._html = html; el.innerHTML = html; }
+    }
 
     const sel = $("hNode");
     const cur = sel.value;

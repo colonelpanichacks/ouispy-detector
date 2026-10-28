@@ -804,3 +804,20 @@ body.map-maxed .toasts { z-index: 1700; }
     .dock-grip::after { content: ""; position: absolute; left: 15px; right: 15px; top: 4px; height: 3px; border-radius: 2px; background: var(--line-strong); }
     .dock-grip:hover::after { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 }
+
+/* Node cards: one fixed shape for every node, so live numbers never reflow them. */
+.node:hover { transform: none; }
+.node-top { height: 20px; }
+.node-tags { margin-left: auto; display: inline-flex; gap: 4px; }
+.node-tags + .role { margin-left: 6px; }
+.node-tags:empty + .role { margin-left: auto; }
+.node-tags .ntag { font-size: 9px; padding: 0 5px; line-height: 15px; }
+.node-meta { display: grid; grid-template-columns: 92px 56px minmax(0, 1fr) 64px; gap: 8px; flex-wrap: nowrap;
+    align-items: baseline; height: 16px; overflow: hidden; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.node-meta i { font-style: normal; color: var(--faint); margin-left: 4px; }
+.node-meta b { color: var(--soft); font-weight: 600; }
+.nm-usb { color: var(--pink); letter-spacing: 1px; }
+.nm-det { text-align: right; }
+
+/* The sticky top bar stays above Leaflet controls (z 1000) when the page scrolls. */
+.topbar { z-index: 1200; }
