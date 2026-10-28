@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_ota_ops.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
@@ -308,7 +309,9 @@ static void apForcePlainProtocol() {
 }
 
 static bool remoteConsoleCommand(const String& line);   // remote management, below
-static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig);
+// Filters a node holds (every preset in the library is ~160 rows).
+#define FILTER_MAX 250
+static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig, bool withDesc = true);
 
 // Fleet command issued from the console, so its ack count can be reported
 // once remotes have had time to answer (0 = none outstanding).
@@ -988,71 +991,126 @@ void ascendingBeeps() {
 // ================================
 // Configuration Storage Functions
 // ================================
+// Filters live in NVS as ONE blob in the mesh wire format (type, flags,
+// idLen, descLen, id, desc per record): ~40 bytes a filter. The old layout
+// spent four keys (~6 NVS entries, ~190 bytes) per filter and never erased
+// a shrunk list's leftovers, so the 20 KB partition filled up around 80-100
+// filters. Legacy keys are read once, converted, and erased.
+static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countOut);
+static TargetFilter filterFromRecord(const uint8_t* buf, uint16_t& off);
+#define FILTER_BLOB_KEY "fblob"
+// A freshly updated image is on probation until it confirms itself (see
+// otaRollbackTick); if it fails, the bootloader rolls back to the previous
+// build, which only reads the old per-filter keys. So those keys are kept
+// until this image is confirmed: a rollback never comes up with no filters.
+static bool imageOnProbation() {
+    const esp_partition_t* run = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    return run && esp_ota_get_state_partition(run, &st) == ESP_OK && st == ESP_OTA_IMG_PENDING_VERIFY;
+}
+static void eraseLegacyFilterKeys(int upto) {
+    for (int i = 0; i < upto; i++) {
+        String n = String(i);
+        preferences.remove(("id_" + n).c_str());
+        preferences.remove(("mac_" + n).c_str());
+        preferences.remove(("desc_" + n).c_str());
+        preferences.remove(("type_" + n).c_str());
+    }
+}
+
+// The old layout, written only as the rollback copy while an image is on
+// probation (and only when it fits: the old firmware read at most 100).
+static void writeLegacyFilterKeys() {
+    if (targetFilters.size() > 100) return;
+    for (size_t i = 0; i < targetFilters.size(); i++) {
+        String n = String(i);
+        preferences.putString(("id_" + n).c_str(), targetFilters[i].identifier);
+        preferences.putBool(("mac_" + n).c_str(), targetFilters[i].isFullMAC);
+        preferences.putString(("desc_" + n).c_str(), targetFilters[i].description);
+        preferences.putUChar(("type_" + n).c_str(), (uint8_t)targetFilters[i].type);
+    }
+    preferences.putInt("filterCount", targetFilters.size());
+}
+
 void saveConfiguration() {
     preferences.begin("ouispy", false);
-    preferences.putInt("filterCount", targetFilters.size());
     preferences.putBool("buzzerEnabled", buzzerEnabled);
     preferences.putBool("ledEnabled", ledEnabled);
-    
-    for (int i = 0; i < targetFilters.size(); i++) {
-        String keyId   = "id_"   + String(i);
-        String keyMAC  = "mac_"  + String(i);
-        String keyDesc = "desc_" + String(i);
-        String keyType = "type_" + String(i);
 
-        preferences.putString(keyId.c_str(),   targetFilters[i].identifier);
-        preferences.putBool  (keyMAC.c_str(),  targetFilters[i].isFullMAC);
-        preferences.putString(keyDesc.c_str(), targetFilters[i].description);
-        preferences.putUChar (keyType.c_str(), (uint8_t)targetFilters[i].type);
+    const uint16_t cap = FILTER_MAX * (4 + 16 + 48);
+    uint8_t* buf = (uint8_t*)malloc(cap);
+    bool saved = false;
+    if (buf) {
+        bool tooBig;
+        uint16_t n = serializeFilters(buf, cap, tooBig);
+        int legacy = preferences.getInt("filterCount", 0);
+        saved = preferences.putBytes(FILTER_BLOB_KEY, buf, n) == n || (n == 0 && preferences.isKey(FILTER_BLOB_KEY));
+        if (!saved && legacy > 0 && !imageOnProbation()) {
+            // NVS full of old per-filter keys: clear them and try again.
+            eraseLegacyFilterKeys(max(legacy, 100));
+            preferences.remove("filterCount");
+            saved = preferences.putBytes(FILTER_BLOB_KEY, buf, n) == n;
+        }
+        if (saved && legacy > 0 && !imageOnProbation()) {
+            eraseLegacyFilterKeys(max(legacy, 100));
+            preferences.remove("filterCount");
+        }
+        free(buf);
     }
-    
     preferences.end();
-    
+
     if (isSerialConnected()) {
-        Serial.println("Configuration saved to NVS");
+        Serial.println(saved ? "Configuration saved to NVS" : "[NVS] could not save the filter list (NVS full?)");
     }
 }
 
 void loadConfiguration() {
     preferences.begin("ouispy", true);
-    int filterCount = preferences.getInt("filterCount", 0);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
-    
     targetFilters.clear();
-    
-    // Load saved filters (no defaults - start empty)
-    if (filterCount > 0) {
-        for (int i = 0; i < filterCount; i++) {
-            String keyId   = "id_"   + String(i);
-            String keyMAC  = "mac_"  + String(i);
-            String keyDesc = "desc_" + String(i);
-            String keyType = "type_" + String(i);
 
-            TargetFilter filter;
-            filter.identifier  = preferences.getString(keyId.c_str(), "");
-            filter.isFullMAC   = preferences.getBool  (keyMAC.c_str(), false);
-            filter.description = preferences.getString(keyDesc.c_str(), "");
-
-            // Legacy compat: if `type_i` is missing (255 sentinel), derive
-            // from the old boolean — old configs are all MAC-based.
-            uint8_t rawType = preferences.getUChar(keyType.c_str(), 0xFF);
-            if (rawType == 0xFF) {
-                filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
-            } else if (rawType <= FT_WIFI_BEACON) {
-                filter.type = (FilterType)rawType;
-            } else {
-                filter.type = FT_MAC_PREFIX;  // corrupt value, fail safe
+    size_t blobLen = preferences.isKey(FILTER_BLOB_KEY) ? preferences.getBytesLength(FILTER_BLOB_KEY) : 0;
+    bool migrate = false;
+    if (blobLen > 0) {
+        uint8_t* buf = (uint8_t*)malloc(blobLen);
+        if (buf) {
+            preferences.getBytes(FILTER_BLOB_KEY, buf, blobLen);
+            uint8_t count = 0;
+            if (filterRecordsValid(buf, blobLen, count)) {
+                uint16_t off = 0;
+                for (uint8_t i = 0; i < count; i++) targetFilters.push_back(filterFromRecord(buf, off));
             }
-
-            if (filter.identifier.length() > 0) {
-                targetFilters.push_back(filter);
-            }
+            free(buf);
         }
+    } else {
+        // Legacy layout: four keys per filter.
+        int filterCount = preferences.getInt("filterCount", 0);
+        for (int i = 0; i < filterCount; i++) {
+            String n = String(i);
+            TargetFilter filter;
+            filter.identifier  = preferences.getString(("id_" + n).c_str(), "");
+            filter.isFullMAC   = preferences.getBool  (("mac_" + n).c_str(), false);
+            filter.description = preferences.getString(("desc_" + n).c_str(), "");
+            // If `type_i` is missing (255 sentinel), derive from the old
+            // boolean: old configs are all MAC-based.
+            uint8_t rawType = preferences.getUChar(("type_" + n).c_str(), 0xFF);
+            if (rawType == 0xFF)               filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
+            else if (rawType <= FT_WIFI_BEACON) filter.type = (FilterType)rawType;
+            else                                filter.type = FT_MAC_PREFIX;   // corrupt value, fail safe
+            if (filter.identifier.length() > 0) targetFilters.push_back(filter);
+        }
+        migrate = filterCount > 0;
     }
-    // No default values - form starts empty (placeholder examples remain in HTML)
-    
     preferences.end();
+    if (migrate) saveConfiguration();   // converts to the blob (old keys go once confirmed)
+    else if (blobLen > 0 && imageOnProbation()) {
+        // Fresh update reading the blob, and no old-layout copy left: write
+        // one, so a rollback to the previous build still has the filters.
+        preferences.begin("ouispy", false);
+        if (!preferences.isKey("filterCount")) writeLegacyFilterKeys();
+        preferences.end();
+    }
 }
 
 void loadWiFiCredentials() {
@@ -1229,7 +1287,7 @@ static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countO
     uint16_t off = 0;
     uint8_t count = 0;
     while (off < len) {
-        if (off + 4 > len || count >= 100) return false;
+        if (off + 4 > len || count >= FILTER_MAX) return false;
         uint8_t type = buf[off], idLen = buf[off + 2], descLen = buf[off + 3];
         off += 4;
         if (type > FT_WIFI_BEACON || idLen == 0 || idLen > 16 || descLen > 48 ||
@@ -1304,7 +1362,7 @@ static int filtersEditLive(LiveFilterOp op, const uint8_t* buf, uint16_t len, in
                 it->description = r.description;
                 changed++;
             }
-        } else if (next.size() < 100) {
+        } else if (next.size() < FILTER_MAX) {
             next.push_back(r);
             changed++;
         }
@@ -1575,12 +1633,12 @@ static void put32(uint8_t* d, uint8_t& n, uint32_t v) { memcpy(d + n, &v, 4); n 
 static uint16_t get16(const uint8_t* d) { uint16_t v; memcpy(&v, d, 2); return v; }
 static uint32_t get32(const uint8_t* d) { uint32_t v; memcpy(&v, d, 4); return v; }
 
-static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig) {
+static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig, bool withDesc) {
     uint16_t n = 0;
     tooBig = false;
     for (const TargetFilter& f : targetFilters) {
         uint8_t idLen = f.identifier.length();
-        uint8_t descLen = min((int)f.description.length(), 48);
+        uint8_t descLen = withDesc ? min((int)f.description.length(), 48) : 0;
         if (idLen == 0 || idLen > 16) continue;
         if (n + 4 + idLen + descLen > cap) { tooBig = true; break; }
         buf[n++] = (uint8_t)f.type;
@@ -1595,13 +1653,23 @@ static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig) {
 
 // CRC32 of the serialized list: equal CRCs = identical filter sets, so the
 // dashboard can tell at a glance which nodes drifted from the home.
+// Computed record by record over the WHOLE list (a 4 KB buffer used to cut
+// long lists short, so the CRC stopped matching the dashboard's).
 static uint32_t filtersCrc() {
-    uint8_t* buf = (uint8_t*)malloc(4096);
-    if (!buf) return 0;
-    bool tooBig;
-    uint16_t n = serializeFilters(buf, 4096, tooBig);
-    uint32_t crc = crc32_le(0, buf, n);
-    free(buf);
+    uint32_t crc = 0;
+    uint8_t rec[4 + 16 + 48];
+    for (const TargetFilter& f : targetFilters) {
+        uint8_t idLen = f.identifier.length();
+        uint8_t descLen = min((int)f.description.length(), 48);
+        if (idLen == 0 || idLen > 16) continue;
+        rec[0] = (uint8_t)f.type;
+        rec[1] = f.isFullMAC ? 1 : 0;
+        rec[2] = idLen;
+        rec[3] = descLen;
+        memcpy(rec + 4, f.identifier.c_str(), idLen);
+        memcpy(rec + 4 + idLen, f.description.c_str(), descLen);
+        crc = crc32_le(crc, rec, 4 + idLen + descLen);
+    }
     return crc;
 }
 
@@ -1633,7 +1701,17 @@ static uint8_t buildStatus(uint8_t* d) {
     put32(d, n, acked);
     put32(d, n, expired);
     memset(d + n, 0, 16);
-    strncpy((char*)d + n, FW_BUILD, 15);
+    // Compact build stamp, "Oct27 21:21:25": the full "Oct 27 2026 21:21:25"
+    // was cut to 15 chars, so every build within an hour looked the same.
+    {
+        const char* dt = __DATE__;   // "Oct 27 2026" (day space-padded below 10)
+        const char* tm = __TIME__;   // "21:21:25"
+        char* o = (char*)d + n;
+        o[0] = dt[0]; o[1] = dt[1]; o[2] = dt[2];
+        o[3] = dt[4] == ' ' ? '0' : dt[4]; o[4] = dt[5];
+        o[5] = ' ';
+        memcpy(o + 6, tm, 8);
+    }
     n += 16;
     keyFingerprint(d + n);   // 0000 when no key: lets the dashboard check keys match
     n += 4;
@@ -1793,6 +1871,9 @@ static void remoteMgmtTick() {
             selfIdBytes(buf);
             bool tooBig;
             uint16_t n = 3 + serializeFilters(buf + 3, 4093, tooBig);
+            // A long list doesn't fit one mesh transfer with its descriptions:
+            // send type + identifier only (the dashboard knows the names).
+            if (tooBig) n = 3 + serializeFilters(buf + 3, 4093, tooBig, false);
             // Busy with another transfer: try again in a second, for up to
             // 30 s (a list too big to send at all never gets through).
             static uint8_t tries = 0;
@@ -1910,10 +1991,11 @@ static bool remoteConsoleCommand(const String& line) {
         return true;
     }
     if (verb == "filters") {
-        uint8_t* buf = (uint8_t*)malloc(4096);
+        const uint16_t cap = FILTER_MAX * (4 + 16 + 48);
+        uint8_t* buf = (uint8_t*)malloc(cap);
         if (!buf) { Serial.println("ERR out of memory"); return true; }
         bool tooBig;
-        uint16_t n = serializeFilters(buf, 4096, tooBig);
+        uint16_t n = serializeFilters(buf, cap, tooBig);
         printFilterReport(selfHex, buf, n);
         free(buf);
         return true;
@@ -2095,7 +2177,7 @@ static bool remoteConsoleCommand(const String& line) {
 // those filters change. The promiscuous callback checks the frame's source OUI
 // against this table before doing the full filter match — saving CPU on the
 // common case (99.9% of frames don't match).
-static const int WIFI_OUI_TABLE_SIZE = 16;  // max entries
+static const int WIFI_OUI_TABLE_SIZE = 256;  // max entries (16 silently dropped every WiFi OUI past the 16th)
 static uint8_t wifiOuiTable[WIFI_OUI_TABLE_SIZE][3];
 static int wifiOuiTableCount = 0;
 
@@ -6325,6 +6407,20 @@ void loop() {
     checkBootButtonLoop();   // BOOT hold -> clear lock, back to config mode
     meshOtaTick();
     otaRollbackTick();
+    // Once this image is confirmed, drop the old-layout filter keys that were
+    // kept as the rollback's copy (the blob is the list from now on).
+    static bool legacySwept = false;
+    if (!legacySwept && !imageOnProbation()) {
+        legacySwept = true;
+        preferences.begin("ouispy", false);
+        int legacy = preferences.getInt("filterCount", -1);
+        if (legacy >= 0 && preferences.isKey(FILTER_BLOB_KEY)) {
+            eraseLegacyFilterKeys(max(legacy, 100));
+            preferences.remove("filterCount");
+            if (isSerialConnected()) Serial.println("[NVS] old filter keys removed (firmware confirmed)");
+        }
+        preferences.end();
+    }
     static unsigned long lastCleanupTime = 0;
     static unsigned long lastStatusTime = 0;
     unsigned long currentMillis = millis();
