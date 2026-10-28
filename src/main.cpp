@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <esp_ota_ops.h>
+#include <nvs.h>
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
@@ -1018,18 +1019,40 @@ static void eraseLegacyFilterKeys(int upto) {
     }
 }
 
-// The old layout, written only as the rollback copy while an image is on
-// probation (and only when it fits: the old firmware read at most 100).
-static void writeLegacyFilterKeys() {
-    if (targetFilters.size() > 100) return;
-    for (size_t i = 0; i < targetFilters.size(); i++) {
-        String n = String(i);
-        preferences.putString(("id_" + n).c_str(), targetFilters[i].identifier);
-        preferences.putBool(("mac_" + n).c_str(), targetFilters[i].isFullMAC);
-        preferences.putString(("desc_" + n).c_str(), targetFilters[i].description);
-        preferences.putUChar(("type_" + n).c_str(), (uint8_t)targetFilters[i].type);
-    }
-    preferences.putInt("filterCount", targetFilters.size());
+// Filter list storage: a file on LittleFS (/filters.bin, written to a temp
+// file and renamed, so a power cut never leaves half a list). NVS is 20 KB
+// and shared with the mesh boot/sequence counters: a 160-filter blob there
+// (6.5 KB, plus room to rewrite it) filled it, later writes failed silently,
+// a node rebooted with an old list and a stuck boot counter (every frame then
+// read as a replay). NVS keeps only small settings; while a new image is on
+// probation it also keeps the blob, as what a rollback build reads.
+#define FILTER_FILE "/filters.bin"
+#define FILTER_TMP  "/filters.tmp"
+static bool filterFsReady();
+static bool writeFilterFile(const uint8_t* buf, uint16_t n) {
+    if (!filterFsReady()) return false;
+    File f = LittleFS.open(FILTER_TMP, "w");
+    if (!f) return false;
+    size_t w = f.write(buf, n);
+    f.close();
+    if (w != n) { LittleFS.remove(FILTER_TMP); return false; }
+    LittleFS.remove(FILTER_FILE);
+    return LittleFS.rename(FILTER_TMP, FILTER_FILE);
+}
+// Reads the file into a malloc'd buffer (caller frees); 0 = none.
+static size_t readFilterFile(uint8_t** out) {
+    *out = nullptr;
+    if (!filterFsReady() || !LittleFS.exists(FILTER_FILE)) return 0;
+    File f = LittleFS.open(FILTER_FILE, "r");
+    if (!f) return 0;
+    size_t n = f.size();
+    if (n == 0 || n > FILTER_MAX * (4 + 16 + 48)) { f.close(); return 0; }
+    *out = (uint8_t*)malloc(n);
+    if (!*out) { f.close(); return 0; }
+    size_t r = f.read(*out, n);
+    f.close();
+    if (r != n) { free(*out); *out = nullptr; return 0; }
+    return n;
 }
 
 void saveConfiguration() {
@@ -1043,24 +1066,26 @@ void saveConfiguration() {
     if (buf) {
         bool tooBig;
         uint16_t n = serializeFilters(buf, cap, tooBig);
-        int legacy = preferences.getInt("filterCount", 0);
-        saved = preferences.putBytes(FILTER_BLOB_KEY, buf, n) == n || (n == 0 && preferences.isKey(FILTER_BLOB_KEY));
-        if (!saved && legacy > 0 && !imageOnProbation()) {
-            // NVS full of old per-filter keys: clear them and try again.
-            eraseLegacyFilterKeys(max(legacy, 100));
-            preferences.remove("filterCount");
-            saved = preferences.putBytes(FILTER_BLOB_KEY, buf, n) == n;
-        }
-        if (saved && legacy > 0 && !imageOnProbation()) {
-            eraseLegacyFilterKeys(max(legacy, 100));
-            preferences.remove("filterCount");
+        saved = writeFilterFile(buf, n);
+        bool probation = imageOnProbation();
+        if (!saved || probation) {
+            // No file system (fallback), or the rollback build's copy. The
+            // copy only goes in with room to spare: the mesh boot/sequence
+            // counters must always find free entries (each entry is 32 B).
+            nvs_stats_t st;
+            bool room = nvs_get_stats(NULL, &st) == ESP_OK && st.free_entries > (size_t)(n / 32 + 64);
+            bool nvsOk = room && preferences.putBytes(FILTER_BLOB_KEY, buf, n) == n;
+            if (!room && saved) preferences.remove(FILTER_BLOB_KEY);   // a stale, oversized copy only crowds NVS
+            saved = saved || nvsOk;
+        } else {
+            preferences.remove(FILTER_BLOB_KEY);     // the file is the list now
         }
         free(buf);
     }
     preferences.end();
 
     if (isSerialConnected()) {
-        Serial.println(saved ? "Configuration saved to NVS" : "[NVS] could not save the filter list (NVS full?)");
+        Serial.println(saved ? "Configuration saved" : "[CFG] could not save the filter list (file system and NVS both failed)");
     }
 }
 
@@ -1070,21 +1095,29 @@ void loadConfiguration() {
     ledEnabled = preferences.getBool("ledEnabled", true);
     targetFilters.clear();
 
-    size_t blobLen = preferences.isKey(FILTER_BLOB_KEY) ? preferences.getBytesLength(FILTER_BLOB_KEY) : 0;
+    auto loadRecords = [](const uint8_t* buf, size_t len) {
+        uint8_t count = 0;
+        if (!filterRecordsValid(buf, len, count)) return false;
+        uint16_t off = 0;
+        for (uint8_t i = 0; i < count; i++) targetFilters.push_back(filterFromRecord(buf, off));
+        return true;
+    };
     bool migrate = false;
-    if (blobLen > 0) {
+    uint8_t* fbuf = nullptr;
+    size_t flen = readFilterFile(&fbuf);
+    if (flen && loadRecords(fbuf, flen)) {
+        // the file is the list
+    } else if (preferences.isKey(FILTER_BLOB_KEY) && preferences.getBytesLength(FILTER_BLOB_KEY) > 0) {
+        size_t blobLen = preferences.getBytesLength(FILTER_BLOB_KEY);
         uint8_t* buf = (uint8_t*)malloc(blobLen);
         if (buf) {
             preferences.getBytes(FILTER_BLOB_KEY, buf, blobLen);
-            uint8_t count = 0;
-            if (filterRecordsValid(buf, blobLen, count)) {
-                uint16_t off = 0;
-                for (uint8_t i = 0; i < count; i++) targetFilters.push_back(filterFromRecord(buf, off));
-            }
+            loadRecords(buf, blobLen);
             free(buf);
         }
+        migrate = true;                      // NVS blob -> file
     } else {
-        // Legacy layout: four keys per filter.
+        // Oldest layout: four keys per filter.
         int filterCount = preferences.getInt("filterCount", 0);
         for (int i = 0; i < filterCount; i++) {
             String n = String(i);
@@ -1092,8 +1125,6 @@ void loadConfiguration() {
             filter.identifier  = preferences.getString(("id_" + n).c_str(), "");
             filter.isFullMAC   = preferences.getBool  (("mac_" + n).c_str(), false);
             filter.description = preferences.getString(("desc_" + n).c_str(), "");
-            // If `type_i` is missing (255 sentinel), derive from the old
-            // boolean: old configs are all MAC-based.
             uint8_t rawType = preferences.getUChar(("type_" + n).c_str(), 0xFF);
             if (rawType == 0xFF)               filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
             else if (rawType <= FT_WIFI_BEACON) filter.type = (FilterType)rawType;
@@ -1102,15 +1133,9 @@ void loadConfiguration() {
         }
         migrate = filterCount > 0;
     }
+    if (fbuf) free(fbuf);
     preferences.end();
-    if (migrate) saveConfiguration();   // converts to the blob (old keys go once confirmed)
-    else if (blobLen > 0 && imageOnProbation()) {
-        // Fresh update reading the blob, and no old-layout copy left: write
-        // one, so a rollback to the previous build still has the filters.
-        preferences.begin("ouispy", false);
-        if (!preferences.isKey("filterCount")) writeLegacyFilterKeys();
-        preferences.end();
-    }
+    if (migrate) saveConfiguration();   // to the file (NVS copies go once confirmed)
 }
 
 void loadWiFiCredentials() {
@@ -1704,13 +1729,15 @@ static uint8_t buildStatus(uint8_t* d) {
     // Compact build stamp, "Oct27 21:21:25": the full "Oct 27 2026 21:21:25"
     // was cut to 15 chars, so every build within an hour looked the same.
     {
-        const char* dt = __DATE__;   // "Oct 27 2026" (day space-padded below 10)
-        const char* tm = __TIME__;   // "21:21:25"
+        // From FW_BUILD itself ("Oct 27 2026 21:21:25", day space-padded
+        // below 10), which also keeps that full stamp in the image, where
+        // the dashboard reads an uploaded build's version.
+        const char* b = FW_BUILD;
         char* o = (char*)d + n;
-        o[0] = dt[0]; o[1] = dt[1]; o[2] = dt[2];
-        o[3] = dt[4] == ' ' ? '0' : dt[4]; o[4] = dt[5];
+        o[0] = b[0]; o[1] = b[1]; o[2] = b[2];
+        o[3] = b[4] == ' ' ? '0' : b[4]; o[4] = b[5];
         o[5] = ' ';
-        memcpy(o + 6, tm, 8);
+        memcpy(o + 6, b + 12, 8);
     }
     n += 16;
     keyFingerprint(d + n);   // 0000 when no key: lets the dashboard check keys match
@@ -3221,6 +3248,8 @@ static const size_t SESSION_JSON_BYTES  = 48 * 1024;
 static bool sessionFSReady = false;
 volatile bool sessionDirty = false;   // set by registerDetection, drained in loop()
 
+static void ensureSessionFS();
+static bool filterFsReady() { ensureSessionFS(); return sessionFSReady; }
 static void ensureSessionFS() {
     if (sessionFSReady) return;
     if (LittleFS.begin(true)) {       // format on failure
@@ -6359,6 +6388,13 @@ static String jsonEsc(const String& in) {
     return out;
 }
 
+// Free NVS entries (32 bytes each): small settings only live there now; the
+// dashboard warns when it runs low, before writes start failing silently.
+static unsigned nvsFreeEntries() {
+    nvs_stats_t st;
+    return nvs_get_stats(NULL, &st) == ESP_OK ? (unsigned)st.free_entries : 0;
+}
+
 static void emitTelemetry() {
     if (!isSerialConnected()) return;
     uint32_t rxAll=0, rxQ=0, rxDup=0, rxSelf=0, rxBad=0, txS=0, txF=0, txC=0;
@@ -6383,7 +6419,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -6400,7 +6436,7 @@ static void emitTelemetry() {
                   (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend,
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
                   encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
-                  (unsigned long)eDropReplay, stray.c_str(), nodes.c_str());
+                  (unsigned long)eDropReplay, nvsFreeEntries(), stray.c_str(), nodes.c_str());
 }
 
 void loop() {
@@ -6414,10 +6450,15 @@ void loop() {
         legacySwept = true;
         preferences.begin("ouispy", false);
         int legacy = preferences.getInt("filterCount", -1);
-        if (legacy >= 0 && preferences.isKey(FILTER_BLOB_KEY)) {
+        bool haveFile = filterFsReady() && LittleFS.exists(FILTER_FILE);
+        if (legacy >= 0 && (haveFile || preferences.isKey(FILTER_BLOB_KEY))) {
             eraseLegacyFilterKeys(max(legacy, 100));
             preferences.remove("filterCount");
             if (isSerialConnected()) Serial.println("[NVS] old filter keys removed (firmware confirmed)");
+        }
+        if (haveFile && preferences.isKey(FILTER_BLOB_KEY)) {
+            preferences.remove(FILTER_BLOB_KEY);   // the rollback copy, no longer needed
+            if (isSerialConnected()) Serial.println("[NVS] filter blob moved to the file system (firmware confirmed)");
         }
         preferences.end();
     }

@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include <LittleFS.h>
 #include "mesh_ota.h"
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -407,12 +408,33 @@ void mesh_loadConfig() {
     p.end();
     // Encryption nonce epoch: counts up every boot (and is saved first), so
     // (boot, frame counter) never repeats even though the counter restarts.
+    // It is half of every AES-GCM nonce: it MUST move forward on every boot.
+    // It is kept in NVS and mirrored in a LittleFS file; the boot value is
+    // the larger of the two plus one, written to both, so a full NVS (a big
+    // filter list once filled it: boots reused the counter, every frame read
+    // as a replay and nonces repeated) can no longer stall it.
     {
         Preferences w;
         w.begin("ouispy", false);
-        encBoot = (uint16_t)(w.getUShort("mk_boot", (uint16_t)(esp_random() & 0x7FFF)) + 1);
-        w.putUShort("mk_boot", encBoot);
+        bool haveNvs = w.isKey("mk_boot");
+        uint16_t nv = w.getUShort("mk_boot", 0);
+        uint16_t fv = 0;
+        bool haveFile = false;
+        if (LittleFS.begin(true)) {
+            File f = LittleFS.open("/mk_boot", "r");
+            if (f) { haveFile = f.read((uint8_t*)&fv, 2) == 2; f.close(); }
+        }
+        uint16_t base = (!haveNvs && !haveFile) ? (uint16_t)(esp_random() & 0x7FFF)
+                      : (!haveFile ? nv : !haveNvs ? fv : ((int16_t)(fv - nv) > 0 ? fv : nv));
+        encBoot = (uint16_t)(base + 1);
+        bool okNvs = w.putUShort("mk_boot", encBoot) == 2;
         w.end();
+        bool okFile = false;
+        File f = LittleFS.open("/mk_boot", "w");
+        if (f) { okFile = f.write((const uint8_t*)&encBoot, 2) == 2; f.close(); }
+        if (!okNvs && !okFile && isSerialConnected()) {
+            Serial.println("[MESH] WARNING: boot counter could not be saved anywhere (NVS and file system)");
+        }
         encCtr = 0;
     }
     encSetup();
