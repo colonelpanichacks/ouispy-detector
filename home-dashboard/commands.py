@@ -157,6 +157,18 @@ class Commander(threading.Thread):
     # public
     # ------------------------------------------------------------------
     def submit(self, op, target, args=None, auto=False):
+        # A list bigger than one transfer goes out in parts: a replace sends
+        # its first part as the replace and the rest as adds; adds and
+        # removes are simply batched. Each part is its own job, in order.
+        if op in ("filters_set", "filters_add", "filters_del") and (args or {}).get("filters"):
+            try:
+                parts = flt.split_for_transfer(args["filters"])
+            except flt.FilterError as e:
+                raise PlanError(str(e))
+            if len(parts) > 1:
+                jobs = [self.submit(op if i == 0 or op != "filters_set" else "filters_add", target,
+                                    {**args, "filters": part}, auto) for i, part in enumerate(parts)]
+                return jobs[-1]
         home = self.fleet.home_id
         lines, expect, label = plan(op, target, args, home)
         if not self.get_sender():

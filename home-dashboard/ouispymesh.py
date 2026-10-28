@@ -467,6 +467,14 @@ def api_clear():
     return jsonify({"ok": True, "n": n})
 
 
+@app.route("/api/metrics")
+def api_metrics():
+    rng = max(300, min(90 * 86400, int(request.args.get("range") or 86400)))
+    until = time.time()
+    return jsonify(store.metrics(until - rng, until, request.args.get("node") or None,
+                                 request.args.get("dom") or None))
+
+
 @app.route("/api/stats")
 def api_stats():
     return jsonify({**store.detection_stats(), "hourly": store.hourly()})

@@ -114,6 +114,7 @@
             <button class="tab active" data-tab="history">History</button>
             <button class="tab" data-tab="devices">Devices</button>
             <button class="tab" data-tab="fleetctl">Fleet Control</button>
+            <button class="tab" data-tab="metrics">Metrics</button>
             <button class="tab" data-tab="console">Console</button>
             <button class="tab" data-tab="settings">Settings</button>
             <button class="dock-toggle" id="dockToggle" type="button" title="Collapse or expand this panel"><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -258,6 +259,29 @@
                 <label class="toggle-item" style="margin:0 0 0 auto"><input type="checkbox" id="fAuto"><span class="toggle-label">Show automatic reads</span></label>
             </div>
             <div class="jobs" id="fJobs"></div>
+        </div>
+
+        <div class="tab-body" id="tab-metrics">
+            <div class="mx-bar">
+                <div class="mx-seg" id="mxRange">
+                    <button data-r="3600">1 h</button><button data-r="21600">6 h</button><button data-r="86400" class="on">24 h</button>
+                    <button data-r="604800">7 d</button><button data-r="2592000">30 d</button>
+                </div>
+                <select id="mxNode" class="field"><option value="">All nodes</option></select>
+                <select id="mxDom" class="field"><option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option></select>
+                <span class="mx-upd" id="mxUpd"></span>
+            </div>
+            <div class="mx-kpis" id="mxKpis"></div>
+            <div class="mx-grid">
+                <div class="fa mx-wide"><h4><span>Detections over time</span><span class="fa-count" id="mxBucket"></span></h4><div class="mx-legend" id="mxLegend"></div><div class="mx-chart" id="mxArea"></div></div>
+                <div class="fa"><h4><span>Unique devices over time</span></h4><div class="mx-chart" id="mxUnique"></div></div>
+                <div class="fa"><h4><span>Top vendors</span></h4><div id="mxVendors"></div></div>
+                <div class="fa"><h4><span>By node</span></h4><div id="mxNodes"></div></div>
+                <div class="fa"><h4><span>By signature type</span></h4><div id="mxTypes"></div></div>
+                <div class="fa mx-wide"><h4><span>Activity by weekday and hour</span><span class="fa-count">local time</span></h4><div class="mx-chart" id="mxHeat"></div></div>
+                <div class="fa"><h4><span>Signal strength</span><span class="fa-count">detections per 5 dB</span></h4><div class="mx-chart" id="mxRssi"></div></div>
+            </div>
+            <div class="mx-tip" id="mxTip" hidden></div>
         </div>
 
         <div class="tab-body" id="tab-console">
@@ -442,7 +466,7 @@
     <div class="drawer-body">
         <label>Alias</label>
         <div class="alias-row">
-            <input type="text" id="vAlias" class="field" maxlength="40" placeholder="e.g. Unit 12 body cam">
+            <input type="text" id="vAlias" class="field" maxlength="40" placeholder="e.g. Neighbor's doorbell">
             <button class="btn" id="vSave">Save</button>
         </div>
         <label>Triangulation calibration</label>

@@ -42,6 +42,19 @@ class FilterTest(unittest.TestCase):
         with self.assertRaises(flt.FilterError):
             flt.encode([])
 
+    def test_full_library_fits_and_splits(self):
+        # Every preset on one node (~160 rows): a CRC for the whole list, and
+        # pushes split into parts that each fit one transfer, nothing lost.
+        rows = [r for g in flt.library() for r in g["rows"]]
+        full = flt.decode(flt.encode(rows, max_bytes=None))
+        self.assertGreater(len(full), 100)
+        self.assertIsNotNone(flt.crc(rows))
+        parts = flt.split_for_transfer(rows)
+        self.assertTrue(all(len(flt.encode(p)) <= flt.TRANSFER_MAX for p in parts))
+        self.assertEqual(sum(len(p) for p in parts), len(full))
+        with self.assertRaises(flt.FilterError):
+            flt.encode([{"t": "OUI", "id": f"{i:06X}"} for i in range(flt.MAX_FILTERS + 1)], max_bytes=None)
+
     def test_dedupe_and_empty_crc(self):
         lst = [{"t": "OUI", "id": "0025DF"}, {"t": "OUI", "id": "00:25:DF"}]
         self.assertEqual(len(flt.decode(flt.encode(lst))), 1)

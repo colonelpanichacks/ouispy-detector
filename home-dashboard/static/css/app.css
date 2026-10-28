@@ -884,3 +884,82 @@ body.map-maxed .toasts { z-index: 1700; }
 .toggle-label { color: var(--muted); }
 .toggle-item input:checked + .toggle-label { color: var(--soft); }
 .set-block label { color: var(--muted); }
+
+/* Phones: compact icon-only map toolbar; maximize alone, bottom-left. */
+.map-corner .icon-btn { margin: 0; background: rgba(6,8,11,0.86); backdrop-filter: blur(4px); border-color: var(--line-strong); color: var(--soft); }
+@media (max-width: 760px) {
+    .map-tools { gap: 4px; max-width: calc(100vw - 70px); }
+    .map-tools .map-traffic-btn, .map-tools .map-links-btn { height: 28px; padding: 0 7px; margin-left: 0; }
+    .map-tools .map-traffic-btn span, .map-tools .map-links-btn span { display: none; }
+    .map-tools .map-traffic-btn svg, .map-tools .map-links-btn svg { width: 15px; height: 15px; }
+    .map-tools .map-layer { max-width: 112px; height: 28px; font-size: 11px; padding: 2px 6px; }
+    .map-corner .icon-btn { width: 34px; height: 34px; }
+}
+
+/* ---------- metrics tab ---------- */
+.mx-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.mx-bar .field { width: auto; min-width: 150px; }
+.mx-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 7px; overflow: hidden; }
+.mx-seg button { background: none; border: none; border-right: 1px solid var(--line-strong); color: var(--muted); font: 600 11px var(--mono);
+    padding: 7px 11px; cursor: pointer; }
+.mx-seg button:last-child { border-right: none; }
+.mx-seg button:hover { color: var(--soft); }
+.mx-seg button.on { background: rgba(78,205,196,0.14); color: var(--accent); }
+.mx-upd { margin-left: auto; font: 11px var(--mono); color: var(--faint); }
+.mx-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.mx-kpi { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.mx-kpi .k { font-size: 10px; letter-spacing: 1.8px; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+.mx-kpi .v { font: 600 24px var(--mono); color: #e6edf5; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.mx-kpi .v.txt { font: 600 14px var(--sans); margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-kpi .v.up { color: var(--amber); }
+.mx-kpi .v.alert { color: var(--red); }
+.mx-kpi .s { font-size: 11px; color: var(--faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.mx-grid .fa { min-width: 0; }
+.mx-grid .fa h4 { display: flex; justify-content: space-between; align-items: baseline; }
+.mx-wide { grid-column: span 2; }
+.mx-chart { width: 100%; min-height: 60px; }
+.mx-chart svg { display: block; }
+.mx-grid-l { stroke: rgba(148,163,184,0.10); stroke-width: 1; }
+.mx-ax { fill: #6b7a8c; font: 10px var(--mono); }
+.mx-cross { stroke: rgba(219,228,238,0.45); stroke-width: 1; stroke-dasharray: 3 3; }
+.mx-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: -2px 0 6px; font-size: 11px; color: var(--muted); }
+.mx-legend span { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-legend i, .mx-tr i { width: 9px; height: 9px; border-radius: 2px; flex: none; display: inline-block; }
+.mx-bars { display: flex; flex-direction: column; gap: 5px; }
+.mx-row { display: grid; grid-template-columns: minmax(0, 38%) minmax(0, 1fr) 44px; align-items: center; gap: 8px; cursor: default; font-size: 12px; }
+.mx-row:hover .mx-lbl { color: var(--soft); }
+.mx-lbl { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mx-track { height: 12px; background: rgba(148,163,184,0.06); border-radius: 0 4px 4px 0; }
+.mx-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.mx-val { text-align: right; font: 600 12px var(--mono); color: #c9d4df; font-variant-numeric: tabular-nums; }
+.mx-empty { color: var(--faint); font-size: 12px; padding: 18px 4px; }
+.mx-tip { position: fixed; z-index: 3000; pointer-events: none; background: rgba(10,13,18,0.96); border: 1px solid var(--line-strong);
+    border-radius: 7px; padding: 7px 10px; font-size: 12px; min-width: 150px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+.mx-th { color: var(--soft); font-weight: 600; margin-bottom: 4px; }
+.mx-tr { display: flex; align-items: center; gap: 7px; color: var(--muted); line-height: 1.6; }
+.mx-tr span { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.mx-tr b { color: #e6edf5; font: 600 12px var(--mono); }
+.mx-tt { border-top: 1px solid var(--line); margin-top: 3px; padding-top: 3px; }
+@media (max-width: 1180px) { .mx-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } .mx-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .mx-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .mx-grid { grid-template-columns: 1fr; } .mx-wide { grid-column: auto; } .mx-upd { display: none; } }
+/* Charts draw at their own size: the global icon rule (svg 16x16, stroke
+   currentColor) must not touch them, same as Leaflet's overlay. */
+.mx-chart > svg { width: auto; height: auto; fill: unset; stroke: unset; max-width: 100%; }
+/* The top row clips its panels; a tall dock never pushes the map under it. */
+@media (min-width: 1181px) { .fleet-panel, .map-panel, .feed-panel { overflow: hidden; } }
+/* Phones: the top bar as a tidy two-row grid. Row 1 wordmark + badge |
+   clock; row 2 USB status (stretches) | sound | flash, all one height. */
+@media (max-width: 760px) {
+    .topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "brand brand clock" "src sound flash";
+        align-items: center; gap: 8px; padding: 10px 12px; }
+    .topbar .brand { grid-area: brand; min-width: 0; }
+    .topbar .brand h1, .topbar .brand-sub { font-size: 17px; letter-spacing: 2.5px; }
+    .topbar .sources { grid-area: src; min-width: 0; display: flex; }
+    .topbar .sources .src-pill { width: 100%; height: 32px; justify-content: flex-start; box-sizing: border-box; }
+    .topbar .top-actions { display: contents; }
+    .topbar #soundBtn { grid-area: sound; }
+    .topbar #flashBtn { grid-area: flash; }
+    .topbar .chip-btn { height: 32px; width: 38px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .topbar .clock { grid-area: clock; margin: 0; font-size: 12px; text-align: right; }
+}

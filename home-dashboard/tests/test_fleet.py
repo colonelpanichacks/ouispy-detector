@@ -92,6 +92,33 @@ class FleetTest(unittest.TestCase):
         sight = [p for e, p in self.events if e == "sighting"]
         self.assertEqual((len(sight), sight[0]["node"], sight[0]["seen_by"][0][:2]), (1, "D4E5F6", ["D4E5F6", -41]))
 
+    def test_metrics(self):
+        now = time.time()
+        for i, (node, mac, rssi, dom, t) in enumerate([("A1B2C3", "00:13:37:00:00:01", -50, "wifi", "BEACON"),
+                                                      ("A1B2C3", "00:13:37:00:00:01", -52, "wifi", "BEACON"),
+                                                      ("D4E5F6", "80:E1:26:00:00:02", -70, "ble", "OUI")]):
+            self.store.add_detection({"ts": now - 60 * (i + 1), "node": node, "mac": mac, "rssi": rssi, "type": t,
+                                      "match": "", "descr": "Vendor X (beacon)" if dom == "wifi" else "Flipper Zero (BLE OUI)",
+                                      "dom": dom, "source": "serial", "is_new": True})
+        m = self.store.metrics(now - 3600, now)
+        self.assertEqual((m["total"], m["unique"], m["nodes_active"], m["new_devices"]), (3, 2, 2, 2))
+        self.assertEqual(m["by_vendor"][0], {"name": "Vendor X", "count": 2, "devices": 1})   # "(beacon)" folded
+        self.assertEqual(sum(sum(s_["values"]) for s_ in m["series"]), 3)
+        self.assertEqual(sum(m["rssi"]["counts"]), 3)
+        self.assertEqual(self.store.metrics(now - 3600, now, node="D4E5F6")["total"], 1)
+
+    def test_broadcasts_coalesce_and_end_on_latest(self):
+        fleets = []
+        f = Fleet(self.store, lambda e, p: fleets.append(p) if e == "fleet" else None)
+        for _ in range(50):
+            f._broadcast()
+        self.assertEqual(len(fleets), 1)                      # first at once, the burst held back
+        f.home_id = "LATEST"
+        f._broadcast()
+        time.sleep(0.6)
+        self.assertLessEqual(len(fleets), 3)
+        self.assertEqual(fleets[-1]["home"]["id"], "LATEST")  # the trailing update carries the newest state
+
     def test_dedup_across_sources(self):
         line = '{"mac":"AA:BB:CC:DD:EE:FF","rssi":-60,"type":"OUI","match":"AABBCC","desc":"X"}'
         self.fleet.feed_line(line, "serial")

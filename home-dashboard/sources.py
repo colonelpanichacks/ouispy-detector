@@ -172,7 +172,7 @@ class SerialSource(Source):
                         if not self._role_check(line):
                             raise serial.SerialException("that port is a remote node, looking for the home")
                         self.fleet.feed_line(line, "serial")
-                    if len(buf) > 8192:      # no newline in 8 KB: junk, drop it
+                    if len(buf) > 65536:     # no newline in 64 KB: junk, drop it (a 250-filter RFL line is ~20 KB)
                         buf = b""
             except (OSError, serial.SerialException) as e:
                 # The port vanishes on every reboot of a native-USB board;

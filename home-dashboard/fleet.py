@@ -25,6 +25,8 @@ NODE_STALE = 12          # s since last frame before a remote counts offline
 SAMPLE_EVERY = 60        # s between per-node RSSI/pkt samples in history
 DEDUP_WINDOW = 6         # s: same (node, mac, type) from two sources = one event
 SEEN_WINDOW = 60         # s: nodes that heard a device this recently count as "seen by"
+BROADCAST_GAP = 0.25     # s: fleet updates are coalesced to <= 4 a second (first one at once)
+FILTER_KEYS = ("filters", "filters_ok", "filters_ts", "filters_via")
 
 RE_HEARTBEAT = re.compile(r"\[HEARTBEAT\].*?\bmesh=(\d+) rx=(\d+) q=(\d+) dup=(\d+) "
                           r"self=(\d+) bad=(\d+) tx=(\d+)/(\d+)/(\d+).*?lrssi=(-?\d+)")
@@ -65,6 +67,9 @@ class Fleet:
         self.on_line = None              # Commander.feed_line, set by ouispymesh.py
         self.on_join = None              # Commander.node_joined
         self.fcrc_hold = {}              # node or "all" -> time its fcrc is trusted again
+        self._bc_lock = threading.Lock()  # fleet broadcasts: at most one per BROADCAST_GAP
+        self._bc_timer = None
+        self._bc_dirty = False
         meta = store.nodes_meta()
         for nid, m in meta.items():
             self.nodes[nid] = self._blank(nid, m.get("role"))
@@ -298,6 +303,10 @@ class Fleet:
                 st = self.nodes[nid] = self._blank(nid, cfg.get("role"))
             st["cfg"] = cfg
             st["cfg_ts"] = now
+            if cfg.get("role") == "home" and not self.home_id:
+                # The home's own status (it answers on USB even when quiet,
+                # e.g. no filters, no telemetry yet) names it as the home.
+                self.home_id = nid
             if cfg.get("role") in ("home", "remote") and nid != self.home_id:
                 st["role"] = cfg["role"]
         # The alias stored on the node (set by the web flasher) names it
@@ -350,7 +359,7 @@ class Fleet:
             st = self.nodes.get(nid)
             if st is None:
                 st = self.nodes[nid] = self._blank(nid)
-            st["filters"] = obj.get("filters", [])
+            st["filters"] = self._named(obj.get("filters", []))
             st["filters_ok"] = ok
             st["filters_ts"] = time.time()
             st["filters_via"] = via
@@ -359,6 +368,8 @@ class Fleet:
             lists = self.store.get_setting("filter_lists") or {}
             lists[nid] = rec
             self.store.set_setting("filter_lists", lists)
+        self.emit("node_filters", {"id": nid, "filters": rec["filters"], "filters_ok": ok,
+                                   "filters_ts": rec["ts"], "filters_via": via})
         self._broadcast()
 
     def forget_fcrc(self, nid, hold=15):
@@ -377,12 +388,43 @@ class Fleet:
         with self.lock:
             return all(self.fcrc_hold.get(k, 0) <= now for k in (nid, "all"))
 
-    @staticmethod
-    def list_crc(filters):
+    _lib_names = None
+
+    @classmethod
+    def _named(cls, filters):
+        """A long list comes over the mesh without descriptions (it would not
+        fit one transfer): name each row from the signature library."""
+        if not any(not f.get("d") for f in filters):
+            return filters
+        if cls._lib_names is None:
+            cls._lib_names = {}
+            for g in flt.library():
+                for r in g["rows"]:
+                    try:
+                        k = (r["t"], flt.decode(flt.encode([r]))[0]["id"].upper())
+                    except Exception:
+                        continue
+                    cls._lib_names.setdefault(k, r.get("d") or g["label"])
+        return [f if f.get("d") else {**f, "d": cls._lib_names.get((f.get("t"), str(f.get("id", "")).upper()), "")}
+                for f in filters]
+
+    _crc_cache = {}   # id(list) -> (list, crc): lists are replaced, never edited in place
+
+    @classmethod
+    def list_crc(cls, filters):
+        """CRC of a list, computed once per list object (every broadcast and
+        poll asks; a list only changes by being replaced)."""
+        hit = cls._crc_cache.get(id(filters))
+        if hit is not None and hit[0] is filters:
+            return hit[1]
         try:
-            return flt.crc(filters)
+            c = flt.crc(filters)
         except Exception:
-            return None
+            c = None
+        if len(cls._crc_cache) > 64:
+            cls._crc_cache.clear()
+        cls._crc_cache[id(filters)] = (filters, c)
+        return c
 
     def filters_current(self, nid):
         """True when the list we hold for a node matches the fcrc it reports."""
@@ -453,7 +495,10 @@ class Fleet:
     # ------------------------------------------------------------------
     # snapshots
     # ------------------------------------------------------------------
-    def snapshot(self):
+    def snapshot(self, lists=True):
+        """Whole fleet state. lists=False leaves out the per-node filter
+        lists (the bulk of it, and they rarely change): live updates carry
+        those in their own node_filters event, only when a list changes."""
         meta = self.store.nodes_meta()
         now = time.time()
         with self.lock:
@@ -475,11 +520,31 @@ class Fleet:
             fcrc = (n.get("cfg") or {}).get("fcrc")
             n["filters_fresh"] = (None if n["filters"] is None or not fcrc
                                   else self.list_crc(n["filters"]) == fcrc)
+        if not lists:
+            for n in nodes:
+                for k in FILTER_KEYS:
+                    n.pop(k, None)
         nodes.sort(key=lambda n: (not n["is_home"], not n["online"], n["id"]))
         return {"home": home, "nodes": nodes, "ts": now}
 
     def _broadcast(self):
-        self.emit("fleet", self.snapshot())
+        """Push the fleet to every dashboard: the first change goes out at
+        once, a burst behind it (a detection storm, a status flood) is folded
+        into one update at the end of BROADCAST_GAP, always the latest state."""
+        with self._bc_lock:
+            if self._bc_timer is not None:
+                self._bc_dirty = True
+                return
+            self._bc_timer = threading.Timer(BROADCAST_GAP, self._broadcast_tail)
+            self._bc_timer.daemon = True
+            self._bc_timer.start()
+        self.emit("fleet", self.snapshot(lists=False))
+
+    def _broadcast_tail(self):
+        with self._bc_lock:
+            dirty, self._bc_dirty, self._bc_timer = self._bc_dirty, False, None
+        if dirty:
+            self._broadcast()
 
     def console_tail(self):
         with self.lock:

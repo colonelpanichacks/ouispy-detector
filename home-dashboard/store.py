@@ -200,6 +200,77 @@ class Store:
             r["closest"] = seen[0][0] if len(seen) > 1 else None
         return rows
 
+    def metrics(self, since, until, node=None, dom=None):
+        """Everything the Metrics tab draws, for detections in [since, until]."""
+        import re as _re
+        import time as _t
+        span = max(60, until - since)
+        steps = [60, 300, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400]
+        bucket = next((b for b in steps if span / b <= 120), 86400)
+        start = since - since % bucket
+        nb = int((until - start) // bucket) + 1
+        where, args = "ts BETWEEN ? AND ?", [since, until]
+        if node:
+            where += " AND node = ?"; args.append(node)
+        if dom:
+            where += " AND dom = ?"; args.append(dom)
+        with self.lock:
+            rows = self.db.execute(f"SELECT ts, node, mac, rssi, type, descr, dom FROM detections WHERE {where}", args).fetchall()
+            pw, pa = "ts >= ? AND ts < ?", [since - span, since]
+            if node:
+                pw += " AND node = ?"; pa.append(node)
+            if dom:
+                pw += " AND dom = ?"; pa.append(dom)
+            prev_total = self.db.execute(f"SELECT COUNT(*) FROM detections WHERE {pw}", pa).fetchone()[0]
+            first = dict(self.db.execute("SELECT mac, MIN(ts) FROM detections GROUP BY mac").fetchall())
+
+        def vendor(descr):
+            v = _re.sub(r"\s*\(.*?\)\s*$", "", (descr or "").strip())
+            return v or "Unknown"
+
+        per_vendor, per_node, per_type, per_dom = {}, {}, {}, {"ble": 0, "wifi": 0}
+        bucket_v, bucket_macs = {}, [set() for _ in range(nb)]
+        heat = [[0] * 24 for _ in range(7)]
+        rssi_bins = list(range(-100, -15, 5))
+        hist = [0] * len(rssi_bins)
+        for r in rows:
+            v = vendor(r["descr"])
+            pv = per_vendor.setdefault(v, [0, set()]); pv[0] += 1; pv[1].add(r["mac"])
+            pn = per_node.setdefault(r["node"], [0, set()]); pn[0] += 1; pn[1].add(r["mac"])
+            per_type[r["type"] or "?"] = per_type.get(r["type"] or "?", 0) + 1
+            if r["dom"] in per_dom:
+                per_dom[r["dom"]] += 1
+            i = min(nb - 1, max(0, int((r["ts"] - start) // bucket)))
+            bucket_v.setdefault(v, [0] * nb)[i] += 1
+            bucket_macs[i].add(r["mac"])
+            lt = _t.localtime(r["ts"])
+            heat[lt.tm_wday][lt.tm_hour] += 1
+            if r["rssi"] is not None:
+                k = min(len(hist) - 1, max(0, (int(r["rssi"]) + 100) // 5))
+                hist[k] += 1
+        ranked = sorted(per_vendor.items(), key=lambda kv: -kv[1][0])
+        top = [v for v, _ in ranked[:5]]
+        series = [{"name": v, "values": bucket_v[v]} for v in top]
+        rest = [v for v, _ in ranked[5:]]
+        if rest:
+            series.append({"name": "Other", "values": [sum(bucket_v[v][i] for v in rest) for i in range(nb)]})
+        totals = [sum(sr["values"][i] for sr in series) for i in range(nb)]
+        peak_i = max(range(nb), key=lambda i: totals[i]) if nb else 0
+        macs = {r["mac"] for r in rows}
+        return {
+            "since": since, "until": until, "bucket": bucket, "start": start, "n": nb,
+            "total": len(rows), "prev_total": prev_total, "unique": len(macs),
+            "new_devices": sum(1 for m in macs if first.get(m, 0) >= since),
+            "nodes_active": len(per_node),
+            "peak": {"count": totals[peak_i] if nb else 0, "ts": start + peak_i * bucket},
+            "series": series, "unique_series": [len(b) for b in bucket_macs],
+            "by_vendor": [{"name": v, "count": c[0], "devices": len(c[1])} for v, c in ranked[:10]],
+            "by_node": sorted(({"id": n, "count": c[0], "devices": len(c[1])} for n, c in per_node.items()),
+                              key=lambda x: -x["count"]),
+            "by_type": sorted(({"type": t, "count": c} for t, c in per_type.items()), key=lambda x: -x["count"]),
+            "by_dom": per_dom, "heat": heat, "rssi": {"from": -100, "step": 5, "counts": hist},
+        }
+
     def add_detection(self, d):
         with self.lock:
             cur = self.db.execute(

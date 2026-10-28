@@ -328,6 +328,23 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
         return div;
     };
     tools.addTo(map);
+    // Phones: maximize lives alone in the bottom-left corner, away from the
+    // toolbar; desktop keeps it at the end of the toolbar. Moves on resize.
+    const corner = L.control({ position: "bottomleft" });
+    corner.onAdd = () => {
+        const div = L.DomUtil.create("div", "map-corner");
+        L.DomEvent.disableClickPropagation(div);
+        return div;
+    };
+    corner.addTo(map);
+    const placeMax = () => {
+        const phone = window.matchMedia("(max-width: 760px)").matches;
+        const btn = document.getElementById("mapMax");
+        const home = phone ? corner.getContainer() : tools.getContainer();
+        if (btn.parentElement !== home) home.appendChild(btn);
+    };
+    placeMax();
+    window.matchMedia("(max-width: 760px)").addEventListener("change", placeMax);
 })();
 // Free base maps that need no API key. Each keeps its provider's
 // attribution. `dark` runs the light OSM tiles through the CSS invert filter;
@@ -1102,7 +1119,23 @@ function fisher(x, y, P, w, nExp) {
     if (det <= 1e-12) return null;
     return { sxx: c / det, syy: a / det, sxy: -b / det };   // covariance, m^2
 }
+// Fixes are cached per device and recomputed only when its readings change
+// (a new one, or one aging out of the window), not on every 1 s tick.
+S.triCache = {};
 function triFix(t) {
+    const nowS = Date.now() / 1000, mm = triModel();
+    const key = JSON.stringify([mm, Object.entries(t.samples).map(([id, xs]) => {
+        const live = xs.filter((x) => nowS - x.ts <= TRI_WINDOW_S);
+        const n = nodeById(id);
+        return [id, live.length, live.length ? live[0].ts : 0, n && n.lat, n && n.lon];
+    }), S.device === t.mac]);
+    const c = S.triCache[t.mac];
+    if (c && c.key === key) return c.fix;
+    const fix = triFixCompute(t);
+    S.triCache[t.mac] = { key, fix };
+    return fix;
+}
+function triFixCompute(t) {
     const m = triModel(), now = Date.now() / 1000, dm = devModel(t.mac, t.dom, m);
     const nodes = [];
     for (const [id, samples] of Object.entries(t.samples)) {
@@ -1331,6 +1364,11 @@ document.addEventListener("keydown", (e) => {
 
 function renderTri(fixes) {
     if (!S.triLayer) S.triLayer = L.layerGroup().addTo(map);
+    // Redraw only when something on it changed (it ran every second).
+    const key = JSON.stringify([S.triOn, S.device, S.cov && S.cov.key, fixes.map((f) => [f.mac, f.ok, f.p, f.err, f.rough, f.trail && f.trail.length,
+        S.device === f.mac ? f.nodes.map((n) => Math.round(n.d * 10)) : 0])]);
+    if (key === S.triKey && S.triLayer.getLayers().length) return;
+    S.triKey = key;
     S.triLayer.clearLayers();
     $("triLegend").hidden = !S.triOn;
     if (!S.triOn) return;
@@ -1470,6 +1508,7 @@ function renderTargets() {
 }
 
 function onDetection(d) {
+    mxOnDetection();
     S.dets.unshift(d);
     S.dets.length = Math.min(S.dets.length, 300);
     renderTargets();
@@ -1740,9 +1779,16 @@ function otaText(n) {
 }
 // The node already runs the uploaded build? Nodes report the first 15
 // characters of their build stamp ("Oct 27 2026 18:").
+// "Oct 27 2026 21:21:25" (the image) -> "Oct27 21:21:25" (what nodes report).
+function fwCompact(b) {
+    const x = /^([A-Z][a-z]{2}) +(\d{1,2}) \d{4} (\d\d:\d\d:\d\d)$/.exec(b || "");
+    return x ? `${x[1]}${x[2].padStart(2, "0")} ${x[3]}` : "";
+}
 function fwCurrent(n) {
     const f = fwBuildOf(n), m = S.firmware;
-    return !!(f && m && m.build && f.length >= 15 && m.build.startsWith(f));
+    if (!f || !m || !m.build) return false;
+    if (/^[A-Z][a-z]{2}\d{2} \d\d:\d\d:\d\d$/.test(f)) return f === fwCompact(m.build);   // exact
+    return f.length >= 15 && m.build.startsWith(f);   // older firmware: its stamp was cut to 15 chars
 }
 function renderFirmware() {
     const m = S.firmware;
@@ -2538,7 +2584,8 @@ function setDock(open) {
     setTimeout(() => map.invalidateSize(), 220);   // the map row grew or shrank
 }
 function setDockHeight(px) {
-    const h = Math.round(Math.max(160, Math.min(window.innerHeight * 0.8, px)));
+    // Leave the fleet / map / detections row at least ~300 px under the top bar.
+    const h = Math.round(Math.max(160, Math.min(window.innerHeight - 380, px)));
     document.documentElement.style.setProperty("--dock-h", h + "px");
     return h;
 }
@@ -2576,7 +2623,15 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
 // ------------------------------------------------------------------
 // boot + live updates
 // ------------------------------------------------------------------
+// Live fleet updates leave out the filter lists (they come in node_filters,
+// only when a list changes); keep each node's list from before.
+const FILTER_KEYS = ["filters", "filters_ok", "filters_ts", "filters_via"];
 function applyFleet(f) {
+    const prev = {};
+    if (S.fleet) S.fleet.nodes.forEach((n) => { prev[n.id] = n; });
+    f.nodes.forEach((n) => {
+        if (!("filters" in n) && prev[n.id]) FILTER_KEYS.forEach((k) => { n[k] = prev[n.id][k]; });
+    });
     S.fleet = f;
     S.skew = Date.now() / 1000 - f.ts;
     renderHome();
@@ -2603,8 +2658,207 @@ function applyFleet(f) {
     }
 }
 
+// ------------------------------------------------------------------
+// Metrics tab: detections over time, devices, vendors, nodes, signature
+// types, weekday x hour activity and signal strength, for a chosen range,
+// node and radio. Plain SVG (no chart library: the dashboard stays
+// local-first). Colours: a categorical palette validated for this dark
+// surface (CVD-safe adjacent pairs), assigned to vendors in rank order and
+// kept per vendor; "Other" is neutral grey; magnitude is one blue ramp.
+// ------------------------------------------------------------------
+const MX_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
+const MX_OTHER = "#5d6878";
+const MX_HEAT = ["#10233a", "#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#cde2fb"];
+S.mx = { range: lsGet("ouispy.mxRange", 86400), node: "", dom: "", data: null, colors: {} };
+function mxColor(name, i) {
+    if (name === "Other") return MX_OTHER;
+    if (!S.mx.colors[name]) S.mx.colors[name] = MX_COLORS[Object.keys(S.mx.colors).length % MX_COLORS.length];
+    return S.mx.colors[name];
+}
+function niceMax(v) {
+    if (v <= 4) return 4;
+    const p = Math.pow(10, Math.floor(Math.log10(v))), m = v / p;
+    return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+const mxFmt = (n) => n >= 10000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + "k" : String(n);
+function mxTimeLabel(ts, bucket) {
+    const d = new Date(ts * 1000);
+    if (bucket < 86400 && S.mx.range <= 86400) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    return d.toLocaleDateString([], { weekday: "short", day: "numeric" });
+}
+function mxTip(html, ev) {
+    const t = $("mxTip");
+    if (!html) { t.hidden = true; return; }
+    t.innerHTML = html;
+    t.hidden = false;
+    const r = t.getBoundingClientRect();
+    let x = ev.clientX + 14, y = ev.clientY + 14;
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 14;
+    t.style.left = x + "px"; t.style.top = y + "px";
+}
+// Time series: stacked areas (several series) or one line, shared axes,
+// crosshair + tooltip on hover.
+function mxTimeChart(el, d, series, opts = {}) {
+    const W = Math.max(280, el.clientWidth), H = opts.h || 190, L = 40, R = 10, Tp = 10, B = 24;
+    const n = d.n, iw = W - L - R, ih = H - Tp - B;
+    const stacked = series.length > 1;
+    const tot = Array.from({ length: n }, (_, i) => series.reduce((a, s) => a + s.values[i], 0));
+    const ymax = niceMax(Math.max(1, ...(stacked ? tot : series[0].values)));
+    const x = (i) => L + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw), y = (v) => Tp + ih - (v / ymax) * ih;
+    let g = "";
+    for (let k = 0; k <= 4; k++) {
+        const v = (ymax / 4) * k, yy = y(v);
+        g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" class="mx-grid-l"/><text x="${L - 6}" y="${yy + 3}" class="mx-ax" text-anchor="end">${mxFmt(Math.round(v * 10) / 10)}</text>`;
+    }
+    const ticks = Math.min(6, n);
+    for (let k = 0; k < ticks; k++) {
+        const i = Math.round((k / Math.max(1, ticks - 1)) * (n - 1));
+        g += `<text x="${x(i)}" y="${H - 6}" class="mx-ax" text-anchor="${k === 0 ? "start" : k === ticks - 1 ? "end" : "middle"}">${mxTimeLabel(d.start + i * d.bucket, d.bucket)}</text>`;
+    }
+    let marks = "";
+    if (stacked) {
+        const base = new Array(n).fill(0);
+        series.forEach((s) => {
+            const top = s.values.map((v, i) => base[i] + v);
+            const pts = top.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+            const back = base.map((v, i) => `${x(i)},${y(v)}`).reverse().join(" ");
+            marks += `<polygon points="${pts} ${back}" fill="${s.color}" fill-opacity="0.55"/><polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="1.5"/>`;
+            top.forEach((v, i) => { base[i] = v; });
+        });
+    } else {
+        const s = series[0], pts = s.values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+        marks = `<polygon points="${x(0)},${y(0)} ${pts} ${x(n - 1)},${y(0)}" fill="${s.color}" fill-opacity="0.14"/><polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
+    }
+    el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${g}${marks}<line class="mx-cross" x1="0" x2="0" y1="${Tp}" y2="${Tp + ih}" visibility="hidden"/><rect x="${L}" y="${Tp}" width="${iw}" height="${ih}" fill="transparent" class="mx-hit"/></svg>`;
+    const svg = el.querySelector("svg"), cross = svg.querySelector(".mx-cross");
+    svg.querySelector(".mx-hit").onmousemove = (ev) => {
+        const r = svg.getBoundingClientRect();
+        const i = Math.max(0, Math.min(n - 1, Math.round(((ev.clientX - r.left - L) / iw) * (n - 1))));
+        cross.setAttribute("x1", x(i)); cross.setAttribute("x2", x(i)); cross.setAttribute("visibility", "visible");
+        const when = new Date((d.start + i * d.bucket) * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+        const rows = series.filter((s) => s.values[i] || !stacked).map((s) =>
+            `<div class="mx-tr"><i style="background:${s.color}"></i><span>${esc(s.name)}</span><b>${s.values[i]}</b></div>`).join("");
+        mxTip(`<div class="mx-th">${when}</div>${rows || `<div class="mx-tr"><span>none</span></div>`}${stacked ? `<div class="mx-tr mx-tt"><span>Total</span><b>${tot[i]}</b></div>` : ""}`, ev);
+    };
+    svg.querySelector(".mx-hit").onmouseleave = () => { cross.setAttribute("visibility", "hidden"); mxTip(null); };
+}
+// Horizontal bars: label, bar from a shared zero, value; tooltip per row.
+function mxBars(el, items, opts = {}) {
+    if (!items.length) { el.innerHTML = `<div class="mx-empty">No detections in this range.</div>`; return; }
+    const max = Math.max(...items.map((x) => x.value));
+    el.innerHTML = `<div class="mx-bars">${items.map((it, i) => `
+        <div class="mx-row" data-i="${i}"><span class="mx-lbl" title="${esc(it.label)}">${esc(it.label)}</span>
+        <span class="mx-track"><span class="mx-fill" style="width:${Math.max(1.5, (it.value / max) * 100)}%;background:${it.color}"></span></span>
+        <b class="mx-val">${mxFmt(it.value)}</b></div>`).join("")}</div>`;
+    el.querySelectorAll(".mx-row").forEach((r) => {
+        const it = items[Number(r.dataset.i)];
+        r.onmousemove = (ev) => mxTip(`<div class="mx-th">${esc(it.label)}</div>${it.tip}`, ev);
+        r.onmouseleave = () => mxTip(null);
+    });
+}
+function mxHeat(el, heat) {
+    const W = Math.max(280, el.clientWidth), L = 34, Tp = 4, B = 18, cw = (W - L - 4) / 24, ch = 18, H = Tp + ch * 7 + B;
+    const max = Math.max(1, ...heat.flat());
+    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let g = "";
+    heat.forEach((row, d) => {
+        g += `<text x="${L - 6}" y="${Tp + d * ch + ch / 2 + 3}" class="mx-ax" text-anchor="end">${days[d]}</text>`;
+        row.forEach((v, h) => {
+            const fill = v ? MX_HEAT[Math.min(MX_HEAT.length - 1, Math.ceil((v / max) * (MX_HEAT.length - 1)))] : "rgba(148,163,184,0.06)";
+            g += `<rect x="${L + h * cw + 1}" y="${Tp + d * ch + 1}" width="${cw - 2}" height="${ch - 2}" rx="2" fill="${fill}" data-d="${d}" data-h="${h}" data-v="${v}" class="mx-cell"/>`;
+        });
+    });
+    for (let h = 0; h < 24; h += 3) g += `<text x="${L + h * cw + cw / 2}" y="${H - 4}" class="mx-ax" text-anchor="middle">${String(h).padStart(2, "0")}</text>`;
+    el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${g}</svg>`;
+    el.querySelectorAll(".mx-cell").forEach((c) => {
+        c.onmousemove = (ev) => mxTip(`<div class="mx-th">${days[c.dataset.d]} ${String(c.dataset.h).padStart(2, "0")}:00-${String((+c.dataset.h + 1) % 24).padStart(2, "0")}:00</div><div class="mx-tr"><span>Detections</span><b>${c.dataset.v}</b></div>`, ev);
+        c.onmouseleave = () => mxTip(null);
+    });
+}
+function mxHist(el, r) {
+    const W = Math.max(280, el.clientWidth), H = 170, L = 34, R = 6, Tp = 8, B = 22, n = r.counts.length;
+    const iw = W - L - R, ih = H - Tp - B, bw = iw / n, ymax = niceMax(Math.max(1, ...r.counts));
+    let g = "";
+    for (let k = 0; k <= 3; k++) {
+        const v = (ymax / 3) * k, yy = Tp + ih - (v / ymax) * ih;
+        g += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" class="mx-grid-l"/><text x="${L - 6}" y="${yy + 3}" class="mx-ax" text-anchor="end">${mxFmt(Math.round(v))}</text>`;
+    }
+    r.counts.forEach((v, i) => {
+        const h = (v / ymax) * ih, lo = r.from + i * r.step;
+        if (v) g += `<path d="M${L + i * bw + 1},${Tp + ih} v${-(h - 3)} q0,-3 3,-3 h${bw - 8} q3,0 3,3 v${h - 3} z" fill="#3987e5" class="mx-cell" data-lo="${lo}" data-v="${v}"/>`;
+        if (i % 4 === 0) g += `<text x="${L + i * bw}" y="${H - 6}" class="mx-ax" text-anchor="middle">${lo}</text>`;
+    });
+    el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${g}</svg>`;
+    el.querySelectorAll(".mx-cell").forEach((c) => {
+        c.onmousemove = (ev) => mxTip(`<div class="mx-th">${c.dataset.lo} to ${+c.dataset.lo + r.step} dBm</div><div class="mx-tr"><span>Detections</span><b>${c.dataset.v}</b></div>`, ev);
+        c.onmouseleave = () => mxTip(null);
+    });
+}
+function mxRender() {
+    const d = S.mx.data;
+    if (!d || !$("tab-metrics").classList.contains("active")) return;
+    const delta = d.prev_total ? Math.round(((d.total - d.prev_total) / d.prev_total) * 100) : null;
+    const top = d.by_vendor[0];
+    const kpi = (k, v, sub, cls = "") => `<div class="mx-kpi"><div class="k">${k}</div><div class="v ${cls}">${v}</div><div class="s">${sub}</div></div>`;
+    $("mxKpis").innerHTML =
+        kpi("Detections", mxFmt(d.total), delta == null ? "no earlier data" : `${delta >= 0 ? "+" : ""}${delta}% vs previous period`, delta > 0 ? "up" : "") +
+        kpi("Unique devices", mxFmt(d.unique), `${d.by_dom.ble} BLE / ${d.by_dom.wifi} WiFi hits`) +
+        kpi("New devices", mxFmt(d.new_devices), "first ever seen in range", d.new_devices ? "alert" : "") +
+        kpi("Active nodes", d.nodes_active, `of ${S.fleet ? S.fleet.nodes.length : "-"} in the fleet`) +
+        kpi("Peak", mxFmt(d.peak.count), d.peak.count ? `per ${d.bucket >= 3600 ? d.bucket / 3600 + " h" : d.bucket / 60 + " min"}, ${mxTimeLabel(d.peak.ts, d.bucket)}` : "no activity") +
+        kpi("Top vendor", top ? esc(top.name) : "-", top ? `${top.count} hits, ${top.devices} device${top.devices === 1 ? "" : "s"}` : "", "txt");
+    $("mxBucket").textContent = `per ${d.bucket >= 3600 ? d.bucket / 3600 + " h" : d.bucket / 60 + " min"}`;
+    const series = d.series.map((s, i) => ({ ...s, color: mxColor(s.name, i) }));
+    $("mxLegend").innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+    if (series.length) mxTimeChart($("mxArea"), d, series);
+    else $("mxArea").innerHTML = `<div class="mx-empty">No detections in this range.</div>`;
+    mxTimeChart($("mxUnique"), d, [{ name: "Unique devices", values: d.unique_series, color: "#3987e5" }], { h: 170 });
+    mxBars($("mxVendors"), d.by_vendor.map((v) => ({ label: v.name, value: v.count, color: d.series.find((s) => s.name === v.name) ? mxColor(v.name) : MX_OTHER,
+        tip: `<div class="mx-tr"><span>Detections</span><b>${v.count}</b></div><div class="mx-tr"><span>Devices</span><b>${v.devices}</b></div>` })));
+    mxBars($("mxNodes"), d.by_node.map((n) => { const nd = nodeById(n.id);
+        return { label: nodeName(n.id), value: n.count, color: nd && nd.color != null ? nodeColor(nd) : "#3987e5",
+                 tip: `<div class="mx-tr"><span>Detections</span><b>${n.count}</b></div><div class="mx-tr"><span>Devices</span><b>${n.devices}</b></div>` }; }));
+    mxBars($("mxTypes"), d.by_type.map((t) => ({ label: t.type, value: t.count, color: "#3987e5",
+        tip: `<div class="mx-tr"><span>Detections</span><b>${t.count}</b></div>` })));
+    mxHeat($("mxHeat"), d.heat);
+    mxHist($("mxRssi"), d.rssi);
+    $("mxUpd").textContent = `updated ${new Date().toLocaleTimeString([], { hour12: false })}`;
+}
+async function mxLoad() {
+    if (!$("tab-metrics").classList.contains("active")) return;
+    const q = new URLSearchParams({ range: S.mx.range, node: S.mx.node, dom: S.mx.dom });
+    try { S.mx.data = await api(`/api/metrics?${q}`); } catch (e) { return; }
+    mxRender();
+}
+function mxNodeOptions() {
+    const sel = $("mxNode"), cur = sel.value;
+    const html = `<option value="">All nodes</option>` + (S.fleet ? S.fleet.nodes : []).map((n) => `<option value="${esc(n.id)}">${esc(nodeName(n.id))}</option>`).join("");
+    if (sel.innerHTML !== html) { sel.innerHTML = html; sel.value = cur; }
+}
+document.querySelectorAll("#mxRange button").forEach((b) => {
+    b.classList.toggle("on", Number(b.dataset.r) === S.mx.range);
+    b.onclick = () => {
+        S.mx.range = Number(b.dataset.r); lsSet("ouispy.mxRange", S.mx.range);
+        document.querySelectorAll("#mxRange button").forEach((x) => x.classList.toggle("on", x === b));
+        mxLoad();
+    };
+});
+$("mxNode").onchange = () => { S.mx.node = $("mxNode").value; mxLoad(); };
+$("mxDom").onchange = () => { S.mx.dom = $("mxDom").value; mxLoad(); };
+document.querySelector('.tab[data-tab="metrics"]').addEventListener("click", () => setTimeout(() => { mxNodeOptions(); mxLoad(); }, 0));
+setInterval(mxLoad, 15000);                         // live while the tab is open
+let mxDetTimer = null;
+function mxOnDetection() { clearTimeout(mxDetTimer); mxDetTimer = setTimeout(mxLoad, 2500); }
+new ResizeObserver(() => { if (S.mx.data) mxRender(); }).observe($("tab-metrics"));
+
 async function boot() {
     const st = await api("/api/state");
+    // The USB pill counts from the home's last line the server already has,
+    // not from this page load (it showed NO DATA for the first seconds).
+    for (let i = (st.console || []).length - 1; i >= 0; i--) {
+        if (st.console[i][1] === "serial") { S.serialLast = st.console[i][0]; break; }
+    }
     S.settings = st.settings;
     S.sources = st.sources;
     S.statsBase = st.stats;
@@ -2645,6 +2899,12 @@ async function boot() {
 
     const sock = io({ transports: ["websocket", "polling"] });
     sock.on("fleet", applyFleet);
+    sock.on("node_filters", (u) => {
+        const n = S.fleet && S.fleet.nodes.find((x) => x.id === u.id);
+        if (!n) return;
+        FILTER_KEYS.forEach((k) => { n[k] = u[k]; });
+        applyFleet(S.fleet);
+    });
     sock.on("det", onDetection);
     sock.on("sighting", onSighting);
     sock.on("sources", (s) => { S.sources = s; renderSources(); });

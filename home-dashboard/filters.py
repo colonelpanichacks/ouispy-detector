@@ -52,6 +52,9 @@ PRESETS = {
 }
 
 
+MAX_FILTERS = 250   # what a node holds (firmware FILTER_MAX); the whole library is ~160
+
+
 class FilterError(ValueError):
     pass
 
@@ -75,12 +78,16 @@ def normalize(f):
     return {"t": t, "id": ident, "d": desc, "full": 1 if t == "MAC" else 0}
 
 
-def encode(filters):
-    """List of {t, id, d} -> wire bytes. Raises FilterError."""
+TRANSFER_MAX = 4000   # bytes in one push (the node's staging buffer, one mesh transfer)
+
+
+def encode(filters, max_bytes=TRANSFER_MAX):
+    """List of {t, id, d} -> wire bytes. Raises FilterError. max_bytes=None
+    for a list of any size (CRCs); pushes go through split_for_transfer."""
     if not filters:
         raise FilterError("the list is empty: a node with no filters has nothing to scan for")
-    if len(filters) > 100:
-        raise FilterError("at most 100 filters")
+    if len(filters) > MAX_FILTERS:
+        raise FilterError(f"at most {MAX_FILTERS} filters")
     out = bytearray()
     seen = set()
     for f in filters:
@@ -91,9 +98,24 @@ def encode(filters):
         seen.add(key)
         ident, desc = n["id"].encode(), n["d"].encode()
         out += bytes([TYPES[n["t"]], n["full"], len(ident), len(desc)]) + ident + desc
-    if len(out) > 4000:
-        raise FilterError("list too large for one mesh transfer (4000 bytes)")
+    if max_bytes is not None and len(out) > max_bytes:
+        raise FilterError(f"list too large for one mesh transfer ({max_bytes} bytes)")
     return bytes(out)
+
+
+def split_for_transfer(filters, max_bytes=TRANSFER_MAX):
+    """A list in consecutive parts that each fit one push (validated and
+    de-duplicated like encode)."""
+    rows = decode(encode(filters, max_bytes=None))
+    parts, cur, size = [], [], 0
+    for r in rows:
+        n = 4 + len(r["id"]) + len(r["d"])
+        if cur and size + n > max_bytes:
+            parts.append(cur); cur, size = [], 0
+        cur.append({"t": r["t"], "id": r["id"], "d": r["d"]}); size += n
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 def decode(buf):
@@ -113,7 +135,7 @@ def crc(filters):
     if not filters:
         return "00000000"        # crc32 of zero bytes, what an empty node reports
     try:
-        return f"{zlib.crc32(encode(filters)) & 0xFFFFFFFF:08X}"
+        return f"{zlib.crc32(encode(filters, max_bytes=None)) & 0xFFFFFFFF:08X}"
     except FilterError:
         return None
 
