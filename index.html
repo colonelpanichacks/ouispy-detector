@@ -463,7 +463,7 @@ o888bood8P'   o888ooooood8     o888o     o888ooooood8  `Y8bood8P'      o888o    
       <p>Chrome, Edge, or Opera on desktop. Your browser will show a list of serial ports — pick the XIAO. The flasher writes the complete image (bootloader, partition table, boot selector and app), so even a blank board comes up. It asks whether to <b>erase</b>: erase for a fresh install, or keep your saved filters, Wi-Fi, MQTT and mesh settings when updating. About 30 seconds.</p>
       <p><b>Mesh fleets:</b> this release talks ESP-NOW at the long-range 250 kbps rate. Flash every node in a mesh with the same release.</p>
 
-      <esp-web-install-button id="flashBtn" manifest="./manifest.json">
+      <esp-web-install-button id="flashBtn" manifest="./manifest.json?v=3.6">
         <button slot="activate">&gt;&gt; CONNECT &amp; FLASH &lt;&lt;</button>
         <span slot="unsupported" class="unsupported">Your browser doesn't support Web Serial. Open this page in Chrome, Edge, or Opera on a desktop.</span>
         <span slot="not-allowed" class="not-allowed">This page must be served over HTTPS. GitHub Pages handles that automatically.</span>
@@ -952,7 +952,11 @@ py -m venv .venv
           (r === "home" ? "Leave it plugged in and start the OUI-SPY Mesh dashboard." : "Unplug it and deploy it.") +
           " Add filters from the dashboard." + aliasNote);
       } else if (a && /no filters/i.test(a)) {
-        status("warn", "Partly done: " + summary + ". " + REFUSED[r] + aliasNote);
+        // Only firmware older than the mesh-only release answers this: say
+        // which build the node is actually running (a stale flash shows here).
+        const built = v && v.fw ? " This node is running firmware built <b>" + String(v.fw).replace(/[<>&]/g, "") +
+                      "</b>, an older release: flash it again with the button above (you can keep its settings), then run this step again." : "";
+        status("warn", "Partly done: " + summary + ". " + REFUSED[r] + built + aliasNote);
       } else {
         throw new Error("The node didn't confirm: " + (a || "no answer") + ". Its mesh settings and key are saved; run setup again to finish.");
       }

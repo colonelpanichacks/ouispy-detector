@@ -19,7 +19,7 @@
           "offset": 57344
         },
         {
-          "path": "src/detector.bin",
+          "path": "src/detector.bin?v=3.6",
           "offset": 65536
         }
       ]
