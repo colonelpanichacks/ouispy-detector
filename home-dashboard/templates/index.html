@@ -38,7 +38,10 @@
             <h3>Mesh Fleet</h3>
             <span class="count" id="fleetCount">0 / 0</span>
         </div>
-        <div class="home-stats" id="homeStats"></div>
+        <div class="sec" data-sec="homestats">
+            <button class="sec-head" type="button"><span>Home node</span><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+            <div class="sec-body"><div class="home-stats" id="homeStats"></div></div>
+        </div>
         <div class="node-list" id="nodeList"></div>
     </section>
 
@@ -55,6 +58,10 @@
             <button class="icon-btn map-traffic-btn" id="mapTraffic" aria-label="Show mesh traffic" aria-pressed="false" title="Show traffic: detections, telemetry and commands moving through the mesh">
                 <svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>
                 <span>Traffic</span>
+            </button>
+            <button class="icon-btn map-traffic-btn map-tgt-btn" id="mapTargets" aria-pressed="true" title="Live targets: where each detected device is, by signal, and its closest node">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+                <span>Targets: on</span>
             </button>
             <button class="icon-btn map-traffic-btn map-lock-btn" id="mapLock" aria-label="Lock node positions" aria-pressed="true" title="Node positions are locked. Click to unlock and drag nodes.">
                 <svg class="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
@@ -81,8 +88,17 @@
             <h3>Live Detections</h3>
             <span class="count" id="detCount">0</span>
         </div>
-        <div class="kpis" id="kpis"></div>
-        <div class="activity" id="activity" title="Detections per hour, last 24 h"></div>
+        <div class="sec sec-near" data-sec="nearest">
+            <button class="sec-head" type="button"><span>Nearest node, live (60 s)</span><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+            <div class="sec-body"><div class="nearest" id="nearest"></div></div>
+        </div>
+        <div class="sec" data-sec="detstats">
+            <button class="sec-head" type="button"><span>Stats</span><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+            <div class="sec-body">
+                <div class="kpis" id="kpis"></div>
+                <div class="activity" id="activity" title="Detections per hour, last 24 h"></div>
+            </div>
+        </div>
         <div class="feed" id="feed">
             <div class="empty">Waiting for detections...</div>
         </div>
@@ -96,7 +112,10 @@
             <button class="tab" data-tab="fleetctl">Fleet Control</button>
             <button class="tab" data-tab="console">Console</button>
             <button class="tab" data-tab="settings">Settings</button>
+            <button class="dock-toggle" id="dockToggle" type="button" title="Collapse or expand this panel"><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
         </div>
+        <div class="dock-grip" id="dockGrip" title="Drag to resize"></div>
+        <div class="dock-body">
 
         <div class="tab-body active" id="tab-history">
             <div class="filters">
@@ -286,6 +305,7 @@
                 </div>
             </div>
             <div class="button-row"><button class="btn" id="saveSettings">Save settings</button><span class="saved" id="savedMsg"></span></div>
+        </div>
         </div>
     </section>
 </main>

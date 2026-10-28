@@ -735,3 +735,72 @@ body.map-maxed .toasts { z-index: 1700; }
 /* Multi-node sightings under a detection: the closest node glows. */
 .det-seen { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; color: var(--soft); }
 .det-seen .closest { color: #39ff88; text-shadow: 0 0 8px rgba(57,255,136,0.55); font-weight: 600; }
+
+/* Live targets on the map: a pulsing magenta crosshair placed by signal among
+   the nodes that hear it; the closest node's line is green. */
+.tgt { position: relative; width: 0; height: 0; }
+.tgt-dot { position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid #ff4fd8; background: rgba(255,79,216,0.25); box-shadow: 0 0 12px #ff4fd8;
+    animation: tgtPulse 1.4s ease-out infinite; }
+.tgt-label { position: absolute; left: 12px; top: -10px; white-space: nowrap; font-size: 11px; line-height: 1.25;
+    padding: 2px 6px; border-radius: 4px; background: rgba(6,8,11,0.85); color: #ffd1f5; border: 1px solid rgba(255,79,216,0.5); }
+.tgt-label b { color: #39ff88; }
+@keyframes tgtPulse { 0% { box-shadow: 0 0 0 0 rgba(255,79,216,0.7); } 100% { box-shadow: 0 0 0 16px rgba(255,79,216,0); } }
+.nearest:empty { display: none; }
+.nearest { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.near-head { color: var(--soft); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+.near-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 5px 8px; border: 1px solid var(--line-strong);
+    border-radius: 6px; cursor: pointer; background: rgba(255,79,216,0.05); }
+.near-name { color: #ffd1f5; font-weight: 600; }
+.near-mac { color: var(--soft); font-family: var(--mono, monospace); font-size: 11px; }
+.near-close { color: #39ff88; text-shadow: 0 0 8px rgba(57,255,136,0.55); font-weight: 600; }
+.near-other { color: #fbbf24; }
+
+.map-tgt-btn.on { opacity: 1; color: #ff4fd8; border-color: rgba(255,79,216,0.5) !important; box-shadow: 0 0 12px rgba(255,79,216,0.3); }
+.near-eye { flex: none; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: #ff4fd8; border: 1px solid rgba(255,79,216,0.55); }
+.near-row.hidden-tgt { opacity: 0.5; background: transparent; }
+.near-row.hidden-tgt .near-eye { color: var(--soft); border-color: var(--line-strong); }
+
+/* ---------- console layout ---------- */
+/* Collapsible sections: a header bar with a chevron; folded = header only. */
+.sec { flex: none; margin-bottom: 8px; }
+.sec-head { display: flex; align-items: center; justify-content: space-between; width: 100%; gap: 8px; padding: 4px 2px; margin-bottom: 6px;
+    background: none; border: none; border-bottom: 1px solid var(--line); cursor: pointer; color: var(--muted);
+    font-family: var(--sans); font-size: 10.5px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
+.sec-head:hover { color: var(--accent); }
+.chev { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .18s; }
+.sec.collapsed .chev { transform: rotate(-90deg); }
+.sec.collapsed .sec-body { display: none; }
+.sec.collapsed .sec-head { margin-bottom: 0; }
+.sec-near:has(#nearest:empty) { display: none; }
+.sec-near .sec-head span { color: #ff4fd8; }
+/* Bottom dock: tab bar always visible; folds to just that bar. */
+.tabs-panel { position: relative; }
+.tabs .dock-toggle { margin-left: auto; flex: none; background: none; border: 1px solid var(--line-strong); border-radius: 6px;
+    color: var(--muted); cursor: pointer; width: 30px; height: 26px; display: inline-flex; align-items: center; justify-content: center; align-self: center; }
+.tabs .dock-toggle:hover { color: var(--accent); border-color: var(--accent); }
+.tabs-panel:not(.collapsed) .dock-toggle .chev { transform: none; }
+.tabs-panel.collapsed .dock-toggle .chev { transform: rotate(180deg); }
+.tabs-panel.collapsed .dock-body { display: none; }
+.tabs-panel.collapsed .tabs { margin-bottom: 0; border-bottom: none; }
+.tabs-panel.collapsed .tab.active { border-bottom-color: transparent; }
+.dock-grip { display: none; }
+@media (min-width: 1181px) {
+    html, body { height: 100%; overflow: hidden; }
+    body { display: flex; flex-direction: column; }
+    .topbar { flex: none; position: relative; }
+    main.grid { flex: 1 1 auto; min-height: 0;
+        grid-template-rows: minmax(0, 1fr) auto; }
+    .fleet-panel, .feed-panel, .map-panel { min-height: 0; }
+    .fleet-panel .node-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+    .feed-panel .feed { flex: 1 1 auto; min-height: 0; }
+    .tabs-panel { min-height: 0; padding-top: 8px; }
+    .tabs-panel:not(.collapsed) { height: var(--dock-h, 42vh); }
+    .tabs-panel.collapsed { padding-bottom: 8px; }
+    .dock-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 4px; }
+    .dock-grip { display: block; position: absolute; left: 50%; top: -9px; transform: translateX(-50%); width: 70px; height: 12px;
+        cursor: ns-resize; border-radius: 6px; z-index: 5; }
+    .dock-grip::after { content: ""; position: absolute; left: 15px; right: 15px; top: 4px; height: 3px; border-radius: 2px; background: var(--line-strong); }
+    .dock-grip:hover::after { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+}

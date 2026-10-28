@@ -82,6 +82,16 @@ class FleetTest(unittest.TestCase):
                                    "desc": "Pineapple", "node": "A1B2C3", "dom": "wifi"})
         self.assertEqual(self.fleet.sightings["00:13:37:AA:BB:CC"]["A1B2C3"][0], -40)
 
+    def test_signal_update_moves_target_not_feed(self):
+        self.fleet.feed_line(TLM)
+        self.fleet.feed_line('{"mac":"00:13:37:AA:BB:CC","rssi":-60,"type":"BEACON","match":"001337",'
+                             '"desc":"Pineapple","node":"A1B2C3","dom":"wifi"}')
+        self.fleet.feed_line('{"mac":"00:13:37:AA:BB:CC","rssi":-41,"type":"BEACON","match":"001337",'
+                             '"desc":"Pineapple","node":"D4E5F6","dom":"wifi","upd":1}')
+        self.assertEqual(self.store.query_detections()[0], 1)                 # no row for the update
+        sight = [p for e, p in self.events if e == "sighting"]
+        self.assertEqual((len(sight), sight[0]["node"], sight[0]["seen_by"][0][:2]), (1, "D4E5F6", ["D4E5F6", -41]))
+
     def test_dedup_across_sources(self):
         line = '{"mac":"AA:BB:CC:DD:EE:FF","rssi":-60,"type":"OUI","match":"AABBCC","desc":"X"}'
         self.fleet.feed_line(line, "serial")

@@ -210,6 +210,15 @@ class Fleet:
             dom = "wifi" if str(d.get("type", "")).upper() in ("PROBE", "BEACON") else "ble"
         key = (node, mac, d.get("type"))
         seen_by = self._sighting(mac, node, d.get("rssi"), now)
+        if d.get("upd"):
+            # A signal update: the device is still in view of `node`. It moves
+            # the live target and the "closest" call; no feed row, no alert.
+            role = "home" if node == self.home_id else None
+            self._node_seen(node, role, 0, None, None, now, from_det=True)
+            self.emit("sighting", {"ts": now, "node": node, "mac": mac, "rssi": d.get("rssi"),
+                                   "type": d.get("type"), "match": d.get("match"),
+                                   "descr": descr.strip(), "dom": dom, "seen_by": seen_by})
+            return
         with self.lock:
             for k, ts in list(self.recent.items()):
                 if now - ts > DEDUP_WINDOW:

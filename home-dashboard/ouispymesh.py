@@ -81,6 +81,9 @@ offline_mode = bool(args.demo or args.replay)
 db_path = args.db or os.path.join(HERE, "ouispy-demo.db" if offline_mode else "ouispy.db")
 
 app = Flask(__name__)
+# Always render the page from the template on disk: the page and its versioned
+# script must change together, even if the files are edited while running.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 # ----------------------------------------------------------------------
 # Access control. The dashboard can reboot, re-channel and re-filter the

@@ -283,7 +283,7 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
     const tools = L.control({ position: "topright" });
     tools.onAdd = () => {
         const div = L.DomUtil.create("div", "map-tools");
-        ["mapLayer", "mapLinks", "mapTraffic", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
+        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
         return div;
@@ -970,9 +970,132 @@ function flashScreen() {
 const ALERT_QUIET_S = 300, ALERT_GAP_MS = 2000;
 S.macSeen = {};
 S.lastAlert = 0;
+// ------------------------------------------------------------------
+// Live targets: every device heard in the last TARGET_WINDOW_S seconds, drawn
+// where its signal puts it among the nodes that hear it, with a line from
+// each of them (the closest one bright). The point is the RSSI-weighted
+// centroid (dBm -> mW), so it hugs the strongest node: "closest node" now,
+// and the same inputs real triangulation will use once nodes ring an area.
+// ------------------------------------------------------------------
+const TARGET_WINDOW_S = 60;
+S.targets = {};
+S.sight = [];
+// Toggles, per browser: all targets on/off, and any device hidden on its own.
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } };
+S.tgtOn = lsGet("ouispy.targetsOn", true);
+S.tgtHidden = new Set(lsGet("ouispy.targetsHidden", []));
+function syncTargetBtn() {
+    const b = $("mapTargets");
+    b.classList.toggle("on", S.tgtOn);
+    b.setAttribute("aria-pressed", S.tgtOn ? "true" : "false");
+    b.querySelector("span").textContent = S.tgtOn ? "Targets: on" : "Targets: off";
+}
+$("mapTargets").onclick = () => { S.tgtOn = !S.tgtOn; lsSet("ouispy.targetsOn", S.tgtOn); syncTargetBtn(); renderTargets(); };
+function toggleTarget(mac) {
+    S.tgtHidden.has(mac) ? S.tgtHidden.delete(mac) : S.tgtHidden.add(mac);
+    lsSet("ouispy.targetsHidden", [...S.tgtHidden]);
+    renderTargets();
+}
+syncTargetBtn();
+function onSighting(d) {
+    S.sight.unshift(d);
+    S.sight = S.sight.filter((x) => Date.now() / 1000 - x.ts <= TARGET_WINDOW_S).slice(0, 400);
+    renderTargets();
+}
+function liveTargets() {
+    const now = Date.now() / 1000, by = {};
+    // Detections plus the quiet signal updates nodes send while a device stays in view.
+    const rows = S.sight.length ? [...S.sight, ...S.dets].sort((a, b) => b.ts - a.ts) : S.dets;
+    for (const d of rows) {
+        if (now - d.ts > TARGET_WINDOW_S) break;          // newest first
+        if (d.rssi == null) continue;
+        const t = by[d.mac] = by[d.mac] || { mac: d.mac, name: devAlias(d.mac, d.descr || d.match), last: d.ts, per: {} };
+        if (!t.per[d.node]) t.per[d.node] = { rssi: d.rssi, ts: d.ts };   // newest per node
+    }
+    return Object.values(by).map((t) => {
+        t.seen = Object.entries(t.per).map(([node, v]) => ({ node, ...v })).sort((a, b) => b.rssi - a.rssi);
+        t.closest = t.seen[0].node;
+        return t;
+    }).sort((a, b) => b.last - a.last);
+}
+function targetPoint(t) {
+    let sw = 0, lat = 0, lon = 0;
+    for (const s of t.seen) {
+        const n = nodeById(s.node);
+        if (!n || n.lat == null) continue;
+        const w = Math.pow(10, s.rssi / 10);
+        sw += w; lat += w * n.lat; lon += w * n.lon;
+    }
+    return sw ? [lat / sw, lon / sw] : null;
+}
+function renderTargets() {
+    if (!S.fleet) return;
+    if (!S.targetLayer) S.targetLayer = L.layerGroup().addTo(map);
+    const live = liveTargets(), keep = new Set();
+    for (const t of live) {
+        if (!S.tgtOn || S.tgtHidden.has(t.mac)) continue;
+        const p = targetPoint(t);
+        if (!p) continue;
+        keep.add(t.mac);
+        let g = S.targets[t.mac];
+        const label = `${esc(t.name)}<br><b>${esc(nodeName(t.closest))}</b> ${t.seen[0].rssi} dBm`;
+        if (!g) {
+            g = S.targets[t.mac] = { lines: {}, marker: L.marker(p, { interactive: true, keyboard: false, zIndexOffset: 500,
+                icon: L.divIcon({ className: "", iconSize: [0, 0], html: `<div class="tgt"><span class="tgt-dot"></span><span class="tgt-label"></span></div>` }) }).addTo(S.targetLayer) };
+            g.marker.on("click", () => openDevice(t.mac));
+        } else {
+            const ll = g.marker.getLatLng();
+            if (Math.abs(ll.lat - p[0]) > 1e-9 || Math.abs(ll.lng - p[1]) > 1e-9) g.marker.setLatLng(p);
+        }
+        const el = g.marker.getElement();
+        const lab = el && el.querySelector(".tgt-label");
+        if (lab && lab.innerHTML !== label) lab.innerHTML = label;
+        const lineKeep = new Set();
+        for (const s of t.seen) {
+            const n = nodeById(s.node);
+            if (!n || n.lat == null) continue;
+            lineKeep.add(s.node);
+            const close = s.node === t.closest;
+            const age = Date.now() / 1000 - s.ts;
+            const style = { color: close ? "#39ff88" : "#fbbf24", weight: close ? 3 : 1.5,
+                            dashArray: close ? null : "4 6", opacity: Math.max(0.25, 1 - age / TARGET_WINDOW_S), interactive: false };
+            let ln = g.lines[s.node];
+            if (!ln) ln = g.lines[s.node] = L.polyline([[n.lat, n.lon], p], style).addTo(S.targetLayer);
+            else { ln.setLatLngs([[n.lat, n.lon], p]); ln.setStyle(style); }
+        }
+        for (const id of Object.keys(g.lines)) {
+            if (!lineKeep.has(id)) { S.targetLayer.removeLayer(g.lines[id]); delete g.lines[id]; }
+        }
+    }
+    for (const mac of Object.keys(S.targets)) {
+        if (keep.has(mac)) continue;
+        const g = S.targets[mac];
+        S.targetLayer.removeLayer(g.marker);
+        Object.values(g.lines).forEach((l) => S.targetLayer.removeLayer(l));
+        delete S.targets[mac];
+    }
+    // The list under the map: closest node per live device, every node's signal.
+    const box = $("nearest");
+    const html = live.length ? live.slice(0, 8).map((t) => `
+        <div class="near-row ${S.tgtOn && !S.tgtHidden.has(t.mac) ? "" : "hidden-tgt"}" data-mac="${esc(t.mac)}">
+            <button class="near-eye" data-mac="${esc(t.mac)}" title="${S.tgtHidden.has(t.mac) ? "Show this device on the map" : "Hide this device on the map"}">${S.tgtHidden.has(t.mac) ? "Hidden" : "On map"}</button>
+            <span class="near-name">${esc(t.name)}</span>
+            <span class="near-mac">${esc(t.mac)}</span>
+            <span class="near-close">${esc(nodeName(t.closest))} ${t.seen[0].rssi} dBm</span>
+            ${t.seen.slice(1).map((s) => `<span class="near-other">${esc(nodeName(s.node))} ${s.rssi}</span>`).join("")}
+        </div>`).join("") : "";
+    if (box.innerHTML !== html) {
+        box.innerHTML = html;
+        box.querySelectorAll(".near-row").forEach((r) => r.onclick = () => openDevice(r.dataset.mac));
+        box.querySelectorAll(".near-eye").forEach((b) => b.onclick = (e) => { e.stopPropagation(); toggleTarget(b.dataset.mac); });
+    }
+}
+
 function onDetection(d) {
     S.dets.unshift(d);
     S.dets.length = Math.min(S.dets.length, 300);
+    renderTargets();
     if (S.statsBase) {
         S.statsBase.total++; S.statsBase.day++;
         if (d.is_new) S.statsBase.macs++;
@@ -1801,7 +1924,7 @@ $("vAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("vSave
 $("vHistory").onclick = () => {
     $("hQ").value = S.device;
     closeDevice();
-    document.querySelector('.tab[data-tab="history"]').click();
+    showTab("history");
     loadHistory(false);
 };
 
@@ -2005,7 +2128,57 @@ $("fkHome").onclick = () => twoTap($("fkHome"), async () => {
 });
 
 // tabs
+// ------------------------------------------------------------------
+// Console layout: collapsible sections and the bottom dock. On desktop the
+// page is one screen (no page scroll); every column scrolls inside itself.
+// What is collapsed, and the dock height, are remembered per browser.
+// ------------------------------------------------------------------
+const secState = lsGet("ouispy.collapsed", {});
+document.querySelectorAll(".sec").forEach((sec) => {
+    const key = sec.dataset.sec;
+    sec.classList.toggle("collapsed", !!secState[key]);
+    sec.querySelector(".sec-head").onclick = () => {
+        sec.classList.toggle("collapsed");
+        secState[key] = sec.classList.contains("collapsed");
+        lsSet("ouispy.collapsed", secState);
+    };
+});
+const dock = document.querySelector(".tabs-panel");
+function setDock(open) {
+    dock.classList.toggle("collapsed", !open);
+    $("dockToggle").title = open ? "Collapse this panel" : "Expand this panel";
+    lsSet("ouispy.dockOpen", open);
+    setTimeout(() => map.invalidateSize(), 220);   // the map row grew or shrank
+}
+function setDockHeight(px) {
+    const h = Math.round(Math.max(160, Math.min(window.innerHeight * 0.8, px)));
+    document.documentElement.style.setProperty("--dock-h", h + "px");
+    return h;
+}
+setDockHeight(lsGet("ouispy.dockH", Math.round(window.innerHeight * 0.42)));
+setDock(lsGet("ouispy.dockOpen", true));
+$("dockToggle").onclick = () => setDock(dock.classList.contains("collapsed"));
+$("dockGrip").onpointerdown = (e) => {
+    if (dock.classList.contains("collapsed")) setDock(true);
+    e.preventDefault();
+    const grip = e.currentTarget;
+    grip.setPointerCapture(e.pointerId);
+    grip.onpointermove = (m) => setDockHeight(window.innerHeight - m.clientY - 12);
+    grip.onpointerup = (u) => {
+        grip.onpointermove = grip.onpointerup = null;
+        lsSet("ouispy.dockH", setDockHeight(window.innerHeight - u.clientY - 12));
+        map.invalidateSize();
+    };
+};
+// Open a dock tab from code (never folds it, unlike pressing the open tab).
+function showTab(name) {
+    const t = document.querySelector(`.tab[data-tab="${name}"]`);
+    if (dock.classList.contains("collapsed") || !t.classList.contains("active")) t.click();
+}
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
+    // The active tab's own button folds the dock; any tab unfolds it.
+    if (t.classList.contains("active") && !dock.classList.contains("collapsed")) return setDock(false);
+    if (dock.classList.contains("collapsed")) setDock(true);
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
     document.querySelectorAll(".tab-body").forEach((b) => b.classList.toggle("active", b.id === `tab-${t.dataset.tab}`));
     if (t.dataset.tab === "settings") { loadSettingsForm(); loadFleetKeyStatus(); }
@@ -2086,6 +2259,7 @@ async function boot() {
     const sock = io({ transports: ["websocket", "polling"] });
     sock.on("fleet", applyFleet);
     sock.on("det", onDetection);
+    sock.on("sighting", onSighting);
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
     sock.on("mac_aliases", (m) => {
@@ -2149,6 +2323,7 @@ async function boot() {
 
 setInterval(() => {
     $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
+    renderTargets();   // age lines out, drop devices gone quiet
     document.querySelectorAll("[data-age]").forEach((el) => {
         const ts = Number(el.dataset.age);
         const off = el.textContent.startsWith("last ");
