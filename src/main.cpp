@@ -3272,7 +3272,18 @@ static const char* registerDetection(const char* mac, FilterType type, int rssi,
         if (strcmp(dev.macAddress.c_str(), mac) != 0) continue;
         if (wifiDomain && dev.matchedType != type) continue;
 
-        if (dev.inCooldown && now < dev.cooldownUntil) return nullptr;
+        if (dev.inCooldown && now < dev.cooldownUntil) {
+            // Still in view during the cooldown: keep tracking it, so it does
+            // not look like it just came back when the cooldown ends (that
+            // re-alerted a device that never left, and ate its updates).
+            dev.lastSeen = now;
+            dev.rssi = rssi;
+            if (now - dev.lastReport >= SIGNAL_UPDATE_MS) {
+                dev.lastReport = now;
+                return "UPD";
+            }
+            return nullptr;
+        }
         if (dev.inCooldown) dev.inCooldown = false;
 
         unsigned long timeSinceLastSeen = now - dev.lastSeen;
