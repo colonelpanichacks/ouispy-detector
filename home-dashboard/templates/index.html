@@ -118,46 +118,70 @@
         <div class="dock-body">
 
         <div class="tab-body active" id="tab-history">
-            <div class="filters">
-                <input type="text" id="hQ" class="field" placeholder="Search MAC, alias, vendor, type...">
-                <select id="hNode" class="field"><option value="">All nodes</option></select>
-                <select id="hDom" class="field">
-                    <option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option>
-                </select>
-                <select id="hRange" class="field">
-                    <option value="">All time</option><option value="3600">Last hour</option>
-                    <option value="86400">Last 24 h</option><option value="604800">Last 7 days</option>
-                </select>
-                <div class="export">
-                    <a class="btn ghost" id="expCsv" href="#">CSV</a>
-                    <a class="btn ghost" id="expJson" href="#">JSON</a>
-                    <a class="btn ghost" href="/api/export/sightings.csv" title="Node online/offline + RSSI samples">Sightings</a>
+            <div class="fleet-actions tab-cards">
+                <div class="fa">
+                    <h4>Search</h4>
+                    <input type="text" id="hQ" class="field" placeholder="Search MAC, alias, vendor, type...">
+                </div>
+                <div class="fa">
+                    <h4>Filter</h4>
+                    <div class="sel-row">
+                        <select id="hNode" class="field"><option value="">All nodes</option></select>
+                        <select id="hDom" class="field">
+                            <option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option>
+                        </select>
+                        <select id="hRange" class="field">
+                            <option value="">All time</option><option value="3600">Last hour</option>
+                            <option value="86400">Last 24 h</option><option value="604800">Last 7 days</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="fa">
+                    <h4>Export</h4>
+                    <div class="ctl-row">
+                        <a class="btn ghost" id="expCsv" href="#">CSV</a>
+                        <a class="btn ghost" id="expJson" href="#">JSON</a>
+                        <a class="btn ghost" href="/api/export/sightings.csv" title="Node online/offline + RSSI samples">Sightings</a>
+                    </div>
                 </div>
             </div>
-            <div class="table-wrap">
-                <table class="htable">
-                    <thead><tr><th>Time</th><th>Node</th><th>MAC</th><th>Vendor / match</th><th>Type</th><th>RSSI</th><th>Src</th></tr></thead>
-                    <tbody id="hBody"></tbody>
-                </table>
+            <div class="fa fa-table">
+                <h4><span>Detections</span><span class="fa-count" id="hTotal"></span></h4>
+                <div class="table-wrap">
+                    <table class="htable">
+                        <thead><tr><th>Time</th><th>Node</th><th>MAC</th><th>Vendor / match</th><th>Type</th><th>RSSI</th><th>Src</th></tr></thead>
+                        <tbody id="hBody"></tbody>
+                    </table>
+                </div>
+                <div class="pager"><button class="btn ghost" id="hMore">Load more</button></div>
             </div>
-            <div class="pager"><span id="hTotal"></span><button class="btn ghost" id="hMore">Load more</button></div>
         </div>
 
         <div class="tab-body" id="tab-devices">
-            <div class="filters dev-filters">
-                <input type="text" id="vQ" class="field" placeholder="Search MAC, alias, vendor...">
-                <select id="vNode" class="field"><option value="">Seen by any node</option></select>
-                <select id="vDom" class="field">
-                    <option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option>
-                </select>
+            <div class="fleet-actions tab-cards two-cards">
+                <div class="fa">
+                    <h4>Search</h4>
+                    <input type="text" id="vQ" class="field" placeholder="Search MAC, alias, vendor...">
+                </div>
+                <div class="fa">
+                    <h4>Filter</h4>
+                    <div class="sel-row two">
+                        <select id="vNode" class="field"><option value="">Seen by any node</option></select>
+                        <select id="vDom" class="field">
+                            <option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option>
+                        </select>
+                    </div>
+                </div>
             </div>
-            <div class="table-wrap">
-                <table class="htable">
-                    <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
-                    <tbody id="vBody"></tbody>
-                </table>
+            <div class="fa fa-table">
+                <h4><span>Devices</span><span class="fa-count" id="vTotal"></span></h4>
+                <div class="table-wrap">
+                    <table class="htable">
+                        <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
+                        <tbody id="vBody"></tbody>
+                    </table>
+                </div>
             </div>
-            <div class="pager"><span id="vTotal"></span></div>
         </div>
 
         <div class="tab-body" id="tab-fleetctl">

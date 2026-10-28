@@ -821,3 +821,21 @@ body.map-maxed .toasts { z-index: 1700; }
 
 /* The sticky top bar stays above Leaflet controls (z 1000) when the page scrolls. */
 .topbar { z-index: 1200; }
+
+/* The dock's tab bar never shrinks: tall tab content (Fleet Control) squeezed it to
+   a sliver, which clipped the tab labels. The content scrolls instead. */
+.tabs-panel .tabs { flex: none; }
+
+/* History / Devices: the same cards as Fleet Control. */
+.tab-cards { grid-template-columns: minmax(240px, 1.4fr) minmax(320px, 2fr) minmax(220px, 1fr); }
+.tab-cards.two-cards { grid-template-columns: minmax(240px, 1fr) minmax(320px, 1fr); }
+.tab-cards .fa h4, .fa-table h4 { margin-bottom: 8px; }
+.sel-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.sel-row.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fa-table h4 { display: flex; align-items: baseline; justify-content: space-between; }
+.fa-count { font-family: var(--mono); font-size: 11px; letter-spacing: 0; text-transform: none; color: var(--accent); }
+.fa-table .table-wrap { background: rgba(0,0,0,0.18); }
+.fa-table .pager { justify-content: flex-end; }
+.fa-table .pager:empty { display: none; }
+@media (max-width: 1180px) { .tab-cards, .tab-cards.two-cards { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .sel-row { grid-template-columns: 1fr; } }

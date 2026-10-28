@@ -1163,7 +1163,7 @@ function onDetection(d) {
     if (!histFiltered()) {
         $("hBody").insertAdjacentHTML("afterbegin", histRow(d));
         S.hist.total = (S.hist.total || 0) + 1;
-        $("hTotal").textContent = `${S.hist.total} detections`;
+        $("hTotal").textContent = `${S.hist.total} detection${S.hist.total === 1 ? "" : "s"}`;
     }
     if (S.selected === d.node && $("drawer").classList.contains("open")) {
         $("dDets").insertAdjacentHTML("afterbegin", detHtml(d, true));
@@ -1319,7 +1319,7 @@ async function loadHistory(append) {
     if (append) $("hBody").insertAdjacentHTML("beforeend", html);
     else $("hBody").innerHTML = html || `<tr><td colspan="7" style="text-align:center;padding:20px">No matching detections</td></tr>`;
     S.hist.offset += r.rows.length;
-    $("hTotal").textContent = `${r.total} detections`;
+    $("hTotal").textContent = `${r.total} detection${r.total === 1 ? "" : "s"}`;
     $("hMore").style.display = S.hist.offset < r.total ? "" : "none";
     const ep = histParams().toString();
     $("expCsv").href = `/api/export/detections.csv${ep ? "?" + ep : ""}`;
@@ -1893,7 +1893,7 @@ async function loadDevices() {
     if ($("vNode").value) p.set("node", $("vNode").value);
     if ($("vDom").value) p.set("dom", $("vDom").value);
     const r = await api(`/api/devices?${p}`);
-    $("vTotal").textContent = `${r.total} devices${r.total > r.rows.length ? ` (showing ${r.rows.length})` : ""}`;
+    $("vTotal").textContent = `${r.total} device${r.total === 1 ? "" : "s"}${r.total > r.rows.length ? ` (showing ${r.rows.length})` : ""}`;
     $("vBody").innerHTML = r.rows.map((d) => {
         const al = devAlias(d.mac);
         return `<tr data-mac="${esc(d.mac)}"><td class="v">${al ? `<span class="mal">${esc(al)}</span> ` : ""}${esc(d.descr || "")}</td>
