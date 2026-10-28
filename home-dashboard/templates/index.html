@@ -63,6 +63,10 @@
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
                 <span>Targets: on</span>
             </button>
+            <button class="icon-btn map-traffic-btn map-tri-btn" id="mapTri" aria-pressed="false" title="Triangulate: position from 3+ nodes' signal (inside the nodes' area only)">
+                <svg viewBox="0 0 24 24"><path d="M12 3 3 20h18z"/><circle cx="12" cy="14" r="2"/></svg>
+                <span>Triangulate: off</span>
+            </button>
             <button class="icon-btn map-traffic-btn map-lock-btn" id="mapLock" aria-label="Lock node positions" aria-pressed="true" title="Node positions are locked. Click to unlock and drag nodes.">
                 <svg class="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
                 <svg class="i-unlock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.5-2"/></svg>
@@ -72,13 +76,13 @@
                 <svg class="i-max" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
                 <svg class="i-min" viewBox="0 0 24 24"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>
             </button>
-            <label class="trailctl" title="How much GPS trail to draw for carried nodes">
-                <span>Trail</span>
-                <input type="range" id="trailRange" min="0" max="9" step="1" value="3">
-                <b id="trailLabel">30 min</b>
-            </label>
         </div>
         <div id="map"></div>
+        <div class="tri-legend" id="triLegend" hidden>
+            <span>Expected 1&sigma; error, typical BLE device:</span>
+            <i style="--c:57,255,136"></i>&le;2 m <i style="--c:250,204,21"></i>2-5 m <i style="--c:251,146,60"></i>5-8 m
+            <span class="tri-none">no shade = fewer than 3 nodes hear it, or worse than 8 m</span>
+        </div>
         <div class="unplaced" id="unplaced"></div>
     </section>
 
@@ -359,6 +363,8 @@
             <span class="color-dot" id="dColorDot"></span>
             <button class="btn ghost mini" id="dColorReset" title="Back to the default colors">Default</button>
         </div>
+        <label>Map trail <span class="lbl-hint">(where this node has been carried)</span></label>
+        <select id="dTrail" class="field"><option value="0">Off</option><option value="300">5 min</option><option value="900">15 min</option><option value="1800">30 min</option><option value="3600">1 h</option><option value="10800">3 h</option><option value="21600">6 h</option><option value="43200">12 h</option><option value="86400">24 h</option><option value="604800">7 days</option></select>
         <label>Notes</label>
         <textarea id="dNotes" class="field" rows="2" placeholder="Mount point, battery, antenna..."></textarea>
         <div class="dstats" id="dStats"></div>
@@ -439,6 +445,14 @@
             <input type="text" id="vAlias" class="field" maxlength="40" placeholder="e.g. Unit 12 body cam">
             <button class="btn" id="vSave">Save</button>
         </div>
+        <label>Triangulation calibration</label>
+        <div class="help-text cal-info" id="vCalInfo"></div>
+        <div class="ctl-row">
+            <button class="btn" id="vCal" type="button">Calibrate at a spot</button>
+            <button class="btn ghost" id="vCalReset" type="button">Reset</button>
+        </div>
+        <label>Map trail <span class="lbl-hint">(its triangulated track)</span></label>
+        <select id="vTrail" class="field"><option value="0">Off</option><option value="60">1 min</option><option value="300">5 min</option><option value="900">15 min</option><option value="1800">30 min</option></select>
         <label>Notes</label>
         <textarea id="vNotes" class="field" rows="2" placeholder="Where and when it shows up..."></textarea>
         <div class="dstats" id="vStats"></div>

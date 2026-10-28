@@ -839,3 +839,20 @@ body.map-maxed .toasts { z-index: 1700; }
 .fa-table .pager:empty { display: none; }
 @media (max-width: 1180px) { .tab-cards, .tab-cards.two-cards { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .sel-row { grid-template-columns: 1fr; } }
+
+/* Target label sides (declutterLabels) and the dot-only fallback. */
+.tgt.lab-l .tgt-label { left: auto; right: 12px; }
+.tgt.lab-t .tgt-label { left: 0; top: -42px; transform: translateX(-50%); }
+.tgt.lab-b .tgt-label { left: 0; top: 12px; transform: translateX(-50%); }
+.tgt.tgt-mini .tgt-label { display: none; }
+.leaflet-marker-icon:hover .tgt.tgt-mini .tgt-label { display: block; z-index: 10; }
+
+.map-tri-btn.on { opacity: 1; color: #a78bfa; border-color: rgba(167,139,250,0.55) !important; box-shadow: 0 0 12px rgba(167,139,250,0.35); }
+
+.lbl-hint { color: var(--faint); letter-spacing: 0; text-transform: none; font-size: 10.5px; }
+
+.tri-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.tri-legend[hidden] { display: none; }
+.tri-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: rgba(var(--c), 0.55); box-shadow: 0 0 6px rgba(var(--c), 0.6); margin-right: -6px; }
+.tri-legend .tri-none { color: var(--faint); }
+.uncal { color: var(--amber); }

@@ -173,10 +173,14 @@ def _parse_db(path, kind):
 # Signatures the OUI lists can't express (they hold address prefixes only):
 # device-name matches and the like. Installed as fixed filter rows.
 EXTRAS = [
-    {"label": "FLIPPER ZERO (BLE name)",
-     "rows": [("NAME", "Flipper", "Flipper Zero (BLE name)")],
+    {"label": "FLIPPER ZERO (BLE name + service UUIDs)",
+     "rows": [("NAME", "Flipper", "Flipper Zero (BLE name)"),
+              ("SVC", "3081", "Flipper Zero svc UUID (black)"),
+              ("SVC", "3082", "Flipper Zero svc UUID (white)"),
+              ("SVC", "3083", "Flipper Zero svc UUID (transparent)")],
      "meta": {"Category": "Pentest / Hacking Tool",
-              "Common Devices": "Flipper Zero: BLE device name contains \"Flipper\""}},
+              "Common Devices": "Flipper Zero: BLE device name contains \"Flipper\"; advertises "
+                                "16-bit service UUID 0x3081 / 0x3082 / 0x3083 by case color"}},
 ]
 
 

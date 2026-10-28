@@ -50,6 +50,9 @@ async function api(path, opts = {}) {
 // ------------------------------------------------------------------
 // helpers
 // ------------------------------------------------------------------
+// Per-browser preferences (layout, toggles); every access survives a blocked or private storage.
+function lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } }
 function nodeById(id) { return S.fleet.nodes.find((n) => n.id === id); }
 function nodeName(id) {
     const n = nodeById(id);
@@ -316,7 +319,7 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
     const tools = L.control({ position: "topright" });
     tools.onAdd = () => {
         const div = L.DomUtil.create("div", "map-tools");
-        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
+        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapTri", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
         return div;
@@ -429,6 +432,7 @@ map.on("moveend", () => {
     }, 800);
 });
 map.on("click", (e) => {
+    if (S.calib && S.calib.stage === "place") return calibAt(e.latlng);
     if (!S.placing || !S.selected) return;
     setNodePos(S.selected, e.latlng.lat, e.latlng.lng);
     setPlacing(false);
@@ -688,17 +692,14 @@ $("mapLinks").onclick = async () => {
 // in this browser; longer windows are fetched from the stored history.
 const TRAIL_STEPS = [0, 300, 900, 1800, 3600, 10800, 21600, 43200, 86400, 604800];
 const TRAIL_NAMES = ["Off", "5 min", "15 min", "30 min", "1 h", "3 h", "6 h", "12 h", "24 h", "7 days"];
-S.trailSeconds = 1800;
+// Per node now (node drawer), per browser; the old single slider's value
+// becomes every node's default.
+S.trailDefault = TRAIL_STEPS.includes(Number(lsGet("ouispy.trail", 1800))) ? Number(lsGet("ouispy.trail", 1800)) : 1800;
+S.trailPer = lsGet("ouispy.trailPer", {});
 S.trailLoaded = 1800;
-try {
-    const v = localStorage.getItem("ouispy.trail");
-    if (v !== null && TRAIL_STEPS.includes(Number(v))) S.trailSeconds = Number(v);
-} catch (e) { /* storage blocked: default */ }
-function syncTrailSlider() {
-    const i = Math.max(0, TRAIL_STEPS.indexOf(S.trailSeconds));
-    $("trailRange").value = i;
-    $("trailLabel").textContent = TRAIL_NAMES[i];
-}
+function trailFor(nid) { return S.trailPer[nid] ?? S.trailDefault; }
+function trailMax() { return Math.max(S.trailDefault, ...Object.values(S.trailPer), 0); }
+function syncTrailSlider() { /* the slider moved into the node drawer (dTrail) */ }
 async function loadTrails(seconds) {
     const tr = await api(`/api/tracks?seconds=${Math.max(seconds, 60)}`);
     S.trails = tr.tracks || {};
@@ -706,25 +707,24 @@ async function loadTrails(seconds) {
     for (const [k, v] of Object.entries(tr.live || {})) S.gpsLive[k] = v.ts;
     renderTrails();
 }
-$("trailRange").addEventListener("input", () => {
-    S.trailSeconds = TRAIL_STEPS[Number($("trailRange").value)];
-    $("trailLabel").textContent = TRAIL_NAMES[Number($("trailRange").value)];
-    try { localStorage.setItem("ouispy.trail", String(S.trailSeconds)); } catch (e) { /* ignore */ }
+$("dTrail").onchange = () => {
+    S.trailPer[S.selected] = Number($("dTrail").value);
+    lsSet("ouispy.trailPer", S.trailPer);
+    if (trailMax() > S.trailLoaded) loadTrails(trailMax());   // need older points
     renderTrails();
-});
-$("trailRange").addEventListener("change", () => {
-    if (S.trailSeconds > S.trailLoaded) loadTrails(S.trailSeconds);   // need older points
-});
+};
 
 function renderTrails() {
     if (!S.trailLayer) S.trailLayer = L.layerGroup().addTo(map);
     S.trailLayer.clearLayers();
-    if (!S.trailSeconds) return;
-    const cutoff = now() - S.trailSeconds;
     for (const [nid, pts] of Object.entries(S.trails)) {
+        const secs = trailFor(nid);
+        if (!secs) continue;
+        const cutoff = now() - secs;
         const ll = pts.filter((p) => p[0] >= cutoff).map((p) => [p[1], p[2]]);
         if (ll.length < 2) continue;
-        S.trailLayer.addLayer(L.polyline(ll, { color: "#f0abfc", weight: 3, opacity: 0.7, dashArray: "2 6", interactive: false }));
+        const n = nodeById(nid);
+        S.trailLayer.addLayer(L.polyline(ll, { color: n && n.color != null ? nodeColor(n) : "#f0abfc", weight: 3, opacity: 0.7, dashArray: "2 6", interactive: false }));
     }
 }
 function onGps(g) {
@@ -801,7 +801,11 @@ function declutterLabels() {
     const marks = Object.values(S.markers).map((m) => m.getElement() && m.getElement().querySelector(".nmark"))
         .filter(Boolean);
     const placed = [];
-    const cores = marks.map((el) => el.querySelector(".core").getBoundingClientRect());
+    const tgts = Object.values(S.targets || {}).map((g) => g.marker.getElement() && g.marker.getElement().querySelector(".tgt"))
+        .filter(Boolean);
+    // Node dots and target dots are both off limits to every label.
+    const cores = marks.map((el) => el.querySelector(".core").getBoundingClientRect())
+        .concat(tgts.map((el) => el.querySelector(".tgt-dot").getBoundingClientRect()));
     const hit = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
     // selected node first, so it gets the best spot
     marks.sort((a, b) => (b.classList.contains("sel") ? 1 : 0) - (a.classList.contains("sel") ? 1 : 0));
@@ -819,6 +823,25 @@ function declutterLabels() {
         el.classList.remove(...LABEL_SIDES);
         el.classList.add(best);
         placed.push(lab.getBoundingClientRect());
+    }
+    // Then the live-target labels, which yield to node labels: the first
+    // side clear of every label and dot; none clear = dot only (the label
+    // shows on hover, and the Nearest list has it all).
+    for (const el of tgts) {
+        const lab = el.querySelector(".tgt-label");
+        el.classList.remove("tgt-mini");
+        let best = null;
+        for (const side of LABEL_SIDES) {
+            el.classList.remove(...LABEL_SIDES);
+            el.classList.add(side);
+            const r = lab.getBoundingClientRect();
+            const box = { left: r.left - 3, right: r.right + 3, top: r.top - 3, bottom: r.bottom + 3 };
+            if (!placed.some((p) => hit(box, p)) && !cores.some((c) => hit(box, c))) { best = side; break; }
+        }
+        el.classList.remove(...LABEL_SIDES);
+        el.classList.add(best || "lab-r");
+        if (best) placed.push(lab.getBoundingClientRect());
+        else el.classList.add("tgt-mini");
     }
 }
 map.on("zoomend moveend", () => { renderLinks(); declutterLabels(); });
@@ -1014,8 +1037,6 @@ const TARGET_WINDOW_S = 60;
 S.targets = {};
 S.sight = [];
 // Toggles, per browser: all targets on/off, and any device hidden on its own.
-const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } };
 S.tgtOn = lsGet("ouispy.targetsOn", true);
 S.tgtHidden = new Set(lsGet("ouispy.targetsHidden", []));
 function syncTargetBtn() {
@@ -1031,6 +1052,279 @@ function toggleTarget(mac) {
     renderTargets();
 }
 syncTargetBtn();
+// ------------------------------------------------------------------
+// Triangulation (map toolbar switch). Each node's recent readings of a
+// device (recency-weighted, minus that node's calibration offset) become a
+// distance through the log-distance path-loss model, d = 10^((P0-RSSI)/(10n));
+// a weighted least-squares fit of those circles gives the position. RSSI is
+// only trustworthy inside the polygon of the nodes that hear it, so a fix
+// needs 3+ of them and must land inside that polygon; outside it the target
+// falls back to its closest node. Timestamps only weight and pair readings:
+// radio covers 30 cm per ns, so node clocks cannot time the signal itself.
+// ------------------------------------------------------------------
+const TRI_WINDOW_S = 45;     // readings older than this are ignored
+const TRI_K_MAX = 5;          // readings in a window are correlated: count at most 5 as independent
+S.triOn = lsGet("ouispy.triOn", false);
+S.triState = {};          // mac -> { p: [lat, lon], trail: [[lat, lon, ts], ...] }
+S.devTrail = lsGet("ouispy.devTrail", {});   // mac -> seconds of track to draw (device drawer)
+function devTrailFor(mac) { return S.devTrail[mac] ?? 300; }
+function triModel() {
+    return { p0_ble: -59, p0_wifi: -40, n: 2.7, sigma: 4, max_err: 8, smooth: 0.35, offsets: {}, devices: {},
+             ...((S.settings && S.settings.tri) || {}) };
+}
+// Device model: its calibrated 1 m power and path-loss exponent, else the generic one.
+function devModel(mac, dom, m) {
+    const c = m.devices[mac];
+    return c ? { p0: c.p0, n: c.n, cal: true } : { p0: dom === "wifi" ? m.p0_wifi : m.p0_ble, n: m.n, cal: false };
+}
+// Local flat projection in metres around a reference point (fine at mesh scale).
+function triProj(lat0, lon0) {
+    const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
+    return { to: (lat, lon) => [(lon - lon0) * kx, (lat - lat0) * ky], from: (x, y) => [lat0 + y / ky, lon0 + x / kx] };
+}
+const LN10 = Math.log(10);
+// Fisher information of a position from RSSI at nodes P (metres) with
+// per-node weights k_i/sigma^2: the gradient of the mean RSSI model
+// mu_i = P0 - 10 n log10(r_i) is g_i = -(10 n / ln10) (x - p_i) / r_i^2.
+// Its inverse is the covariance of the best possible (and of our ML) estimate.
+function fisher(x, y, P, w, nExp) {
+    let a = 0, b = 0, c = 0;
+    const kk = 10 * nExp / LN10;
+    P.forEach((p, i) => {
+        const dx = x - p[0], dy = y - p[1], r2 = Math.max(0.25, dx * dx + dy * dy);
+        const gx = -kk * dx / r2, gy = -kk * dy / r2;
+        a += w[i] * gx * gx; b += w[i] * gx * gy; c += w[i] * gy * gy;
+    });
+    const det = a * c - b * b;
+    if (det <= 1e-12) return null;
+    return { sxx: c / det, syy: a / det, sxy: -b / det };   // covariance, m^2
+}
+function triFix(t) {
+    const m = triModel(), now = Date.now() / 1000, dm = devModel(t.mac, t.dom, m);
+    const nodes = [];
+    for (const [id, samples] of Object.entries(t.samples)) {
+        const n = nodeById(id);
+        if (!n || n.lat == null) continue;
+        const xs = samples.filter((x) => now - x.ts <= TRI_WINDOW_S).map((x) => x.rssi - (m.offsets[id] || 0));
+        if (!xs.length) continue;
+        const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+        nodes.push({ id, lat: n.lat, lon: n.lon, rssi: mean, k: Math.min(TRI_K_MAX, xs.length),
+                     d: Math.pow(10, (dm.p0 - mean) / (10 * dm.n)) });
+    }
+    const base = { mac: t.mac, nodes, ok: false, cal: dm.cal };
+    if (nodes.length < 3) return { ...base, why: `heard by ${nodes.length} of the 3 nodes needed` };
+    const pr = triProj(nodes[0].lat, nodes[0].lon);
+    const P = nodes.map((n) => pr.to(n.lat, n.lon));
+    const w = nodes.map((n) => n.k / (m.sigma * m.sigma));
+    // Start: the 1/d^2-weighted centroid. Then Gauss-Newton on the dB
+    // residuals e_i = rssi_i - (P0 - 10 n log10 r_i), weighted by k_i/sigma^2.
+    let sw = 0, x = 0, y = 0;
+    nodes.forEach((n, i) => { const v = 1 / (n.d * n.d); sw += v; x += v * P[i][0]; y += v * P[i][1]; });
+    x /= sw; y /= sw;
+    const kk = 10 * dm.n / LN10;
+    let converged = false;
+    for (let it = 0; it < 60; it++) {
+        let a = 0, b = 0, c = 0, ux = 0, uy = 0;
+        nodes.forEach((n, i) => {
+            const dx = x - P[i][0], dy = y - P[i][1], r2 = Math.max(0.25, dx * dx + dy * dy);
+            const e = n.rssi - (dm.p0 - 10 * dm.n * Math.log10(Math.sqrt(r2)));
+            const gx = -kk * dx / r2, gy = -kk * dy / r2;
+            a += w[i] * gx * gx; b += w[i] * gx * gy; c += w[i] * gy * gy; ux += w[i] * gx * e; uy += w[i] * gy * e;
+        });
+        const lam = 1e-3 * (a + c), A = a + lam, C = c + lam, det = A * C - b * b;
+        if (det <= 1e-12) break;
+        let sx = (C * ux - b * uy) / det, sy = (A * uy - b * ux) / det;
+        const step = Math.hypot(sx, sy);
+        if (step > 25) { sx *= 25 / step; sy *= 25 / step; }   // trust region
+        x += sx; y += sy;
+        if (step < 0.01) { converged = true; break; }
+    }
+    // Residuals in dB, against the noise model: chi^2 per degree of freedom.
+    let chi = 0;
+    nodes.forEach((n, i) => {
+        const r = Math.max(0.5, Math.hypot(x - P[i][0], y - P[i][1]));
+        const e = n.rssi - (dm.p0 - 10 * dm.n * Math.log10(r));
+        chi += w[i] * e * e;
+    });
+    const dof = Math.max(1, nodes.length - 2);
+    const scale = Math.max(1, Math.sqrt(chi / dof));     // readings disagree more than sigma: widen
+    const cov = fisher(x, y, P, w, dm.n);
+    if (!cov || !converged) return { ...base, why: "no stable solution" };
+    const err = Math.sqrt(cov.sxx + cov.syy) * scale;    // 1-sigma radial error, m
+    const rmsDb = Math.sqrt(nodes.reduce((s2, n, i) => {
+        const r = Math.max(0.5, Math.hypot(x - P[i][0], y - P[i][1]));
+        return s2 + (n.rssi - (dm.p0 - 10 * dm.n * Math.log10(r))) ** 2;
+    }, 0) / nodes.length);
+    const errR = Math.round(err * 10) / 10;
+    if (err > m.max_err) return { ...base, why: `too uncertain here (1σ ±${errR} m)`, err: errR };
+    // Smooth across updates so the estimate glides instead of jumping.
+    const raw = pr.from(x, y), st = S.triState[t.mac] = S.triState[t.mac] || { p: raw, trail: [] };
+    st.p = [st.p[0] + m.smooth * (raw[0] - st.p[0]), st.p[1] + m.smooth * (raw[1] - st.p[1])];
+    const last = st.trail[st.trail.length - 1];
+    if (!last || map.distance([last[0], last[1]], st.p) > 0.5) st.trail.push([st.p[0], st.p[1], now]);
+    while (st.trail.length && now - st.trail[0][2] > 1800) st.trail.shift();
+    const keep = devTrailFor(t.mac);
+    const trail = keep ? st.trail.filter((q) => now - q[2] <= keep).map((q) => [q[0], q[1]]) : [];
+    return { ...base, ok: true, p: st.p, err: errR, rmsDb: Math.round(rmsDb * 10) / 10, trail };
+}
+// Coverage = where a fix is actually possible and how good it can be: for a
+// grid around the nodes, the expected 1-sigma error (Cramer-Rao bound, one
+// reading per node) of a typical BLE device (generic 1 m power), counting
+// only nodes that would hear it (predicted RSSI above -92 dBm).
+const COV_COLORS = [[2, "57,255,136"], [5, "250,204,21"], [8, "251,146,60"]];
+function coverageImage() {
+    const m = triModel();
+    const placed = S.fleet.nodes.filter((n) => n.lat != null && n.online);
+    const key = JSON.stringify([placed.map((n) => [n.id, n.lat.toFixed(6), n.lon.toFixed(6)]), m.p0_ble, m.n, m.sigma, m.max_err]);
+    if (S.cov && S.cov.key === key) return S.cov;
+    S.cov = { key, overlay: null };
+    if (placed.length < 3) return S.cov;
+    const pr = triProj(placed[0].lat, placed[0].lon);
+    const P = placed.map((n) => pr.to(n.lat, n.lon));
+    const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
+    const pad = 40;
+    const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+    const cell = Math.max(0.5, Math.max(x1 - x0, y1 - y0) / 160);
+    const W = Math.ceil((x1 - x0) / cell), H = Math.ceil((y1 - y0) / cell);
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    const g = cv.getContext("2d"), img = g.createImageData(W, H);
+    for (let j = 0; j < H; j++) {
+        const y = y1 - (j + 0.5) * cell;
+        for (let i = 0; i < W; i++) {
+            const x = x0 + (i + 0.5) * cell;
+            const hear = [], wts = [];
+            P.forEach((p) => {
+                const r = Math.max(0.5, Math.hypot(x - p[0], y - p[1]));
+                if (m.p0_ble - 10 * m.n * Math.log10(r) >= -92) { hear.push(p); wts.push(1 / (m.sigma * m.sigma)); }
+            });
+            if (hear.length < 3) continue;
+            const cov = fisher(x, y, hear, wts, m.n);
+            if (!cov) continue;
+            const e = Math.sqrt(cov.sxx + cov.syy);
+            if (e > m.max_err) continue;
+            const col = (COV_COLORS.find(([lim]) => e <= lim) || COV_COLORS[2])[1].split(",").map(Number);
+            const o = (j * W + i) * 4;
+            img.data[o] = col[0]; img.data[o + 1] = col[1]; img.data[o + 2] = col[2]; img.data[o + 3] = 255;
+        }
+    }
+    g.putImageData(img, 0, 0);
+    const sw = pr.from(x0, y0), ne = pr.from(x1, y1);
+    S.cov.overlay = L.imageOverlay(cv.toDataURL(), [sw, ne], { opacity: 0.22, interactive: false });
+    return S.cov;
+}
+// Calibration at a known spot: the device sits where the user clicked; for
+// 30 s every node's readings of it are averaged. With the true distances
+// known, RSSI_i = P0 - 10 n log10(d_i) is linear in (P0, n): a least-squares
+// fit gives both when the distances differ enough (ratio >= 1.5) and the
+// slope is physical (1.6..5); otherwise n stays at the generic value and
+// only P0 is fitted. The fit RMS (dB) is what the result is worth.
+const CAL_SECS = 30;
+function showCal(mac) {
+    const c = triModel().devices[mac];
+    $("vCalInfo").textContent = S.calib && S.calib.mac === mac
+        ? (S.calib.stage === "place" ? "Click the map exactly where this device is right now. Esc cancels."
+                                     : `Listening ${Math.max(0, Math.ceil(S.calib.until - Date.now() / 1000))} s... keep the device still.`)
+        : c ? `Calibrated ${ago(c.ts)}: ${c.p0} dBm at 1 m, path-loss exponent ${c.n}, fit error ${c.rms} dB over ${c.nodes} node${c.nodes === 1 ? "" : "s"}.`
+            : "Not calibrated: positions use a generic model and can be off by several metres. Put the device somewhere you can point to on the map, then calibrate.";
+    $("vCalReset").disabled = !c;
+}
+function calibAt(ll) {
+    S.calib = { ...S.calib, stage: "listen", ll, start: Date.now() / 1000, until: Date.now() / 1000 + CAL_SECS };
+    document.querySelector(".map-panel").classList.remove("placing");
+    if (S.calibMark) map.removeLayer(S.calibMark);
+    S.calibMark = L.circleMarker(ll, { radius: 7, color: "#facc15", weight: 2, fillOpacity: 0.3 }).addTo(map);
+    const tick = setInterval(() => { if (S.device === S.calib.mac) showCal(S.calib.mac); }, 1000);
+    setTimeout(async () => { clearInterval(tick); await calibFinish(); }, CAL_SECS * 1000);
+    showCal(S.calib.mac);
+}
+async function calibFinish() {
+    const c = S.calib;
+    S.calib = null;
+    if (S.calibMark) { map.removeLayer(S.calibMark); S.calibMark = null; }
+    const m = triModel();
+    const rows = [...S.sight, ...S.dets].filter((d) => d.mac === c.mac && d.ts >= c.start - 2 && d.ts <= c.until + 2 && d.rssi != null);
+    const per = {};
+    rows.forEach((d) => { (per[d.node] = per[d.node] || []).push(d.rssi - (m.offsets[d.node] || 0)); });
+    const pts = [];
+    for (const [id, xs] of Object.entries(per)) {
+        const n = nodeById(id);
+        if (!n || n.lat == null) continue;
+        const d = Math.max(0.5, map.distance([n.lat, n.lon], c.ll));
+        pts.push({ x: -10 * Math.log10(d), y: xs.reduce((a, b) => a + b, 0) / xs.length, d });
+    }
+    if (!pts.length) { toast("bad", "Calibration failed", "No node reported this device during the 30 s. Make sure it is transmitting and try again."); if (S.device === c.mac) showCal(c.mac); return; }
+    const dm = devModel(c.mac, rows[0] && rows[0].dom, m);
+    let n = dm.cal ? m.n : m.n, p0, fitted = false;
+    const dists = pts.map((p) => p.d);
+    if (pts.length >= 2 && Math.max(...dists) / Math.min(...dists) >= 1.5) {
+        const mx = pts.reduce((a, p) => a + p.x, 0) / pts.length, my = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+        const sxx = pts.reduce((a, p) => a + (p.x - mx) ** 2, 0), sxy = pts.reduce((a, p) => a + (p.x - mx) * (p.y - my), 0);
+        const slope = sxy / sxx;
+        if (slope >= 1.6 && slope <= 5) { n = slope; p0 = my - n * mx; fitted = true; }
+    }
+    if (!fitted) p0 = pts.reduce((a, p) => a + (p.y - n * p.x), 0) / pts.length;
+    const rms = Math.sqrt(pts.reduce((a, p) => a + (p.y - (p0 + n * p.x)) ** 2, 0) / pts.length);
+    const devices = { ...m.devices, [c.mac]: { p0: Math.round(p0 * 10) / 10, n: Math.round(n * 100) / 100, rms: Math.round(rms * 10) / 10, nodes: pts.length, ts: Date.now() / 1000 } };
+    await api("/api/settings", { method: "POST", body: { tri: { devices } } });
+    S.settings.tri = { ...m, devices };
+    delete S.triState[c.mac];
+    toast("good", "Calibrated", `${p0.toFixed(1)} dBm at 1 m, exponent ${n.toFixed(2)}${fitted ? "" : " (generic: distances too similar to fit it)"}, fit error ${rms.toFixed(1)} dB, ${pts.length} node${pts.length === 1 ? "" : "s"}`);
+    if (S.device === c.mac) showCal(c.mac);
+}
+$("vCal").onclick = () => {
+    if (!S.device) return;
+    S.calib = { mac: S.device, stage: "place" };
+    document.querySelector(".map-panel").classList.add("placing");
+    showCal(S.device);
+};
+$("vCalReset").onclick = async () => {
+    const m = triModel(), devices = { ...m.devices };
+    delete devices[S.device];
+    await api("/api/settings", { method: "POST", body: { tri: { devices } } });
+    S.settings.tri = { ...m, devices };
+    delete S.triState[S.device];
+    showCal(S.device);
+};
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && S.calib && S.calib.stage === "place") {
+        S.calib = null;
+        document.querySelector(".map-panel").classList.remove("placing");
+        if (S.device) showCal(S.device);
+    }
+});
+
+function renderTri(fixes) {
+    if (!S.triLayer) S.triLayer = L.layerGroup().addTo(map);
+    S.triLayer.clearLayers();
+    $("triLegend").hidden = !S.triOn;
+    if (!S.triOn) return;
+    const cov = coverageImage();
+    if (cov.overlay) S.triLayer.addLayer(cov.overlay);
+    for (const f of fixes) {
+        if (!f.ok) continue;            // no fix: no circles (they would mean nothing)
+        for (const n of f.nodes) {
+            L.circle([n.lat, n.lon], { radius: n.d, color: "#22d3ee", weight: 1, opacity: 0.45, dashArray: "4 6", fill: false, interactive: false }).addTo(S.triLayer);
+        }
+        L.circle(f.p, { radius: f.err, color: "#ff4fd8", weight: 1, fillColor: "#ff4fd8", fillOpacity: 0.12, interactive: false }).addTo(S.triLayer);
+        if (f.trail.length > 1) L.polyline(f.trail, { color: "#ff4fd8", weight: 2, opacity: 0.5, interactive: false }).addTo(S.triLayer);
+    }
+}
+function syncTriBtn() {
+    const b = $("mapTri");
+    b.classList.toggle("on", S.triOn);
+    b.setAttribute("aria-pressed", S.triOn ? "true" : "false");
+    b.querySelector("span").textContent = S.triOn ? "Triangulate: on" : "Triangulate: off";
+}
+$("mapTri").onclick = () => {
+    S.triOn = !S.triOn;
+    lsSet("ouispy.triOn", S.triOn);
+    if (S.triOn && !S.tgtOn) { S.tgtOn = true; lsSet("ouispy.targetsOn", true); syncTargetBtn(); }
+    syncTriBtn();
+    renderTargets();
+};
+syncTriBtn();
+
 function onSighting(d) {
     S.sight.unshift(d);
     S.sight = S.sight.filter((x) => Date.now() / 1000 - x.ts <= TARGET_WINDOW_S).slice(0, 400);
@@ -1043,8 +1337,9 @@ function liveTargets() {
     for (const d of rows) {
         if (now - d.ts > TARGET_WINDOW_S) break;          // newest first
         if (d.rssi == null) continue;
-        const t = by[d.mac] = by[d.mac] || { mac: d.mac, name: devAlias(d.mac, d.descr || d.match), last: d.ts, per: {} };
+        const t = by[d.mac] = by[d.mac] || { mac: d.mac, name: devAlias(d.mac, d.descr || d.match), last: d.ts, per: {}, samples: {}, dom: d.dom };
         if (!t.per[d.node]) t.per[d.node] = { rssi: d.rssi, ts: d.ts };   // newest per node
+        (t.samples[d.node] = t.samples[d.node] || []).push({ rssi: d.rssi, ts: d.ts });
     }
     return Object.values(by).map((t) => {
         t.seen = Object.entries(t.per).map(([node, v]) => ({ node, ...v })).sort((a, b) => b.rssi - a.rssi);
@@ -1065,14 +1360,18 @@ function targetPoint(t) {
 function renderTargets() {
     if (!S.fleet) return;
     if (!S.targetLayer) S.targetLayer = L.layerGroup().addTo(map);
-    const live = liveTargets(), keep = new Set();
+    const live = liveTargets(), keep = new Set(), fixes = [];
     for (const t of live) {
         if (!S.tgtOn || S.tgtHidden.has(t.mac)) continue;
-        const p = targetPoint(t);
+        const fix = S.triOn ? triFix(t) : null;
+        if (fix) fixes.push(fix);
+        const p = fix && fix.ok ? fix.p : targetPoint(t);
         if (!p) continue;
         keep.add(t.mac);
         let g = S.targets[t.mac];
-        const label = `${esc(t.name)}<br><b>${esc(nodeName(t.closest))}</b> ${t.seen[0].rssi} dBm`;
+        const label = !S.triOn ? `${esc(t.name)}<br><b>${esc(nodeName(t.closest))}</b> ${t.seen[0].rssi} dBm`
+            : fix && fix.ok ? `${esc(t.name)}<br><b>&plusmn;${fix.err} m</b> 1&sigma;, ${fix.nodes.length} nodes, fit ${fix.rmsDb} dB${fix.cal ? "" : " <span class=\"uncal\">uncalibrated</span>"}`
+            : `${esc(t.name)}<br>no fix: ${esc(fix ? fix.why : "no signal")}; closest <b>${esc(nodeName(t.closest))}</b>`;
         if (!g) {
             g = S.targets[t.mac] = { lines: {}, marker: L.marker(p, { interactive: true, keyboard: false, zIndexOffset: 500,
                 icon: L.divIcon({ className: "", iconSize: [0, 0], html: `<div class="tgt"><span class="tgt-dot"></span><span class="tgt-label"></span></div>` }) }).addTo(S.targetLayer) };
@@ -1108,6 +1407,10 @@ function renderTargets() {
         Object.values(g.lines).forEach((l) => S.targetLayer.removeLayer(l));
         delete S.targets[mac];
     }
+    renderTri(fixes);
+    // Labels moved, appeared or changed text: lay every label out again.
+    const sig = Object.keys(S.targets).map((m) => { const g = S.targets[m], ll = g.marker.getLatLng(); return `${m}${ll.lat.toFixed(6)}${ll.lng.toFixed(6)}${g.marker.getElement() ? g.marker.getElement().querySelector(".tgt-label").innerHTML : ""}`; }).join("|");
+    if (sig !== S.tgtSig) { S.tgtSig = sig; declutterLabels(); }
     // The list under the map: closest node per live device, every node's signal.
     const box = $("nearest");
     const html = live.length ? live.slice(0, 8).map((t) => `
@@ -1196,7 +1499,7 @@ async function openDrawer(id) {
     $("dSub").textContent = `${n.id} | ${n.is_home ? "home" : n.role} | first seen ${n.first_seen ? fullTime(n.first_seen) : "-"}`;
     if (document.activeElement !== $("dAlias")) $("dAlias").value = n.alias || "";
     if (document.activeElement !== $("dNotes")) $("dNotes").value = n.notes || "";
-    showColor(n);
+    showColor(n); showTrail(n);
     const st = nodeState(n);
     const samples = data.sightings.filter((s) => s.rssi);
     const avg = samples.length ? Math.round(samples.reduce((a, s) => a + s.rssi, 0) / samples.length) : null;
@@ -1250,6 +1553,7 @@ $("dAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("dSave
 $("dNotes").addEventListener("change", () => api(`/api/nodes/${S.selected}`, { method: "POST", body: { notes: $("dNotes").value } }));
 $("dPlace").onclick = () => setPlacing(true);
 // Color slider: live preview while dragging, saved when let go.
+function showTrail(n) { if (n) $("dTrail").value = String(trailFor(n.id)); }
 function showColor(n) {
     const on = n && n.color != null;
     if (document.activeElement !== $("dColor")) $("dColor").value = on ? n.color : 180;
@@ -1261,14 +1565,14 @@ $("dColor").oninput = () => {
     const n = nodeById(S.selected);
     if (!n) return;
     n.color = Number($("dColor").value);
-    showColor(n);
+    showColor(n); showTrail(n);
     renderNodes(); renderMap();
 };
 $("dColor").onchange = () => api(`/api/nodes/${S.selected}`, { method: "POST", body: { color: Number($("dColor").value) } });
 $("dColorReset").onclick = async () => {
     const n = nodeById(S.selected);
     if (n) n.color = null;
-    showColor(n);
+    showColor(n); showTrail(n);
     renderNodes(); renderMap();
     await api(`/api/nodes/${S.selected}`, { method: "POST", body: { color: null } });
 };
@@ -1912,6 +2216,8 @@ async function openDevice(mac) {
     S.device = mac;
     closeDrawer();
     $("vDrawer").classList.add("open");
+    $("vTrail").value = String(devTrailFor(mac));
+    showCal(mac);
     const r = await api(`/api/detections?mac=${encodeURIComponent(mac)}&limit=200`);
     const rows = r.rows;
     const a = S.macAliases[mac] || {};
@@ -1952,6 +2258,11 @@ $("vSave").onclick = async () => {
     renderFeed();
     if ($("tab-devices").classList.contains("active")) loadDevices();
     if ($("tab-history").classList.contains("active")) loadHistory(false);
+};
+$("vTrail").onchange = () => {
+    S.devTrail[S.device] = Number($("vTrail").value);
+    lsSet("ouispy.devTrail", S.devTrail);
+    renderTargets();
 };
 $("vAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("vSave").click(); });
 $("vHistory").onclick = () => {
@@ -2260,7 +2571,7 @@ async function boot() {
     S.macAliases = st.mac_aliases || {};
     S.filterMeta = st.filter_meta;
     syncTrailSlider();
-    try { await loadTrails(Math.max(S.trailSeconds, 1800)); } catch (e) { /* older server */ }
+    try { await loadTrails(Math.max(trailMax(), 1800)); } catch (e) { /* older server */ }
     S.jobs = st.jobs || [];
     S.jobs.forEach((j) => { S.jobState[j.id] = j.state; });
     tileOptions($("mapLayer"));

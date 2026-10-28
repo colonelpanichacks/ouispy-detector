@@ -13,6 +13,7 @@ import argparse
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 import socket
 import threading
@@ -46,6 +47,14 @@ DEFAULT_SETTINGS = {
     "trusted_nets": "192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12",
     "key_nets": "",
     "map_view": None,               # [lat, lon, zoom]
+    # Triangulation signal model: RSSI at 1 m per radio (dBm), path-loss
+    # exponent (2 open air .. 4 cluttered), per-node offsets in dB from
+    # calibration (a device held next to the node), smoothing 0..1.
+    # sigma = RSSI noise (dB) the error bars assume; max_err = largest 1-sigma
+    # error (m) still shown as a fix; devices = per-device calibration
+    # (MAC -> 1 m power, exponent, fit RMS, nodes used, when).
+    "tri": {"p0_ble": -59, "p0_wifi": -40, "n": 2.7, "sigma": 4.0, "max_err": 8.0,
+            "offsets": {}, "devices": {}, "smooth": 0.35},
     "serial_port": "auto",          # auto | off | a port: COM5, /dev/ttyACM0, /dev/cu.usbmodemXXXX
     "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
              "topic": "+/detection"},
@@ -727,6 +736,38 @@ def api_settings():
     return jsonify(public_settings())
 
 
+def clean_tri(new, cur):
+    """Merge and range-check the triangulation model (see DEFAULT_SETTINGS)."""
+    if not isinstance(new, dict):
+        raise ValueError("expected an object")
+    out = {**DEFAULT_SETTINGS["tri"], **(cur or {})}
+    clamp = {"p0_ble": (-90, -20), "p0_wifi": (-90, -10), "n": (1.6, 5.0), "smooth": (0.05, 1.0),
+             "sigma": (1.5, 12.0), "max_err": (2.0, 30.0)}
+    for k, (lo, hi) in clamp.items():
+        if k in new:
+            out[k] = round(min(hi, max(lo, float(new[k]))), 2)
+    if "offsets" in new:
+        offs = new["offsets"] or {}
+        if not isinstance(offs, dict):
+            raise ValueError("offsets must map node IDs to dB")
+        out["offsets"] = {str(k).upper()[:6]: round(min(40.0, max(-40.0, float(v))), 1)
+                          for k, v in offs.items() if re.fullmatch(r"[0-9A-Fa-f]{6}", str(k))}
+    if "devices" in new:
+        devs = new["devices"] or {}
+        if not isinstance(devs, dict):
+            raise ValueError("devices must map MACs to calibrations")
+        out["devices"] = {}
+        for mac, c in devs.items():
+            mac = str(mac).upper()
+            if not re.fullmatch(r"[0-9A-F]{2}(:[0-9A-F]{2}){5}", mac) or not isinstance(c, dict):
+                continue
+            out["devices"][mac] = {"p0": round(min(0.0, max(-100.0, float(c["p0"]))), 1),
+                                   "n": round(min(5.0, max(1.6, float(c["n"]))), 2),
+                                   "rms": round(min(30.0, max(0.0, float(c.get("rms", 0)))), 1),
+                                   "nodes": int(c.get("nodes", 0)), "ts": float(c.get("ts", 0))}
+    return out
+
+
 @app.route("/api/settings", methods=["POST"])
 def api_settings_set():
     data = request.get_json(silent=True) or {}
@@ -747,6 +788,11 @@ def api_settings_set():
               "retention_days", "links", "traffic", "status_poll", "trusted_nets", "key_nets"):
         if k in data:
             store.set_setting(k, data[k])
+    if "tri" in data:
+        try:
+            store.set_setting("tri", clean_tri(data["tri"], settings().get("tri") or {}))
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "error": f"triangulation settings: {e}"}), 400
     if "serial_port" in data:
         store.set_setting("serial_port", str(data["serial_port"]) or "auto")
         restart = True
