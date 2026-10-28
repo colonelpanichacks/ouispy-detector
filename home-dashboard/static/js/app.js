@@ -107,27 +107,30 @@ function bars(rssi) {
 // Serial health is about data, not just an open port: every line blinks
 // the dot; open-but-silent for 7 s (TLM is every 5 s) turns it amber (stuck or rebooting board).
 S.serialLast = 0;
+S.sockUp = true;   // the page itself just loaded from the dashboard
+// Binary and steady: green LIVE only while the port is open, the home is
+// sending (TLM every 5 s) and this page is connected to the dashboard;
+// red otherwise, with the reason. No blinking.
 function serialPillState(s) {
+    if (!S.sockUp) return ["", "DASHBOARD OFFLINE"];
     if (!s.connected) return ["", "DISCONNECTED"];
-    if (now() - S.serialLast > 7) return ["warn", "PORT OPEN, NO DATA"];   // TLM every 5 s
-    return ["on", "LIVE"];
+    if (now() - S.serialLast > 7) return ["", "NO DATA"];
+    return ["on usb", "LIVE"];
 }
 function updateSerialPill() {
     const s = S.sources.serial;
     const el = document.querySelector('.src-pill[data-kind="serial"]');
     if (!s || !el) return;
     const [cls, word] = serialPillState(s);
-    el.querySelector(".dot").className = `dot ${cls}`;
-    el.querySelector(".state").textContent = word;
+    const dot = el.querySelector(".dot"), st = el.querySelector(".state");
+    if (dot.className !== `dot ${cls}`) dot.className = `dot ${cls}`;
+    if (st.textContent !== word) st.textContent = word;
+    el.classList.toggle("down", cls === "");
 }
 function serialBlink() {
+    const was = now() - S.serialLast > 7;
     S.serialLast = now();
-    const el = document.querySelector('.src-pill[data-kind="serial"] .dot');
-    if (!el) return;
-    el.className = "dot on";
-    el.classList.remove("rx"); void el.offsetWidth; el.classList.add("rx");
-    const st = document.querySelector('.src-pill[data-kind="serial"] .state');
-    if (st) st.textContent = "LIVE";
+    if (was) updateSerialPill();   // data back: green at once
 }
 setInterval(updateSerialPill, 500);
 
@@ -1116,47 +1119,79 @@ function triFix(t) {
     const pr = triProj(nodes[0].lat, nodes[0].lon);
     const P = nodes.map((n) => pr.to(n.lat, n.lon));
     const w = nodes.map((n) => n.k / (m.sigma * m.sigma));
-    // Start: the 1/d^2-weighted centroid. Then Gauss-Newton on the dB
-    // residuals e_i = rssi_i - (P0 - 10 n log10 r_i), weighted by k_i/sigma^2.
-    let sw = 0, x = 0, y = 0;
-    nodes.forEach((n, i) => { const v = 1 / (n.d * n.d); sw += v; x += v * P[i][0]; y += v * P[i][1]; });
-    x /= sw; y /= sw;
-    const kk = 10 * dm.n / LN10;
-    let converged = false;
-    for (let it = 0; it < 60; it++) {
-        let a = 0, b = 0, c = 0, ux = 0, uy = 0;
-        nodes.forEach((n, i) => {
-            const dx = x - P[i][0], dy = y - P[i][1], r2 = Math.max(0.25, dx * dx + dy * dy);
-            const e = n.rssi - (dm.p0 - 10 * dm.n * Math.log10(Math.sqrt(r2)));
-            const gx = -kk * dx / r2, gy = -kk * dy / r2;
-            a += w[i] * gx * gx; b += w[i] * gx * gy; c += w[i] * gy * gy; ux += w[i] * gx * e; uy += w[i] * gy * e;
-        });
-        const lam = 1e-3 * (a + c), A = a + lam, C = c + lam, det = A * C - b * b;
-        if (det <= 1e-12) break;
-        let sx = (C * ux - b * uy) / det, sy = (A * uy - b * ux) / det;
-        const step = Math.hypot(sx, sy);
-        if (step > 25) { sx *= 25 / step; sy *= 25 / step; }   // trust region
-        x += sx; y += sy;
-        if (step < 0.01) { converged = true; break; }
+    // Grid posterior. The device's 1 m power P0 is unknown (calibrated: known
+    // to its fit error; uncalibrated: generic +/-10 dB). For a spot (x, y)
+    // the model RSSI_i = P0 - 10 n log10 r_i is linear in P0, so P0 is
+    // integrated out exactly: a_i = RSSI_i + 10 n log10 r_i, best P0 is the
+    // weighted mean of a_i and the prior, and the misfit chi^2(x, y) is what
+    // remains. The posterior exp(-chi^2/2) over the whole grid gives the
+    // position (its mean) and the error (its spread): "far and loud" versus
+    // "near and quiet" shows up as a long, wide posterior, not a false fix.
+    const c = m.devices[t.mac];
+    const p0Prior = dm.p0, p0Sd = c ? Math.max(1, c.rms || 1.5) : 10, wp = 1 / (p0Sd * p0Sd);
+    const xs = P.map((q) => q[0]), ys = P.map((q) => q[1]);
+    const PAD = 60, x0 = Math.min(...xs) - PAD, x1 = Math.max(...xs) + PAD, y0 = Math.min(...ys) - PAD, y1 = Math.max(...ys) + PAD;
+    const cell = Math.max(1, Math.max(x1 - x0, y1 - y0) / 140);
+    const W = Math.ceil((x1 - x0) / cell), H = Math.ceil((y1 - y0) / cell);
+    const sumW = w.reduce((p, q) => p + q, 0) + wp;
+    const chi = new Float64Array(W * H);
+    let chiMin = Infinity, best = 0;
+    const tenN = 10 * dm.n;
+    for (let j = 0; j < H; j++) {
+        const y = y0 + (j + 0.5) * cell;
+        for (let i = 0; i < W; i++) {
+            const x = x0 + (i + 0.5) * cell;
+            let sa = wp * p0Prior;
+            const av = new Array(nodes.length);
+            for (let k = 0; k < nodes.length; k++) {
+                const r = Math.max(0.5, Math.hypot(x - P[k][0], y - P[k][1]));
+                av[k] = nodes[k].rssi + tenN * Math.log10(r);
+                sa += w[k] * av[k];
+            }
+            const p0 = sa / sumW;
+            let q = wp * (p0 - p0Prior) ** 2;
+            for (let k = 0; k < nodes.length; k++) q += w[k] * (av[k] - p0) ** 2;
+            const o = j * W + i;
+            chi[o] = q;
+            if (q < chiMin) { chiMin = q; best = o; }
+        }
     }
-    // Residuals in dB, against the noise model: chi^2 per degree of freedom.
-    let chi = 0;
-    nodes.forEach((n, i) => {
-        const r = Math.max(0.5, Math.hypot(x - P[i][0], y - P[i][1]));
-        const e = n.rssi - (dm.p0 - 10 * dm.n * Math.log10(r));
-        chi += w[i] * e * e;
-    });
-    const dof = Math.max(1, nodes.length - 2);
-    const scale = Math.max(1, Math.sqrt(chi / dof));     // readings disagree more than sigma: widen
-    const cov = fisher(x, y, P, w, dm.n);
-    if (!cov || !converged) return { ...base, why: "no stable solution" };
-    const err = Math.sqrt(cov.sxx + cov.syy) * scale;    // 1-sigma radial error, m
-    const rmsDb = Math.sqrt(nodes.reduce((s2, n, i) => {
-        const r = Math.max(0.5, Math.hypot(x - P[i][0], y - P[i][1]));
-        return s2 + (n.rssi - (dm.p0 - 10 * dm.n * Math.log10(r))) ** 2;
-    }, 0) / nodes.length);
+    // Readings disagree more than sigma allows (needs spare degrees of
+    // freedom: nodes + prior - 3 unknowns): widen the posterior to match.
+    const dof = nodes.length + 1 - 3;
+    const s2 = dof > 0 ? Math.max(1, chiMin / dof) : 1;
+    const pw = new Float64Array(W * H);
+    let tw = 0;
+    for (let o = 0; o < W * H; o++) { const v = Math.exp(-0.5 * (chi[o] - chiMin) / s2); pw[o] = v; tw += v; }
+    // Position: the most likely spot, refined to sub-cell by the posterior
+    // mean of its 5x5 neighbourhood.
+    const bi = best % W, bj = Math.floor(best / W);
+    let lw = 0, mx = 0, my = 0;
+    for (let j = Math.max(0, bj - 2); j <= Math.min(H - 1, bj + 2); j++) {
+        for (let i = Math.max(0, bi - 2); i <= Math.min(W - 1, bi + 2); i++) {
+            const v = pw[j * W + i]; lw += v;
+            mx += v * (x0 + (i + 0.5) * cell); my += v * (y0 + (j + 0.5) * cell);
+        }
+    }
+    const x = mx / lw, y = my / lw;
+    // Error: the radius around that spot holding 68% of the posterior mass.
+    // Ambiguity (several far-apart places fit) makes it large, as it should.
+    const dist = [];
+    for (let o = 0; o < W * H; o++) {
+        if (pw[o] < 1e-9 * tw) continue;
+        dist.push([Math.hypot(x0 + ((o % W) + 0.5) * cell - x, y0 + (Math.floor(o / W) + 0.5) * cell - y), pw[o]]);
+    }
+    dist.sort((p1, p2) => p1[0] - p2[0]);
+    let acc = 0, r68 = dist.length ? dist[dist.length - 1][0] : 0;
+    for (const [d, v] of dist) { acc += v; if (acc >= 0.68 * tw) { r68 = d; break; } }
+    const err = Math.max(r68, cell * 0.6);
+    let p0Fit = wp * p0Prior;
+    const aFit = nodes.map((n, k) => n.rssi + tenN * Math.log10(Math.max(0.5, Math.hypot(x - P[k][0], y - P[k][1]))));
+    aFit.forEach((v, k) => { p0Fit += w[k] * v; });
+    p0Fit /= sumW;
+    const rmsDb = Math.sqrt(aFit.reduce((s3, v) => s3 + (v - p0Fit) ** 2, 0) / nodes.length);
     const errR = Math.round(err * 10) / 10;
-    if (err > m.max_err) return { ...base, why: `too uncertain here (1σ ±${errR} m)`, err: errR };
+    const rough = err > m.max_err;   // shown, but marked: the data can't pin it down here
     // Smooth across updates so the estimate glides instead of jumping.
     const raw = pr.from(x, y), st = S.triState[t.mac] = S.triState[t.mac] || { p: raw, trail: [] };
     st.p = [st.p[0] + m.smooth * (raw[0] - st.p[0]), st.p[1] + m.smooth * (raw[1] - st.p[1])];
@@ -1165,7 +1200,7 @@ function triFix(t) {
     while (st.trail.length && now - st.trail[0][2] > 1800) st.trail.shift();
     const keep = devTrailFor(t.mac);
     const trail = keep ? st.trail.filter((q) => now - q[2] <= keep).map((q) => [q[0], q[1]]) : [];
-    return { ...base, ok: true, p: st.p, err: errR, rmsDb: Math.round(rmsDb * 10) / 10, trail };
+    return { ...base, ok: true, rough, p: st.p, err: errR, rmsDb: Math.round(rmsDb * 10) / 10, trail };
 }
 // Coverage = where a fix is actually possible and how good it can be: for a
 // grid around the nodes, the expected 1-sigma error (Cramer-Rao bound, one
@@ -1302,12 +1337,18 @@ function renderTri(fixes) {
     const cov = coverageImage();
     if (cov.overlay) S.triLayer.addLayer(cov.overlay);
     for (const f of fixes) {
-        if (!f.ok) continue;            // no fix: no circles (they would mean nothing)
-        for (const n of f.nodes) {
-            L.circle([n.lat, n.lon], { radius: n.d, color: "#22d3ee", weight: 1, opacity: 0.45, dashArray: "4 6", fill: false, interactive: false }).addTo(S.triLayer);
+        if (!f.ok) continue;            // no fix: nothing to draw
+        // Range circles only for the device being inspected (its drawer is open).
+        if (S.device === f.mac) {
+            for (const n of f.nodes) {
+                L.circle([n.lat, n.lon], { radius: n.d, color: "#22d3ee", weight: 1, opacity: 0.4, dashArray: "4 6", fill: false, interactive: false }).addTo(S.triLayer);
+            }
         }
-        L.circle(f.p, { radius: f.err, color: "#ff4fd8", weight: 1, fillColor: "#ff4fd8", fillOpacity: 0.12, interactive: false }).addTo(S.triLayer);
-        if (f.trail.length > 1) L.polyline(f.trail, { color: "#ff4fd8", weight: 2, opacity: 0.5, interactive: false }).addTo(S.triLayer);
+        // The 68% region: solid when the data pins it down, dashed amber when rough.
+        L.circle(f.p, f.rough
+            ? { radius: f.err, color: "#fbbf24", weight: 1, dashArray: "5 6", fillColor: "#fbbf24", fillOpacity: 0.05, interactive: false }
+            : { radius: f.err, color: "#ff4fd8", weight: 1, fillColor: "#ff4fd8", fillOpacity: 0.10, interactive: false }).addTo(S.triLayer);
+        if (f.trail.length > 1) L.polyline(f.trail, { color: "#ff4fd8", weight: 2, opacity: 0.45, interactive: false }).addTo(S.triLayer);
     }
 }
 function syncTriBtn() {
@@ -1370,7 +1411,7 @@ function renderTargets() {
         keep.add(t.mac);
         let g = S.targets[t.mac];
         const label = !S.triOn ? `${esc(t.name)}<br><b>${esc(nodeName(t.closest))}</b> ${t.seen[0].rssi} dBm`
-            : fix && fix.ok ? `${esc(t.name)}<br><b>&plusmn;${fix.err} m</b> 1&sigma;, ${fix.nodes.length} nodes, fit ${fix.rmsDb} dB${fix.cal ? "" : " <span class=\"uncal\">uncalibrated</span>"}`
+            : fix && fix.ok ? `${esc(t.name)}<br><b>&plusmn;${fix.err} m</b> (68%)${fix.rough ? " <span class=\"uncal\">rough</span>" : ""}${fix.cal ? "" : " <span class=\"uncal\">uncalibrated</span>"}`
             : `${esc(t.name)}<br>no fix: ${esc(fix ? fix.why : "no signal")}; closest <b>${esc(nodeName(t.closest))}</b>`;
         if (!g) {
             g = S.targets[t.mac] = { lines: {}, marker: L.marker(p, { interactive: true, keyboard: false, zIndexOffset: 500,
@@ -1384,7 +1425,7 @@ function renderTargets() {
         const lab = el && el.querySelector(".tgt-label");
         if (lab && lab.innerHTML !== label) lab.innerHTML = label;
         const lineKeep = new Set();
-        for (const s of t.seen) {
+        for (const s of (S.triOn ? [] : t.seen)) {     // triangulate: the spot speaks for itself
             const n = nodeById(s.node);
             if (!n || n.lat == null) continue;
             lineKeep.add(s.node);
@@ -2275,14 +2316,16 @@ $("vHistory").onclick = () => {
 // ------------------------------------------------------------------
 // console
 // ------------------------------------------------------------------
+// Console colours follow the line's kind (the UI palette, not white), with
+// the timestamp and JSON keys dimmed so the values read first.
+const CON_KINDS = [["TLM ", "tlm"], ["RST ", "rst"], ["RFL ", "rfl"], ["CMD ", "cmd"], ["ACK ", "ok"], ["OK", "ok"],
+                   ["ERR", "err"], ["OTA ", "ota"], ["[MESH]", "mesh"], ["[HEARTBEAT]", "hb"], ["[OTA]", "ota"], ["DET ", "djs"]];
 function consoleLine(ts, source, line) {
-    let cls = "";
-    if (line.startsWith("TLM ")) cls = "tlm";
-    else if (line.startsWith("{") || line.startsWith("DET ")) cls = "djs";
-    else if (line.startsWith("[MESH]")) cls = "mesh";
-    else if (line.startsWith("[HEARTBEAT]")) cls = "hb";
+    let cls = (CON_KINDS.find(([p]) => line.startsWith(p)) || [, ""])[1];
+    if (!cls && line.startsWith("{")) cls = line.includes('"upd":1') ? "upd" : "djs";
     if (source === "you") cls = "you";
-    return `<span class="${cls}">${hms(ts)} ${esc(line)}</span>\n`;
+    const body = esc(line).replace(/(&quot;|")([A-Za-z_][\w]*)(&quot;|"):/g, '<i>$1$2$3:</i>');
+    return `<span class="${cls}"><b class="cts">${hms(ts)}</b> ${body}</span>\n`;
 }
 function appendConsole(ts, source, line) {
     const c = $("console");
@@ -2645,10 +2688,11 @@ async function boot() {
         }
         if (S.selected === e.id && $("drawer").classList.contains("open")) openDrawer(e.id);
     });
-    sock.on("disconnect", () => { S.sources = { ui: { kind: "dashboard", connected: false, detail: "server connection lost" } }; renderSources(); });
+    sock.on("disconnect", () => { S.sockUp = false; S.sources = { ui: { kind: "dashboard", connected: false, detail: "server connection lost" } }; renderSources(); });
     // (Re)connect: catch up on everything that happened while the socket
     // was down (phone asleep, Wi-Fi blip, server restart), not just the fleet.
     sock.on("connect", async () => {
+        S.sockUp = true;
         const st2 = await api("/api/state");
         S.sources = st2.sources; renderSources(); applyFleet(st2.fleet);
         S.dets = st2.recent; S.statsBase = st2.stats; S.hourly = st2.hourly || [];
