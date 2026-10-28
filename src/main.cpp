@@ -137,6 +137,7 @@ struct DetectionEntry {
     int rssi;
     FilterType matchedType;
     bool wifiDomain;      // true = 802.11 MGMT frame match, false = BLE advert
+    bool update;          // mesh-relayed signal update ("still here, this loud"): no alert
 };
 
 static const int DET_QUEUE_SIZE = 16;
@@ -162,6 +163,7 @@ struct DeviceInfo {
     String filterDescription;  // Store filter description for persistence
     String matchedIdentifier;  // Raw identifier that triggered (e.g. "985949")
     FilterType matchedType = FT_MAC_PREFIX;  // Which of the 5 filter types hit
+    unsigned long lastReport = 0;  // last report sent for it (alert or signal update)
 };
 
 
@@ -1154,6 +1156,7 @@ void enqueueDetection(const String& mac, const String& ident, const String& desc
     e.rssi = rssi;
     e.matchedType = type;
     e.wifiDomain = wifi;
+    e.update = false;
 
     portENTER_CRITICAL(&detQueueMux);
     if (detQueueCount < DET_QUEUE_SIZE) {
@@ -1179,6 +1182,7 @@ void enqueueDetection(const char* mac, const char* ident, const char* desc,
     e.rssi = rssi;
     e.matchedType = type;
     e.wifiDomain = wifi;
+    e.update = false;
 
     portENTER_CRITICAL(&detQueueMux);
     if (detQueueCount < DET_QUEUE_SIZE) {
@@ -1193,9 +1197,22 @@ void enqueueDetection(const char* mac, const char* ident, const char* desc,
 // the exact same ring as a local one, so alerts, device history, and (on the
 // home node) MQTT all treat it uniformly. `type` is the FilterType as uint8.
 void meshReport(const char* mac, const char* ident, const char* desc,
-                int rssi, uint8_t type, bool wifi) {
-    enqueueDetection(String(mac), String(ident), String(desc), rssi,
-                     (FilterType)type, wifi);
+                int rssi, uint8_t type, bool wifi, bool update) {
+    DetectionEntry e;
+    strlcpy(e.mac, mac, sizeof(e.mac));
+    strlcpy(e.identifier, ident, sizeof(e.identifier));
+    strlcpy(e.description, desc, sizeof(e.description));
+    e.rssi = rssi;
+    e.matchedType = (FilterType)type;
+    e.wifiDomain = wifi;
+    e.update = update;
+    portENTER_CRITICAL(&detQueueMux);
+    if (detQueueCount < DET_QUEUE_SIZE) {
+        detQueue[detQueueHead] = e;
+        detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
+        detQueueCount++;
+    }
+    portEXIT_CRITICAL(&detQueueMux);
 }
 
 // ================================
@@ -3240,10 +3257,12 @@ static String readPreviousSessionJson() {
 // its Strings are only ever touched by the loop task (the WiFi promiscuous
 // callback used to iterate this vector from the driver task while the BLE
 // callback mutated it: a use-after-free waiting to happen). Returns the
-// alert label ("NEW" / "RE-3s" / "RE-30s") or nullptr when the hit is
+// alert label ("NEW" / "RE-3s" / "RE-30s"), "UPD" (still in view: a quiet
+// signal update every SIGNAL_UPDATE_MS, no alert) or nullptr when the hit is
 // suppressed by the cooldown ladder. WiFi matches key on (MAC, filter type)
 // so one camera can register separately as probe source and beacon source;
 // BLE matches keep the historic MAC-only key.
+#define SIGNAL_UPDATE_MS 5000UL
 static const char* registerDetection(const char* mac, FilterType type, int rssi,
                                      bool wifiDomain, const String& ident,
                                      const String& desc) {
@@ -3258,16 +3277,26 @@ static const char* registerDetection(const char* mac, FilterType type, int rssi,
 
         unsigned long timeSinceLastSeen = now - dev.lastSeen;
         dev.lastSeen = now;
+        dev.rssi = rssi;
 
         if (timeSinceLastSeen >= 30000) {
             dev.inCooldown = true;
             dev.cooldownUntil = now + 10000;
+            dev.lastReport = now;
             return "RE-30s";
         }
         if (timeSinceLastSeen >= 3000) {
             dev.inCooldown = true;
             dev.cooldownUntil = now + 3000;
+            dev.lastReport = now;
             return "RE-3s";
+        }
+        // Continuously in view: the ladder stays quiet (no beeps), but the
+        // dashboard still gets the signal every few seconds so it can tell
+        // which node is closest, and track it, in real time.
+        if (now - dev.lastReport >= SIGNAL_UPDATE_MS) {
+            dev.lastReport = now;
+            return "UPD";
         }
         return nullptr;
     }
@@ -3277,6 +3306,7 @@ static const char* registerDetection(const char* mac, FilterType type, int rssi,
     newDev.rssi = rssi;
     newDev.firstSeen = now;
     newDev.lastSeen = now;
+    newDev.lastReport = now;
     newDev.inCooldown = false;
     newDev.cooldownUntil = 0;
     newDev.matchedFilter = desc.c_str();
@@ -6541,15 +6571,24 @@ void loop() {
             String mac = e.mac;
             String ident = e.identifier;
             String desc = e.description;
-            const char* label = registerDetection(e.mac, e.matchedType, e.rssi,
-                                                  e.wifiDomain, ident, desc);
-            if (label != nullptr) {
+            // node = which mesh node saw it (stable ID): mesh-relayed
+            // detections carry a "[mesh XXXXXX]" desc suffix (mesh.cpp),
+            // everything else is our own radio.
+            int tag = desc.lastIndexOf("[mesh ");
+            bool fromMesh = (tag >= 0);
+            // Our own radio: the cooldown ladder decides alerts and reports.
+            // Over the mesh: the origin node already rate-limited it, so it
+            // is always reported (the home hearing the same device itself
+            // used to swallow every remote's report of it); the ladder here
+            // only decides whether THIS node beeps. Signal updates never do.
+            const char* label = e.update ? nullptr
+                                         : registerDetection(e.mac, e.matchedType, e.rssi,
+                                                             e.wifiDomain, ident, desc);
+            bool update = e.update || (label && strcmp(label, "UPD") == 0);
+            if (label != nullptr || fromMesh) {
                 String alias = getDeviceAlias(mac);
-                // node = which mesh node saw it (stable ID): mesh-relayed
-                // detections carry a "[mesh XXXXXX]" desc suffix (mesh.cpp),
-                // everything else is our own radio. dom = BLE vs WiFi.
+                // dom = BLE vs WiFi.
                 char nodeId[7];
-                int tag = desc.lastIndexOf("[mesh ");
                 if (tag >= 0 && desc.length() >= (unsigned)tag + 13 && desc.charAt(tag + 12) == ']') {
                     strlcpy(nodeId, desc.c_str() + tag + 6, sizeof(nodeId));
                 } else {
@@ -6560,7 +6599,8 @@ void loop() {
                                  filterTypeCode(e.matchedType) + "\",\"match\":\"" +
                                  jsonEsc(ident) + "\",\"desc\":\"" + jsonEsc(desc) +
                                  "\",\"node\":\"" + nodeId + "\",\"dom\":\"" +
-                                 (e.wifiDomain ? "wifi" : "ble") + "\"}";
+                                 (e.wifiDomain ? "wifi" : "ble") + "\"" +
+                                 (update ? ",\"upd\":1}" : "}");
                 if (isSerialConnected()) Serial.println(payload);
 
                 // Remote-role nodes never publish MQTT — the mesh is their
@@ -6585,20 +6625,21 @@ void loop() {
                 // home acks). Detections that arrived over the mesh already
                 // flooded from their origin; re-sending them would credit
                 // them to this node and multiply traffic.
-                bool fromMesh = (tag >= 0);
                 if (meshCfg.enabled && !fromMesh) {
                     meshQueueDetection(e.mac, e.identifier, e.description,
-                                       e.rssi, (uint8_t)e.matchedType, e.wifiDomain);
+                                       e.rssi, (uint8_t)e.matchedType, e.wifiDomain, update);
                 }
 
                 // Alert the user. Doing it here — not in the NimBLE host
                 // callback or the WiFi driver task — keeps multi-hundred-ms
                 // beeps from destabilizing those stacks.
-                startDetectionFlash();
-                if (strcmp(label, "RE-3s") == 0) {
-                    twoBeeps();
-                } else {
-                    threeBeeps();   // "NEW" and "RE-30s"
+                if (label && !update) {
+                    startDetectionFlash();
+                    if (strcmp(label, "RE-3s") == 0) {
+                        twoBeeps();
+                    } else {
+                        threeBeeps();   // "NEW" and "RE-30s"
+                    }
                 }
             }
         }

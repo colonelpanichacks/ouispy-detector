@@ -927,7 +927,7 @@ static bool meshHomeKnown(uint32_t now) {
 }
 
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
-                        int rssi, uint8_t dtype, bool wifiDomain) {
+                        int rssi, uint8_t dtype, bool wifiDomain, bool update) {
     if (!meshStarted) return;
     uint32_t now = millis();
     // Claim a pending slot; when every slot is busy, evict the entry that
@@ -948,7 +948,7 @@ void meshQueueDetection(const char* mac, const char* ident, const char* desc,
     memcpy(b, selfId, 3);
     b[3] = (uint8_t)(int8_t)rssi;
     b[4] = dtype;
-    b[5] = wifiDomain ? 0x01 : 0x00;
+    b[5] = (wifiDomain ? 0x01 : 0x00) | (update ? 0x02 : 0x00);   // older homes ignore bit1
     memset(b + 6, 0, 18 + 18 + 40);
     memcpy(b + 6,  mac,   min(strlen(mac) + 1, (size_t)18));
     memcpy(b + 24, ident, min(strlen(ident) + 1, (size_t)18));
@@ -1860,6 +1860,7 @@ void meshTick() {
             int8_t rssi   = (int8_t)body[3];
             uint8_t dtype = body[4];
             bool wifiDom  = (body[5] & 0x01) != 0;
+            bool upd      = (body[5] & 0x02) != 0;
             char mac[19], ident[19], desc[41];
             strlcpy(mac,   (const char*)(body + 6),  sizeof(mac));
             strlcpy(ident, (const char*)(body + 24), sizeof(ident));
@@ -1874,10 +1875,10 @@ void meshTick() {
                 // Reliable path: alert once per (origin, detId); a home
                 // acks every copy (an earlier ack may have been lost).
                 uint16_t detId = body[82] | (body[83] << 8);
-                if (detSeenFirst(nodeId, detId, now)) meshReport(mac, ident, full, rssi, dtype, wifiDom);
+                if (detSeenFirst(nodeId, detId, now)) meshReport(mac, ident, full, rssi, dtype, wifiDom, upd);
                 if (meshCfg.home) meshSendDetAck(nodeId, detId);
             } else {
-                meshReport(mac, ident, full, rssi, dtype, wifiDom);   // legacy sender
+                meshReport(mac, ident, full, rssi, dtype, wifiDom, false);   // legacy sender
             }
             meshRelay(pkt, len, rxHop);
             break;

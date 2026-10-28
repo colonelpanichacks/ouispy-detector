@@ -45,8 +45,9 @@ bool meshIsRemoteUplink();
 
 // Queue a LOCAL detection for mesh-wide delivery (never re-queue one that
 // arrived over the mesh). Retried until a home acks it. loop() only.
+// update = a signal update for a device still in view (flags bit1): no alert.
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
-                        int rssi, uint8_t dtype, bool wifiDomain);
+                        int rssi, uint8_t dtype, bool wifiDomain, bool update = false);
 
 // Called when the radio is parked on the mesh channel (mesh RX possible).
 void meshParkChannel();
@@ -201,4 +202,4 @@ void meshOnAck(const uint8_t* nodeId, uint8_t cmd, uint16_t cmdId, uint8_t statu
 // Implemented in main.cpp — bridge into the shared detection ring buffer so a
 // mesh-originated detection gets the same alert/MQTT treatment as a local one.
 void meshReport(const char* mac, const char* ident, const char* desc,
-                int rssi, uint8_t dtype, bool wifi);
+                int rssi, uint8_t dtype, bool wifi, bool update);
