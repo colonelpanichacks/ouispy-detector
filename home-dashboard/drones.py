@@ -126,6 +126,49 @@ class Drones:
         with store.lock:
             store.db.executescript(SCHEMA)
             store.db.commit()
+        self._reload()
+
+    def _reload(self, hours=6):
+        """Drones of the last few hours back into memory at startup, tracks rebuilt
+        from their stored reports: a restart must not wipe them off the maps."""
+        since = time.time() - hours * 3600
+        with self.store.lock:
+            macs = [r["mac"] for r in self.store.db.execute(
+                "SELECT mac FROM drone_meta WHERE last>=?", (since,)).fetchall()]
+        for mac in macs:
+            with self.store.lock:
+                rows = self.store.db.execute(
+                    "SELECT ts, node, rssi, data FROM drone_reports WHERE mac=? AND ts>=? ORDER BY ts",
+                    (mac, since)).fetchall()
+            if not rows:
+                continue
+            meta = self._meta(mac)
+            s = {"mac": mac, "first": meta.get("first") or rows[0]["ts"], "track": [], "ptrack": [],
+                 "nodes": {}, "stored": rows[-1]["ts"], "reports": len(rows),
+                 "vendor": oui_vendor(mac) or None, "alias": meta.get("alias") or "",
+                 "tag": meta.get("tag") or "unknown", "notes": meta.get("notes") or "", "faa": meta.get("faa")}
+            for r in rows:
+                try:
+                    d = json.loads(r["data"])
+                except ValueError:
+                    continue
+                for k, v in d.items():
+                    if v is not None and k != "node":
+                        s[k] = v
+                if d.get("lat") is not None:
+                    s["track"].append([r["ts"], d["lat"], d["lon"], d.get("alt"), d.get("hagl")])
+                if d.get("plat") is not None:
+                    s["ptrack"].append([r["ts"], d["plat"], d["plon"]])
+                n = s["nodes"].setdefault(r["node"] or "?", {"n": 0})
+                n["n"] += 1
+                n["rssi"] = r["rssi"]
+                n["last"] = r["ts"]
+            s["last"] = rows[-1]["ts"]
+            s["closest"] = rows[-1]["node"]
+            with self.lock:
+                self.live[mac] = s
+            if s.get("id") and s.get("idt") in FAA_ID_TYPES and not s.get("faa"):
+                self._maybe_faa(mac, s["id"])
 
     # ---------------- ingest ----------------
     def feed(self, obj, source="rid", home_id=None):

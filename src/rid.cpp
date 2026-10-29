@@ -10,7 +10,11 @@ bool isSerialConnected();
 void ridOnNewDrone();   // main.cpp
 
 #define RID_MAX        12
+#ifdef SKYSPY_NODE
+#define RID_REPORT_MS  400UL      // a Sky-Spy node: as live as mesh-mapper (drones send position ~1-4 Hz)
+#else
 #define RID_REPORT_MS  1000UL     // per drone, at most this often (serial + mesh)
+#endif
 #define RID_EXPIRE_MS  60000UL
 
 enum : uint8_t { RID_SRC_BEACON = 0, RID_SRC_NAN = 1, RID_SRC_BLE = 2 };
@@ -218,7 +222,11 @@ void ridFromMesh(const uint8_t* body, int len) {
 // Repeats: the home sweeps channels and a drone report is best effort (no ack), so
 // each one goes out again ~150 ms and ~300 ms later; one copy reaching the home is
 // enough (the dashboard keeps the newest position).
+#ifdef SKYSPY_NODE
+#define RID_COPIES 1              // the next report is only 400 ms behind
+#else
 #define RID_COPIES 2
+#endif
 #define RID_COPY_MS 150UL
 static uint8_t copyBody[RID_MAX][RID_BODY_LEN];
 static uint8_t copyLeft[RID_MAX];

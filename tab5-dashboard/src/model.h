@@ -41,6 +41,7 @@ struct Node {
     int16_t filters;       // filter count the node reports (-1 = n/a)
     int16_t peers, ch, dev;
     int16_t hue;           // dashboard colour (hsl hue), -1 = none
+    int8_t buzzer, led;    // its audio settings from the status (-1 = not known yet)
     uint32_t up, heap;
     float age;             // s since the server last heard it
     double since;

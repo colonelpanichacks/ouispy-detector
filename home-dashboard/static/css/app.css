@@ -1058,3 +1058,9 @@ body.map-maxed .toasts { z-index: 1700; }
 }
 
 .ntag.sky { color: #7dd3fc; border-color: rgba(125, 211, 252, .5); background: rgba(125, 211, 252, .1); box-shadow: 0 0 6px rgba(125, 211, 252, .35); }
+
+/* names are never cut off: node, device, drone and group names wrap instead */
+.node-name, .det-vendor, .grow .gname, .dr-name {
+    white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; min-width: 0;
+}
+.grow .gname { max-width: none; }

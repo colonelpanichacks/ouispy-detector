@@ -28,6 +28,9 @@ struct App {
     bool mapInit = false;       // centred once on the fleet
     bool mapFollow = false;     // keep the newest live drone centred
     bool layerMenu = false;     // the map layer dropdown is open
+    char nodeEdit[7] = "";      // node settings panel open for this node id (long press)
+    bool editNode = false;      // typing that node's alias
+    uint32_t rebootArm = 0;     // reboot needs a second tap within 3 s
     bool editDrone = false;     // typing the selected drone's alias
     // detail pages
     bool detail = false;        // device detail open (M->detail.mac)

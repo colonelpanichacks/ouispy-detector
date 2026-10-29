@@ -73,7 +73,9 @@ class Fleet:
         self._tri_ev = threading.Event()
         threading.Thread(target=self._tri_worker, daemon=True, name="tri").start()
         self.lock = threading.RLock()
-        self.home_id = None
+        # The home's node id, remembered across restarts: started with the home
+        # unplugged, the dashboard still knows which node it is.
+        self.home_id = store.get_setting("home_node_id") if hasattr(store, "get_setting") else None
         self.home = {}                   # latest home stats
         self.home_seen = 0.0
         self.tlm_seen = 0.0              # last TLM line (firmware with telemetry)
@@ -206,6 +208,8 @@ class Fleet:
             return
         with self.lock:
             if t.get("id"):
+                if t["id"] != self.home_id and t.get("role") == "home":
+                    self.store.set_setting("home_node_id", t["id"])
                 self.home_id = t["id"]
             for k in HOME_STAT_KEYS:
                 if k in t:

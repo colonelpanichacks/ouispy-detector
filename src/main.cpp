@@ -2932,8 +2932,9 @@ static void scanDomains(bool& wifi, bool& ble) {
 #ifdef SKYSPY_NODE
 // The Sky-Spy node lives on channel 6 (Remote ID's WiFi NAN channel, where most beacon
 // Remote ID is too) and steps onto the mesh channel only to send: right after a drone
-// report is queued, when a command or reply needs the air, and for a short window every
-// 2 s (announces, the dashboard's commands, OTA). ~90% of its time stays on channel 6.
+// report is queued, when a command or reply needs the air, and for a short window
+// (announces, the dashboard's commands, OTA): 300 ms a second while idle, 200 ms every
+// 2 s while a drone is up (~90% of its time on channel 6).
 // With the whole mesh on channel 6 it never has to leave.
 static void skyspyRadioTick() {
     const uint8_t RID_CH = 6;
@@ -2942,8 +2943,12 @@ static void skyspyRadioTick() {
     static uint32_t windowUntil = 0, nextWindow = 0, parkedAt = 0;
     uint32_t now = millis();
     if ((int32_t)(now - nextWindow) >= 0) {
-        windowUntil = now + 200;
-        nextWindow = now + 2000;
+        // Idle (no drone in the last minute): 300 ms on the mesh every second, so
+        // commands and update offers (repeated ~7 times over ~3.6 s) always land.
+        // With a drone up: 200 ms every 2 s, ~90% of the time listening on 6.
+        bool hunting = ridActive() > 0;
+        windowUntil = now + (hunting ? 200 : 300);
+        nextWindow = now + (hunting ? 2000 : 1000);
     }
     bool want = (int32_t)(windowUntil - now) > 0 || now - ridLastSendMs < 60 || meshNeedsAir() ||
                 meshOtaBusy();

@@ -9,6 +9,8 @@
 #include "feed.h"
 #include "maptiles.h"
 #include "gfx.h"
+#include "eye_art.h"
+#include "boards_art.h"
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 #include <M5Unified.h>
 #include <M5UnitUnifiedKEYBOARD.h>
@@ -70,7 +72,8 @@ enum HitAct : uint8_t {
     H_HELP, H_SETUP, H_CLOSE, H_FIELD, H_SRC, H_NET, H_SAVE, H_BACK, H_REVEAL, H_RESCAN,
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
-    H_LAYERMENU, H_LAYERPICK, H_DRALIAS
+    H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -99,6 +102,7 @@ void scroll_area(int x, int y, int w, int h, uint8_t list, int rowH, int rows) {
 // Finger state, between press and release.
 struct {
     bool down, dragging;
+    uint32_t downMs;      // when the finger went down (long press)
     int x0, y0, x, y;
     Hit pressed;
     bool hasPressed;
@@ -213,6 +217,15 @@ void fast_round(int x, int y, int w, int h, int r, uint16_t col) {
     C.fillCircle(x + w - r - 1, y + r, r, col);
     C.fillCircle(x + r, y + h - r - 1, r, col);
     C.fillCircle(x + w - r - 1, y + h - r - 1, r, col);
+}
+
+// Names (nodes, devices, drones) are never cut while a smaller font fits them: drop to
+// the small font first, shorten only if even that is too wide. (Leaves the small font
+// selected, so the text() right after draws in it.)
+const char *fit_name(const char *s, int w) {
+    if (C.textWidth(s) <= w) return s;
+    font(F_SM);
+    return fit(s, w);
 }
 
 void panel(int x, int y, int w, int h, const char *title, uint16_t accent = ACCENT) {
@@ -686,21 +699,6 @@ void draw_map() {
     }
     C.setClipRect(MX, MY, MW, MH);
     uint32_t q2 = micros();
-    // Range rings round the home node: scale at a glance.
-    for (int i = 0; i < M->nnodes; i++) {
-        const Node &nd = M->nodes[i];
-        if (!nd.isHome || !nd.hasPos) continue;
-        double mpp = 156543.03392 * cos(nd.lat * M_PI / 180) / pow(2.0, zf);
-        for (int m : {50, 100, 250, 500, 1000}) {
-            int r = m / mpp;
-            if (r < 40 || r > 900) continue;
-            C.drawCircle(sx(nd.lon), sy(nd.lat), r, dim(ACCENT, 0.35f));
-            font(F_SM);
-            char b[12];
-            snprintf(b, sizeof b, m >= 1000 ? "%d km" : "%d m", m >= 1000 ? m / 1000 : m);
-            map_text(sx(nd.lon), sy(nd.lat) - r - 9, b, dim(ACCENT, 0.85f), middle_center);   // top of the ring: clear of node labels
-        }
-    }
     uint32_t q3 = micros();
     // Live targets.
     double now = server_now();
@@ -731,8 +729,8 @@ void draw_map() {
         C.drawLine(x, y + 9, x - 9, y, c), C.drawLine(x - 9, y, x, y - 9, c);
         font(F_SM);
         char tl[64];
-        if (tri) snprintf(tl, sizeof tl, "%s  +/-%dm%s", fit(target_label(t), 150), (int)lroundf(t.triErr), t.triRough ? " rough" : "");
-        else snprintf(tl, sizeof tl, "%s", fit(target_label(t), 180));
+        if (tri) snprintf(tl, sizeof tl, "%s  +/-%dm%s", fit_name(target_label(t), 150), (int)lroundf(t.triErr), t.triRough ? " rough" : "");
+        else snprintf(tl, sizeof tl, "%s", fit_name(target_label(t), 180));
         map_text(x + 13, y, tl, c);
         int ti = -1;
         for (int k = 0; k < nTgt; k++) if (tgtIdx[k] == i) ti = k;
@@ -762,7 +760,7 @@ void draw_map() {
     // sit in a cluster). Each label tries right, left, then a column stepping down and
     // up beside its dot, joined to it by a thin leader line when it moved.
     struct Box { int x0, y0, x1, y1; };
-    Box placed[MAX_NODES + 2];
+    Box placed[MAX_NODES * 2 + 2];
     int np = 0;
     auto clear = [&](const Box &b) {
         for (int k = 0; k < np; k++)
@@ -773,39 +771,51 @@ void draw_map() {
     for (int i = 0; i < M->nnodes; i++)
         if (M->nodes[i].hasPos) order[no++] = i;
     std::sort(order, order + no, [](int a, int b) { return M->nodes[a].isHome > M->nodes[b].isHome; });
-    for (int k = 0; k < no; k++) {
+    for (int k = 0; k < no; k++) {   // markers: solid dot, dark gap, outer ring; home bigger
         const Node &nd = M->nodes[order[k]];
         int x = sx(nd.lon), y = sy(nd.lat);
-        uint16_t c = nd.online ? node_color565(nd.id) : FAINT;
-        dot(x, y, nd.isHome ? 8 : 6, c);
-        C.drawCircle(x, y, nd.isHome ? 12 : 10, BG);
+        uint16_t c = node_color565(nd.id);
+        int r = nd.isHome ? 10 : 8;
+        if (nd.online) {
+            C.fillCircle(x, y, r + 7, dim(c, 0.18f));
+            C.drawCircle(x, y, r + 5, dim(c, 0.75f));
+            C.drawCircle(x, y, r + 4, dim(c, 0.45f));
+            C.fillCircle(x, y, r + 2, BG);
+            C.fillCircle(x, y, r, c);
+            C.fillCircle(x, y, 2, TEXT);
+        } else {
+            C.fillCircle(x, y, r + 2, BG);
+            C.drawCircle(x, y, r, FAINT);
+            C.drawCircle(x, y, r - 1, FAINT);
+        }
+        placed[np++] = {x - r - 6, y - r - 6, x + r + 6, y + r + 6};   // labels keep off the dots
     }
-    font(F_MD);
-    const int lh = 24;
-    for (int k = 0; k < no; k++) {
+    font(F_SM);
+    const int lh = 28;
+    for (int k = 0; k < no; k++) {   // labels: dark pills edged in the node's colour, never overlapping
         const Node &nd = M->nodes[order[k]];
         int x = sx(nd.lon), y = sy(nd.lat);
         uint16_t c = nd.online ? node_color565(nd.id) : FAINT;
         const char *nm = nd.alias[0] ? nd.alias : nd.id;
-        int tw = C.textWidth(nm) + 6;
+        int tw = C.textWidth(nm) + 22;
         Box b = {};
         bool ok = false;
         int lx = 0, ly = 0;
-        for (int step = 0; step <= 6 && !ok; step++) {
-            for (int side = 0; side < 2 && !ok; side++) {
+        for (int step = 0; step <= 6 && !ok; step++)
+            for (int side = 0; side < 2 && !ok; side++)
                 for (int dir = (step ? -1 : 1); dir <= 1 && !ok; dir += 2) {
-                    int dy = step * lh * dir;
-                    lx = side ? x - 16 - tw : x + 16;
-                    ly = y + dy;
-                    b = {lx - 2, ly - lh / 2, lx + tw, ly + lh / 2};
-                    ok = clear(b);
+                    lx = side ? x - 22 - tw : x + 22;
+                    ly = y + step * lh * dir;
+                    b = {lx - 2, ly - lh / 2, lx + tw + 2, ly + lh / 2};
+                    ok = clear(b) && b.y0 > MY && b.y1 < MY + MH && b.x0 > 0 && b.x1 < W;
                 }
-            }
-        }
-        if (!ok) continue;   // no room at all: the dot alone (tap FIT / zoom in)
+        if (!ok) continue;
         placed[np++] = b;
         if (ly != y) C.drawLine(x, y, lx < x ? b.x1 - 2 : lx, ly, dim(c, 0.7f));
-        map_text(lx, ly, nm, c);
+        fast_round(lx, ly - 12, tw, 24, 8, rgb(0x0b0e13));
+        C.drawRoundRect(lx, ly - 12, tw, 24, 8, dim(c, 0.9f));
+        C.fillRect(lx + 4, ly - 7, 3, 14, c);
+        text(lx + 12, ly, nm, nd.online ? TEXT : MUTED, middle_left);
     }
     uint32_t q4 = micros();
     // Drones: track, pilot and the line between them, then the aircraft on top.
@@ -835,7 +845,7 @@ void draw_map() {
             int x = sx(d.lon), y = sy(d.lat);
             drone_glyph(x, y, d.hdg, d.hasHdg, c, live);
             font(F_MD);
-            map_text(x + 26, y - 9, fit(drone_name(d), 220), c);
+            map_text(x + 26, y - 9, fit_name(drone_name(d), 220), c);
             char b[48];
             if (d.hasHagl) snprintf(b, sizeof b, "%d m AGL%s", (int)d.hagl, "");
             else if (d.hasAlt) snprintf(b, sizeof b, "%d m MSL", (int)d.alt);
@@ -966,7 +976,7 @@ void draw_drones() {
         C.fillRoundRect(PAD + 14, ry + 8, 5, rh - 24, 2, live ? c : dim(c, 0.35f));
         drone_glyph(PAD + 50, ry + (rh - 8) / 2, d.hdg, d.hasHdg, c, live, 0.75f);
         font(F_LG);
-        text(PAD + 84, ry + 8, fit(drone_name(d), lw - 220), live ? TEXT : MUTED);
+        text(PAD + 84, ry + 8, fit_name(drone_name(d), lw - 220), live ? TEXT : MUTED);
         font(F_SM);
         char l[64];
         snprintf(l, sizeof l, "%s  via %s", d.ua[0] ? d.ua : "type not sent", node_name(d.closest));
@@ -999,7 +1009,7 @@ void draw_drones() {
     bool live = drone_live(d);
     uint16_t c = tag_color(d.tag);
     font(F_BRAND);
-    glow(x + 18, y + 40, fit(drone_name(d), w - 300), c, middle_left);
+    glow(x + 18, y + 40, fit_name(drone_name(d), w - 300), c, middle_left);
     font(F_SM);
     char sub[96];
     snprintf(sub, sizeof sub, "%s   %s   %s", d.mac, d.src[0] ? d.src : "", live ? (d.status[0] ? d.status : "live") : "not heard lately");
@@ -1060,12 +1070,33 @@ void draw_drones() {
     else maker[0] = 0;
     struct { const char *k; const char *v; } f[] = {{"MAKER", maker}, {"SERIAL / ID", d.id}, {"OPERATOR ID", d.op},
                                                     {"DESCRIPTION", d.desc}, {"AIRCRAFT", d.ua}};
+    // Values run up to the radar box and wrap onto a second line rather than being cut.
+    int radarL = x + w - 18 - min(CB - (gy + 3 * 62) - 20, w / 2 - 40);
+    int vw = radarL - (gx + 150) - 12;
     for (auto &e : f) {
         font(F_SM);
         text(gx, fy, e.k, FAINT);
-        font(F_MONO);
-        text(gx + 150, fy - 2, e.v[0] ? fit(e.v, w / 2 - 170) : "-", e.v[0] ? AMBER : FAINT);
-        fy += 30;
+        font(F_MONO_S);
+        if (!e.v[0]) {
+            text(gx + 150, fy - 1, "-", FAINT);
+            fy += 26;
+            continue;
+        }
+        String v = e.v;
+        if ((int)C.textWidth(v.c_str()) <= vw) {
+            text(gx + 150, fy - 1, v.c_str(), AMBER);
+            fy += 26;
+        } else {   // split at the last space that fits, else hard at the width
+            int cut = v.length();
+            while (cut > 1 && (int)C.textWidth(v.substring(0, cut).c_str()) > vw) cut--;
+            int sp = v.lastIndexOf(' ', cut);
+            if (sp > cut / 2) cut = sp;
+            text(gx + 150, fy - 1, v.substring(0, cut).c_str(), AMBER);
+            String rest = v.substring(cut);
+            rest.trim();
+            text(gx + 150, fy + 18, fit(rest.c_str(), vw), AMBER);
+            fy += 44;
+        }
     }
     char ft[64];
     snprintf(ft, sizeof ft, "first %s ago   last %s ago", age_str(d.first), age_str(d.last));
@@ -1273,7 +1304,7 @@ void draw_detail() {
         hit(rx, yy, rw, 42, H_DCOMP, i);
         C.fillRoundRect(rx, yy, rw, 40, 6, PANEL2);
         font(F_MD);
-        text(rx + 10, yy + 12, fit(c.label[0] ? c.label : c.mac, rw - 170), TEXT, middle_left);
+        text(rx + 10, yy + 12, fit_name(c.label[0] ? c.label : c.mac, rw - 170), TEXT, middle_left);
         font(F_SM);
         text(rx + 10, yy + 30, c.mac, FAINT, middle_left);
         char tg[24];
@@ -1282,6 +1313,123 @@ void draw_detail() {
         if (c.group[0]) text(rx + rw - 10, yy + 30, fit(c.group, 150), PURPLE, middle_right);
         int bwid = c.occasions ? (int)(c.together * 100 / c.occasions) : 0;
         C.fillRect(rx + rw - 120, yy + 37, min(100, bwid), 2, PINK);
+    }
+}
+
+// ------------------------------------------------------------------ node settings
+// Long press on a node (Overview / Fleet): name, colour, buzzer + LED, identify, status,
+// reboot. Everything goes through the dashboard, which pushes it to the node.
+
+const Node *edit_node() {
+    for (int i = 0; i < M->nnodes; i++)
+        if (!strcmp(M->nodes[i].id, A.nodeEdit)) return &M->nodes[i];
+    return nullptr;
+}
+
+constexpr int NODE_HUES[] = {0, 25, 45, 90, 140, 175, 195, 220, 260, 285, 310, 335};
+
+void node_cmd(const char *id, const char *op, const char *args) {
+    char path[48], body[120];
+    snprintf(path, sizeof path, "/api/nodes/%s/cmd", id);
+    if (args) snprintf(body, sizeof body, "{\"op\":\"%s\",\"args\":%s}", op, args);
+    else snprintf(body, sizeof body, "{\"op\":\"%s\"}", op);
+    net_post(path, body);
+}
+
+void node_set(const char *id, const char *json) {
+    char path[48];
+    snprintf(path, sizeof path, "/api/nodes/%s", id);
+    net_post(path, json);
+}
+
+void draw_node_editor() {
+    const Node *n = edit_node();
+    if (!n) { A.nodeEdit[0] = 0; return; }
+    int x = PAD + 120, y = CY + 10, w = W - 2 * PAD - 240, h = CB - CY - 20;
+    fast_fill(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
+    hit(0, TOP, W, H - TOP - BOT, H_NONE);
+    uint16_t nc = node_color565(n->id);
+    fast_round(x, y, w, h, 10, PANEL);
+    glow_rect(x, y, w, h, 10, nc);
+    font(F_BRAND);
+    glow(x + 24, y + 32, fit_name(n->alias[0] ? n->alias : n->id, w - 260), nc, middle_left);
+    font(F_SM);
+    size_t fl = strlen(n->fw);
+    bool sky = fl && n->fw[fl - 1] == 'S';
+    char sub[120];
+    snprintf(sub, sizeof sub, "%s   %s   %s   fw %s   up %s", n->id, n->isHome ? "HOME" : sky ? "SKY-SPY" : "REMOTE",
+             n->online ? "online" : "OFFLINE", n->fw[0] ? n->fw : "?", n->up ? dur_str(n->up) : "-");
+    text(x + 24, y + 62, sub, MUTED, middle_left);
+    int cw;
+    chip(x + w - 24 - (C.textWidth("CLOSE  ESC") + 28), y + 18, "CLOSE  ESC", ACCENT, false, &cw, H_NCLOSE);
+    bool can = net_online();
+    int lx = x + 24, yy = y + 92, fwid = w - 48;
+    // Name
+    font(F_SM);
+    text(lx, yy, "NAME", dim(ACCENT, 0.9f));
+    yy += 20;
+    hit(lx, yy - 4, fwid, 46, can ? H_NALIAS : H_NONE);
+    fast_round(lx, yy, fwid, 40, 8, PANEL2);
+    if (A.editNode) glow_rect(lx, yy, fwid, 40, 8, PINK);
+    else C.drawRoundRect(lx, yy, fwid, 40, 8, LINE2);
+    font(F_MD);
+    char nb[48];
+    if (A.editNode) snprintf(nb, sizeof nb, "%s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
+    else snprintf(nb, sizeof nb, "%s", n->alias[0] ? n->alias : (can ? "tap or E to name it" : "needs the dashboard"));
+    text(lx + 12, yy + 20, nb, A.editNode || n->alias[0] ? TEXT : FAINT, middle_left);
+    yy += 58;
+    // Colour
+    font(F_SM);
+    text(lx, yy, "COLOUR", dim(ACCENT, 0.9f));
+    yy += 22;
+    int sw = 44, gap = 10, sx = lx;
+    for (int i = 0; i < 12; i++, sx += sw + gap) {
+        int hue = NODE_HUES[i];
+        float hp = hue / 60.0f;
+        float xx = 1 - fabsf(fmodf(hp, 2) - 1);
+        float r = 0, g = 0, b = 0;
+        if (hp < 1) r = 1, g = xx; else if (hp < 2) r = xx, g = 1; else if (hp < 3) g = 1, b = xx;
+        else if (hp < 4) g = xx, b = 1; else if (hp < 5) r = xx, b = 1; else r = 1, b = xx;
+        uint16_t c = lgfx::color565(60 + r * 195, 60 + g * 195, 60 + b * 195);
+        hit(sx - 3, yy - 3, sw + 6, sw + 6, can ? H_NCOLOR : H_NONE, hue);
+        C.fillRoundRect(sx, yy, sw, sw, 10, c);
+        if (n->hue == hue) glow_rect(sx - 3, yy - 3, sw + 6, sw + 6, 12, TEXT);
+    }
+    chip(sx + 4, yy + 7, "DEFAULT", MUTED, n->hue < 0, &cw, can ? H_NCOLOR : -1, -1);
+    yy += sw + 22;
+    // Buzzer / LED
+    font(F_SM);
+    text(lx, yy, "ON THE NODE", dim(ACCENT, 0.9f));
+    yy += 22;
+    int bx = lx;
+    char t1[24], t2[24];
+    snprintf(t1, sizeof t1, "BUZZER %s", n->buzzer < 0 ? "?" : n->buzzer ? "ON" : "OFF");
+    snprintf(t2, sizeof t2, "LED %s", n->led < 0 ? "?" : n->led ? "ON" : "OFF");
+    chip(bx, yy, t1, AMBER, n->buzzer == 1, &cw, can ? H_NBUZZ : -1);
+    bx += cw + 10;
+    chip(bx, yy, t2, AMBER, n->led == 1, &cw, can ? H_NLED : -1);
+    bx += cw + 30;
+    chip(bx, yy, "IDENTIFY 10 S", SKY, false, &cw, can ? H_NIDENT : -1);
+    bx += cw + 10;
+    chip(bx, yy, "REFRESH STATUS", ACCENT, false, &cw, can ? H_NSTATUS : -1);
+    bx += cw + 30;
+    bool armed = A.rebootArm && millis() - A.rebootArm < 3000;
+    chip(bx, yy, armed ? "TAP AGAIN TO REBOOT" : "REBOOT", RED, armed, &cw, can ? H_NREBOOT : -1);
+    yy += 56;
+    // What it reports
+    font(F_SM);
+    text(lx, yy, "STATUS", dim(ACCENT, 0.9f));
+    yy += 24;
+    char rows[4][64];
+    snprintf(rows[0], 64, "filters %d  %s", n->filters, n->fcrc[0] ? n->fcrc : "");
+    snprintf(rows[1], 64, "peers %d   channel %d   devices %d", n->peers, n->ch, n->dev);
+    snprintf(rows[2], 64, "link %s dBm   strongest neighbour %d dBm", n->rssi ? String(n->rssi).c_str() : "--", n->lrssi);
+    snprintf(rows[3], 64, "heap %u KB   mode %s", (unsigned)(n->heap / 1024), n->mode[0] ? n->mode : "?");
+    font(F_MD);
+    for (int i = 0; i < 4 && yy + 26 < y + h; i++, yy += 30) text(lx, yy, rows[i], TEXT);
+    if (!can) {
+        font(F_SM);
+        text(x + w / 2, y + h - 20, "settings go through the dashboard: connect the Tab5 to it (Wi-Fi)", AMBER, middle_center);
     }
 }
 
@@ -1505,7 +1653,7 @@ void draw_bottom() {
         glow(PAD, y + BOT / 2, head, PINK, middle_left);
         int x = PAD + C.textWidth("ALERT x000") + 20;
         font(F_LG);
-        text(x, y + BOT / 2, fit(vendor_of(&d), 210), TEXT, middle_left);
+        text(x, y + BOT / 2, fit_name(vendor_of(&d), 210), TEXT, middle_left);
         x += min(210, (int)C.textWidth(vendor_of(&d))) + 16;
         font(F_MONO);
         text(x, y + BOT / 2, d.mac, SOFT, middle_left);
@@ -1650,9 +1798,10 @@ void draw_overview() {
     for (int i = 0; i < M->nnodes && ry + rh <= fy + fh; i++, ry += rh) {
         const Node &n = M->nodes[i];
         uint16_t nc = node_color565(n.id);
+        hit(PAD + 8, ry, fw - 16, rh - 2, H_NODEROW, i);   // tap: to Fleet; hold: its settings
         C.fillRoundRect(PAD + 12, ry + 6, 5, rh - 14, 2, n.online ? nc : dim(nc, 0.35f));
         font(F_LG);
-        text(PAD + 30, ry + 6, fit(n.alias[0] ? n.alias : n.id, 220), n.online ? TEXT : MUTED);
+        text(PAD + 30, ry + 6, fit_name(n.alias[0] ? n.alias : n.id, 220), n.online ? TEXT : MUTED);
         font(F_SM);
         char l2[64];
         snprintf(l2, sizeof l2, "%s  %s  fw %s", n.id, n.isHome ? "HOME" : "REMOTE", n.fw[0] ? n.fw : "?");
@@ -1694,7 +1843,7 @@ void draw_overview() {
         if (i == 0 && server_now() - d->ts < 10) C.fillRect(lx + 4, yy, lw - 8, row - 2, dim(PINK, 0.08f));
         font(F_MD);
         text(cAge, yy + row / 2, age_str(d->ts), MUTED, middle_left);
-        text(cVen, yy + row / 2, fit(vendor_of(d), 206), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
+        text(cVen, yy + row / 2, fit_name(vendor_of(d), 206), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
         font(F_MONO_S);
         text(cMac, yy + row / 2, d->mac, muted ? FAINT : SOFT, middle_left);
         font(F_MD);
@@ -1704,7 +1853,7 @@ void draw_overview() {
         char nb[40];
         if (d->closest[0]) snprintf(nb, sizeof nb, "%s > %s", node_name(d->node), node_name(d->closest));
         else snprintf(nb, sizeof nb, "%s", node_name(d->node));
-        text(cNode, yy + row / 2, fit(nb, lx + lw - cNode - 12), node_color565(d->closest[0] ? d->closest : d->node), middle_left);
+        text(cNode, yy + row / 2, fit_name(nb, lx + lw - cNode - 12), node_color565(d->closest[0] ? d->closest : d->node), middle_left);
     }
     if (!M->ndets) {
         font(F_MD);
@@ -1763,7 +1912,7 @@ void draw_fleet() {
         int my = ry + (rh - 6) / 2;
         C.fillRoundRect(PAD + 12, ry + 8, 5, rh - 22, 2, n.online ? nc : dim(nc, 0.35f));
         font(F_LG);
-        text(cx[0], my - 10, fit(n.alias[0] ? n.alias : n.id, 240), n.online ? TEXT : MUTED, middle_left);
+        text(cx[0], my - 10, fit_name(n.alias[0] ? n.alias : n.id, 240), n.online ? TEXT : MUTED, middle_left);
         font(F_SM);
         text(cx[0], my + 14, n.id, FAINT, middle_left);
         font(F_MD);
@@ -1814,7 +1963,7 @@ void draw_fleet() {
         for (int i = 0; i < n.nnbr && yy + 28 < dy + dh; i++, yy += 30) {
             const Seen &s = n.nbr[i];
             font(F_MD);
-            text(PAD + 16, yy, fit(node_name(s.node), 200), node_color565(s.node));
+            text(PAD + 16, yy, fit_name(node_name(s.node), 200), node_color565(s.node));
             rssi_bar(PAD + 230, yy + 6, 260, 10, s.rssi, rssi_color(s.rssi));
             char r[24];
             snprintf(r, sizeof r, "%d%s", s.rssi, s.age ? "  relay" : "");
@@ -1889,7 +2038,7 @@ void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows)
         font(F_MD);
         uint16_t nc = node_color565(s[i].node);
         if (i == 0 && n > 1) dot(x + 6, yy + 10, 4, nc);
-        text(x + 18, yy, fit(node_name(s[i].node), 150), nc);
+        text(x + 18, yy, fit_name(node_name(s[i].node), 150), nc);
         rssi_bar(x + 180, yy + 6, w - 270, 10, s[i].rssi, rssi_color(s[i].rssi));
         char r[16];
         snprintf(r, sizeof r, "%d", s[i].rssi);
@@ -1933,7 +2082,7 @@ void draw_live() {
         int my = ry + rh / 2;
         font(F_MD);
         text(cAge, my, age_str(d->ts), MUTED, middle_left);
-        text(cVen, my, fit(vendor_of(d), 290), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
+        text(cVen, my, fit_name(vendor_of(d), 290), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
         if (muted) {
             font(F_SM);
             text(cMac - 14, my, "MUTED", AMBER, middle_right);
@@ -1947,8 +2096,8 @@ void draw_live() {
         char r[8];
         snprintf(r, sizeof r, "%d", d->rssi);
         text(cRssi + 100, my, r, rssi_color(d->rssi), middle_left);
-        text(cNode, my, fit(node_name(d->node), 120), node_color565(d->node), middle_left);
-        text(cClose, my, d->closest[0] ? fit(node_name(d->closest), 130) : "-",
+        text(cNode, my, fit_name(node_name(d->node), 120), node_color565(d->node), middle_left);
+        text(cClose, my, d->closest[0] ? fit_name(node_name(d->closest), 130) : "-",
              d->closest[0] ? node_color565(d->closest) : FAINT, middle_left);
     }
     if (!nLive) {
@@ -1962,7 +2111,7 @@ void draw_live() {
     if (!nLive) return;
     const Det *d = det_at(liveIdx[A.sel[V_LIVE]]);
     font(F_LG);
-    glow(PAD + 16, dy + 32, fit(vendor_of(d), 420), d->isNew ? PINK : TEXT);
+    glow(PAD + 16, dy + 32, fit_name(vendor_of(d), 420), d->isNew ? PINK : TEXT);
     {
         font(F_SM);
         int cw;
@@ -2014,7 +2163,7 @@ void draw_targets() {
         if (sel) glow_rect(x, y, cw, ch, 8, ACCENT);
         else C.drawRoundRect(x, y, cw, ch, 8, live ? dim(PINK, 0.5f) : LINE2);
         font(F_LG);
-        text(x + 16, y + 12, fit(target_label(t), cw - 110), muted ? FAINT : (t.alias[0] ? PINK : TEXT));
+        text(x + 16, y + 12, fit_name(target_label(t), cw - 110), muted ? FAINT : (t.alias[0] ? PINK : TEXT));
         if (t.group[0]) {
             font(F_SM);
             text(x + 16, y + ch - 20, fit(t.group, cw - 32), PURPLE);
@@ -2033,7 +2182,7 @@ void draw_targets() {
             font(F_SM);
             text(x + 16, y + 82, t.nseen > 1 ? "NEAREST" : "HEARD BY", FAINT);
             font(F_LG);
-            glow(x + 110, y + 76, fit(node_name(best.node), cw - 220), node_color565(best.node));
+            glow(x + 110, y + 76, fit_name(node_name(best.node), cw - 220), node_color565(best.node));
             char r[12];
             snprintf(r, sizeof r, "%d", best.rssi);
             text(x + cw - 16, y + 76, r, rssi_color(best.rssi), top_right);
@@ -2042,7 +2191,7 @@ void draw_targets() {
                 int yy = y + 108 + (i - 1) * 24;
                 if (yy + 18 > y + ch) break;
                 font(F_SM);
-                text(x + 16, yy, fit(node_name(t.seen[i].node), 120), node_color565(t.seen[i].node));
+                text(x + 16, yy, fit_name(node_name(t.seen[i].node), 120), node_color565(t.seen[i].node));
                 rssi_bar(x + 140, yy + 4, cw - 220, 8, t.seen[i].rssi, rssi_color(t.seen[i].rssi));
                 snprintf(r, sizeof r, "%d", t.seen[i].rssi);
                 text(x + cw - 16, yy, r, rssi_color(t.seen[i].rssi), top_right);
@@ -2252,50 +2401,258 @@ uint16_t mix565(uint16_t a, uint16_t b, float t) {
     return ((int)(ar + (br - ar) * t) << 11) | ((int)(ag + (bg - ag) * t) << 5) | (int)(ab + (bb - ab) * t);
 }
 
-void ascii_plasma(float t) {
-    static const char RAMP[] = " .,:;-=+*x#%@";
+// A morphing ASCII blob: four metaballs on slow Lissajous orbits merge and split; the
+// characters get denser toward its core and the colour runs deep blue -> violet ->
+// purple -> pink -> hot pink with the density, over a faint blue texture.
+uint16_t blob_color(float v) {
+    static const uint16_t STOPS[] = {rgb(0x1d4ed8), rgb(0x3b82f6), rgb(0x7c3aed), rgb(0xa855f7), rgb(0xec4899), rgb(0xff4fd8)};
+    const int ns = sizeof(STOPS) / sizeof(STOPS[0]);
+    v = constrain(v, 0.0f, 1.0f) * (ns - 1);
+    int i = min((int)v, ns - 2);
+    return mix565(STOPS[i], STOPS[i + 1], v - i);
+}
+
+void ascii_plasma(float t, float fade) {
+    static const char RAMP[] = " .,-~:;=+*x#%@";
     const int nr = sizeof(RAMP) - 2;
-    const uint16_t G[] = {ACCENT, SKY, PURPLE, PINK, ACCENT};
-    const int CW = 16, CH = 22;
+    const int CW = 14, CH = 20, GW = W / CW + 1, GH = H / CH + 1;
+    // Ball centres (grid cells) and radii.
+    float bx[4], by[4], br[4];
+    for (int k = 0; k < 4; k++) {
+        float ph = k * 1.7f;
+        bx[k] = GW * (0.5f + 0.32f * sinf(t * (0.61f + 0.13f * k) + ph));
+        by[k] = GH * (0.5f + 0.30f * cosf(t * (0.47f + 0.11f * k) + ph * 1.3f));
+        br[k] = 6.5f + 2.5f * sinf(t * 0.9f + k);
+    }
     font(F_SM);
     C.setTextDatum(middle_center);
     char one[2] = {0, 0};
-    for (int gy = 0; gy * CH < H; gy++) {
-        for (int gx = 0; gx * CW < W; gx++) {
-            float x = gx * 0.18f, y = gy * 0.24f;
-            float cx = x - 40 * 0.18f, cy = y - 16 * 0.24f;
-            float v = sinf(x + t) + sinf(y * 1.3f - t * 1.1f) + sinf((x + y) * 0.7f + t * 0.6f) +
-                      sinf(sqrtf(cx * cx + cy * cy) * 1.6f - t * 1.7f);
-            float u = (v + 4) / 8;   // 0..1
-            int ci = (int)(u * nr + 0.5f);
+    for (int gy = 0; gy < GH; gy++) {
+        for (int gx = 0; gx < GW; gx++) {
+            float f = 0;
+            for (int k = 0; k < 4; k++) {
+                float dx = gx - bx[k], dy = (gy - by[k]) * 1.45f;   // cells are taller than wide
+                f += br[k] * br[k] / (dx * dx + dy * dy + 1.0f);
+            }
+            // Faint drifting texture between the blobs.
+            float tex = 0.5f + 0.5f * sinf(gx * 0.31f + t * 0.8f) * sinf(gy * 0.43f - t * 0.6f);
+            float v = f * 0.55f;              // ~1 at the blob's surface
+            float u = v > 1 ? 1 : v;
+            float a = max(u, tex * 0.18f);
+            int ci = (int)(a * nr + 0.5f);
             if (ci <= 0) continue;
-            float gp = fmodf(u * 2.0f + gx * 0.01f + t * 0.05f, 1.0f) * 4;   // position on the gradient
-            int gi = (int)gp;
-            uint16_t col = dim(mix565(G[gi], G[gi + 1], gp - gi), 0.12f + 0.30f * u);
-            one[0] = RAMP[ci];
+            float colorPos = v > 1 ? 0.55f + 0.45f * min(1.0f, (v - 1) * 0.6f) : v * 0.55f;
+            uint16_t col = dim(blob_color(colorPos), (0.18f + 0.62f * u) * fade);
+            one[0] = RAMP[min(ci, nr)];
             C.setTextColor(col);
             C.drawString(one, gx * CW + CW / 2, gy * CH + CH / 2);
         }
     }
 }
 
+// ---- the colonelpanic.tech wordmark (the website's ascii-wordmark.js, ported) ----
+// Letterforms as a window onto a live ASCII field: a flowing gradient that cross-fades
+// into Chladni plate figures, coloured pink > purple > blue > purple, a white scan line
+// and the odd glitched row. The blob condenses into it, it holds, then dissolves back.
+constexpr int WM_CW = 6, WM_CH = 9;                       // fine cells (Font0, 6x8)
+constexpr int WM_COLS = W / WM_CW, WM_ROWS = 34;          // the wordmark band: 34 rows
+constexpr int WM_Y0 = 150;                                // its top on screen
+uint8_t *wmMask = nullptr;                                // WM_ROWS x WM_COLS: 1 inside a letter
+
+void wm_build() {
+    if (wmMask) return;
+    wmMask = (uint8_t *)heap_caps_calloc(WM_ROWS * WM_COLS, 1, MALLOC_CAP_SPIRAM);
+    M5Canvas mk;
+    mk.setColorDepth(1);
+    mk.setPsram(true);
+    if (!wmMask || !mk.createSprite(W, WM_ROWS * WM_CH)) return;
+    mk.fillSprite(0);
+    mk.setFont(&fonts::Orbitron_Light_32);
+    mk.setTextColor(1);
+    const char *lines[2] = {"COLONEL", "PANIC.TECH"};
+    float sz = 1;
+    for (float z = 6; z >= 1; z -= 0.1f) {   // largest size where both lines fit
+        mk.setTextSize(z);
+        if (mk.textWidth(lines[1]) <= W - 120 && mk.fontHeight() * 2 <= WM_ROWS * WM_CH - 6) { sz = z; break; }
+    }
+    mk.setTextSize(sz);
+    mk.setTextDatum(middle_center);
+    int lh = mk.fontHeight();
+    int band = WM_ROWS * WM_CH;
+    mk.drawString(lines[0], W / 2, band / 2 - lh / 2 - 2);
+    mk.drawString(lines[1], W / 2, band / 2 + lh / 2 + 2);
+    for (int r = 0; r < WM_ROWS; r++)
+        for (int c = 0; c < WM_COLS; c++) {
+            int hitN = 0;   // a cell counts when most of its samples are ink
+            for (int sy = 2; sy < WM_CH; sy += 3)
+                for (int sx = 1; sx < WM_CW; sx += 2) hitN += mk.readPixel(c * WM_CW + sx, r * WM_CH + sy) ? 1 : 0;
+            wmMask[r * WM_COLS + c] = hitN >= 4;
+        }
+    mk.deleteSprite();
+}
+
+float smoothf(float u) { u = constrain(u, 0.0f, 1.0f); return u * u * (3 - 2 * u); }
+
+// pink > purple > blue > purple > pink, the website's stops
+uint16_t wm_loop(float p, float gain, float white) {
+    static const float ST[3][3] = {{255, 43, 214}, {176, 92, 255}, {61, 130, 255}};
+    static const int SEG[4][2] = {{0, 1}, {1, 2}, {2, 1}, {1, 0}};
+    float q = (p - floorf(p)) * 4;
+    int si = min(3, (int)q);
+    float f = q - si;
+    const float *A = ST[SEG[si][0]], *B = ST[SEG[si][1]];
+    float rgbv[3];
+    for (int k = 0; k < 3; k++) {
+        float v = (A[k] + (B[k] - A[k]) * f) * gain;
+        rgbv[k] = v + (255 - v) * white;
+    }
+    return lgfx::color565(rgbv[0], rgbv[1], rgbv[2]);
+}
+
+void wm_draw(float t, float show) {
+    if (!wmMask || show <= 0.01f) return;
+    static const char RAMPW[] = ".:-=+*#%@";
+    const int R = sizeof(RAMPW) - 1;
+    // 0 = flowing gradient, 1 = plate figures (4 s flow, 1.5 s fade, 4 s plate, 1.5 s fade)
+    float u = fmodf(t, 11.0f), mix;
+    if (u < 4) mix = 0; else if (u < 5.5f) mix = smoothf((u - 4) / 1.5f);
+    else if (u < 9.5f) mix = 1; else mix = 1 - smoothf((u - 9.5f) / 1.5f);
+    float pn = (1.2f + 0.45f * sinf(t * 0.13f)) * PI, pm = (2.5f + 0.6f * cosf(t * 0.097f)) * PI;
+    int scanRow = (int)fmodf(t * 9, WM_ROWS + 30);
+    static float glUntil = 0, glNext = 0;
+    static int glR0 = 0, glR1 = 0, glDx = 0;
+    if (t > glNext) {
+        glR0 = esp_random() % WM_ROWS;
+        glR1 = glR0 + 1 + esp_random() % 4;
+        glDx = ((esp_random() & 1) ? 1 : -1) * (1 + esp_random() % 4);
+        glUntil = t + 0.09f + (esp_random() % 100) / 1000.0f;
+        glNext = t + 1.8f + (esp_random() % 400) / 100.0f;
+    }
+    bool glitching = t < glUntil;
+    C.setFont(&fonts::Font0);
+    C.setTextDatum(top_left);
+    char one[2] = {0, 0};
+    for (int y = 0; y < WM_ROWS; y++) {
+        for (int x = 0; x < WM_COLS; x++) {
+            if (!wmMask[y * WM_COLS + x]) continue;
+            uint32_t hsh = (uint32_t)(x * 73856093u ^ y * 19349663u);
+            float jit = (hsh % 1000) / 1000.0f;
+            // The reveal: cells fill in left to right as `show` rises.
+            float front = show * 1.25f - (x / (float)WM_COLS) * 0.8f - jit * 0.2f;
+            if (front < 0) continue;
+            float v = 0.8f + 0.14f * sinf(x * 0.09f - t * 1.4f + y * 0.35f) + (jit - 0.5f) * 0.14f;
+            if (mix > 0) {
+                float X = (x - WM_COLS / 2.0f) / WM_ROWS, Y = (y - WM_ROWS / 2.0f) / WM_ROWS;
+                X += 0.12f * sinf(Y * 3.1f + t * 0.5f);
+                float wave = cosf(pn * X) * cosf(pm * Y) - cosf(pm * X) * cosf(pn * Y);
+                float line = 1 - fminf(1, fabsf(wave) * 1.25f);
+                float plate = 0.16f + 0.84f * smoothf(line) + (jit - 0.5f) * 0.06f;
+                v += (plate - v) * mix;
+            }
+            v = constrain(v, 0.0f, 1.0f);
+            bool white = y == scanRow || front < 0.04f;
+            int glyph = min(R - 1, (int)(v * (R - 1) + 0.5f));
+            if ((esp_random() % 100) < 2 || front < 0.04f) glyph = 3 + esp_random() % (R - 3);
+            float hp = (x / (float)WM_COLS) * 1.4f + t * 0.05f + v * 0.2f * mix;
+            int dx = 0;
+            if (glitching && y >= glR0 && y < glR1) dx = glDx * WM_CW, hp += 0.5f;
+            float gain = (0.35f + 0.65f * v) * fminf(1, front * 3);
+            one[0] = RAMPW[glyph];
+            C.setTextColor(wm_loop(hp, gain, white ? 0.85f : 0));
+            C.drawString(one, x * WM_CW + dx, WM_Y0 + y * WM_CH);
+        }
+    }
+}
+
+// The OUI-SPY eye (colonelpanic.tech hero art): glyph density from the art, the site's
+// pink > purple > blue gradient sweeping across it, revealed and dissolved like the mark.
+void eye_draw(float t, float show) {
+    if (show <= 0.01f) return;
+    static const char RAMPE[] = " .:-=+*#%@";
+    const int R = sizeof(RAMPE) - 1;
+    int x0 = (W - EYE_COLS * WM_CW) / 2, y0 = 28;
+    int scanRow = (int)fmodf(t * 9, EYE_ROWS + 30);
+    C.setFont(&fonts::Font0);
+    C.setTextDatum(top_left);
+    char one[2] = {0, 0};
+    for (int y = 0; y < EYE_ROWS; y++) {
+        for (int x = 0; x < EYE_COLS; x++) {
+            int d = EYE_ART[y * EYE_COLS + x];
+            if (d < 30) continue;
+            uint32_t hsh = (uint32_t)(x * 2654435761u ^ y * 40503u);
+            float jit = (hsh % 1000) / 1000.0f;
+            float front = show * 1.25f - (fabsf(x - EYE_COLS / 2.0f) / EYE_COLS) * 1.1f - jit * 0.2f;   // opens from the centre
+            if (front < 0) continue;
+            float v = d / 255.0f;
+            v = constrain(v * (0.85f + 0.15f * sinf(x * 0.11f - t * 1.6f + y * 0.3f)), 0.0f, 1.0f);
+            int glyph = min(R - 1, (int)(v * (R - 1) + 0.5f));
+            if ((esp_random() % 100) < 2) glyph = 3 + esp_random() % (R - 3);
+            float hp = (x / (float)EYE_COLS) * 1.2f - t * 0.06f;
+            bool white = y == scanRow || front < 0.04f;
+            float gain = (0.3f + 0.7f * v) * fminf(1, front * 3);
+            one[0] = RAMPE[glyph];
+            C.setTextColor(wm_loop(hp, gain, white ? 0.85f : 0));
+            C.drawString(one, x0 + x * WM_CW, y0 + y * WM_CH);
+        }
+    }
+}
+
+// The site's moving background: the OUI-SPY board art, tiled and drifting slowly up and
+// across, dim, in the pink > purple > blue loop.
+void boards_draw(float t, float gain0) {
+    static const char RAMPB[] = " .:-=+*#%@";
+    const int R = sizeof(RAMPB) - 1;
+    const int TW = BOARDS_COLS + 14;                       // tile width with a gap
+    int ox = (int)(t * 2.0f) % TW, oy = (int)(t * 3.0f) % BOARDS_ROWS;
+    const int cols = W / WM_CW + 1, rows = H / WM_CH + 1;
+    C.setFont(&fonts::Font0);
+    C.setTextDatum(top_left);
+    char one[2] = {0, 0};
+    for (int y = 0; y < rows; y++) {
+        int ay = (y + oy) % BOARDS_ROWS;
+        for (int x = 0; x < cols; x++) {
+            int ax = (x + ox) % TW;
+            if (ax >= BOARDS_COLS) continue;
+            int d = BOARDS_ART[ay * BOARDS_COLS + ax];
+            if (d < 40) continue;
+            float v = d / 255.0f;
+            int glyph = min(R - 1, (int)(v * (R - 1) + 0.5f));
+            float hp = (x / (float)cols) * 0.9f + (y / (float)rows) * 0.3f + t * 0.03f;
+            one[0] = RAMPB[glyph];
+            C.setTextColor(wm_loop(hp, gain0 * (0.45f + 0.55f * v), 0));
+            C.drawString(one, x * WM_CW, y * WM_CH);
+        }
+    }
+}
+
 void draw_ota() {
+    wm_build();
     ppa_fill(0, 0, W, H, BG);
-    // ~5 frames a second: flash writes slow PSRAM, and 12 full-frame redraws a second on top
-    // starved the display's scan-out (it flashed blue). Gentle motion keeps it fluid.
-    ascii_plasma(millis() / 1600.0f);
-    // A dark plate under the title and the bar keeps them crisp over the art.
-    tint_rect(W / 2 - 420, H / 2 - 110, 840, 210, BG, 200);
-    font(F_BRAND_L);
-    glow(W / 2, H / 2 - 60, "FIRMWARE UPDATE", ACCENT, middle_center);
-    int bw = 700, bx = (W - bw) / 2, by = H / 2;
+    // Time from the start of this update, so the art begins at once: the wordmark condenses
+    // in over the drifting board art, then morphs into the OUI-SPY eye and back (20 s loop).
+    static uint32_t t0 = 0, lastMs = 0;
+    uint32_t ms = millis();
+    if (!t0 || ms - lastMs > 3000) t0 = ms;
+    lastMs = ms;
+    float t = (ms - t0) / 1000.0f;
+    float u = fmodf(t, 20.0f);
+    float eye = u < 8 ? 0 : u < 10.5f ? smoothf((u - 8) / 2.5f) : u < 17.5f ? 1 : 1 - smoothf((u - 17.5f) / 2.5f);
+    float mark = (t < 2.5f ? smoothf(t / 2.5f) : 1.0f) * (1 - eye);
+    boards_draw(t, 0.30f);
+    wm_draw(t, mark);
+    eye_draw(t, eye);
+    // Progress at the bottom, on a dark plate.
+    int bw = 700, bx = (W - bw) / 2, by = H - 92;
+    tint_rect(bx - 40, by - 34, bw + 80, 130, BG, 210);
+    font(F_MD);
+    glow(W / 2, by - 14, "FIRMWARE UPDATE", ACCENT, middle_center);
     C.fillRoundRect(bx, by, bw, 20, 10, PANEL2);
     C.fillRoundRect(bx, by, bw * A.otaPct / 100, 20, 10, ACCENT);
     glow_rect(bx, by, bw, 20, 10, dim(ACCENT, 0.7f));
     font(F_LG);
     char p[8];
     snprintf(p, sizeof p, "%u%%", A.otaPct);
-    text(W / 2, by + 50, p, TEXT, top_center);
+    text(W / 2, by + 44, p, TEXT, top_center);
 }
 
 // Settings editor. Rows: 0 = data source, 1..NF = text fields, NF+1 = save.
@@ -2675,6 +3032,29 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         A.help = false;
         return;
     }
+    if (A.nodeEdit[0]) {
+        if (A.editNode) {
+            size_t n = strlen(A.editBuf);
+            if (kc == 0x29) A.editNode = false;
+            else if (kc == 0x28) {
+                JsonDocument j;
+                j["alias"] = A.editBuf;
+                char body[96];
+                serializeJson(j, body, sizeof body);
+                node_set(A.nodeEdit, body);
+                A.editNode = false;
+            } else if (kc == 0x2A || kc == 0x4C) { if (n) A.editBuf[n - 1] = 0; }
+            else if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\' && n + 1 < 33) A.editBuf[n] = ch, A.editBuf[n + 1] = 0;
+            return;
+        }
+        if (kc == 0x29) { A.nodeEdit[0] = 0; return; }
+        if ((ch == 'e' || ch == 'E') && net_online()) {
+            const Node *nd = edit_node();
+            A.editNode = true;
+            strlcpy(A.editBuf, nd ? nd->alias : "", sizeof A.editBuf);
+        }
+        return;
+    }
     if (A.editDrone) {   // typing the selected drone's alias
         size_t n = strlen(A.editBuf);
         if (kc == 0x29) A.editDrone = false;
@@ -2850,6 +3230,53 @@ static void dispatch(const Hit &h) {
         }
         return;
     }
+    if (A.nodeEdit[0]) {
+        const Node *n = edit_node();
+        char id[7];
+        strlcpy(id, A.nodeEdit, sizeof id);
+        switch (h.act) {
+        case H_NCLOSE: A.nodeEdit[0] = 0; A.editNode = false; break;
+        case H_NALIAS:
+            A.editNode = true;
+            strlcpy(A.editBuf, n ? n->alias : "", sizeof A.editBuf);
+            break;
+        case H_NCOLOR: {
+            char b[32];
+            if (h.arg < 0) snprintf(b, sizeof b, "{\"color\":null}");
+            else snprintf(b, sizeof b, "{\"color\":%d}", h.arg);
+            node_set(id, b);
+            break;
+        }
+        case H_NBUZZ:
+            if (n) {
+                char a[40];
+                snprintf(a, sizeof a, "{\"buzzer\":%d,\"led\":%d}", n->buzzer == 1 ? 0 : 1, n->led == 0 ? 0 : 1);
+                node_cmd(id, "audio", a);
+            }
+            break;
+        case H_NLED:
+            if (n) {
+                char a[40];
+                snprintf(a, sizeof a, "{\"buzzer\":%d,\"led\":%d}", n->buzzer == 0 ? 0 : 1, n->led == 1 ? 0 : 1);
+                node_cmd(id, "audio", a);
+            }
+            break;
+        case H_NIDENT: node_cmd(id, "identify", "{\"secs\":10}"); toast("identify: %s beeps and flashes", id); break;
+        case H_NSTATUS: node_cmd(id, "status", nullptr); break;
+        case H_NREBOOT:
+            if (A.rebootArm && millis() - A.rebootArm < 3000) {
+                node_cmd(id, "reboot", nullptr);
+                toast("rebooting %s", id);
+                A.rebootArm = 0;
+            } else {
+                A.rebootArm = millis();
+            }
+            break;
+        case H_TAB: A.nodeEdit[0] = 0; A.view = (View)h.arg; break;
+        default: break;
+        }
+        return;
+    }
     if (A.detail) {
         switch (h.act) {
         case H_DCLOSE: A.detail = false; A.editAlias = A.newGroup = false; break;
@@ -2884,6 +3311,10 @@ static void dispatch(const Hit &h) {
     case H_TARGET:
         if (A.sel[V_TARGETS] == h.arg && nTgt) open_detail(M->targets[tgtIdx[h.arg]].mac);
         A.sel[V_TARGETS] = h.arg;
+        break;
+    case H_NODEROW:   // a tap on an Overview node row: that node on the Fleet tab
+        A.view = V_FLEET;
+        A.sel[V_FLEET] = h.arg;
         break;
     case H_DETAIL: {
         const char *mac = selected_mac();
@@ -2995,6 +3426,7 @@ void ui_press(int x, int y) {
     model_lock();
     T = {};
     T.down = true;
+    T.downMs = millis();
     T.x0 = T.x = x, T.y0 = T.y = y;
     T.scroll = -1;
     for (int i = nhits - 1; i >= 0; i--)   // last drawn = on top
@@ -3013,7 +3445,7 @@ void ui_press(int x, int y) {
         }
     }
     if (A.help || A.settings) T.scroll = T.scroll >= 0 && T.area.list == L_NETS && A.settings ? T.scroll : -1;
-    if (A.detail) T.scroll = -1;
+    if (A.detail || A.nodeEdit[0]) T.scroll = -1;
     if (T.hasPressed) pressPaint = true;
     model_unlock();
 }
@@ -3101,6 +3533,21 @@ void ui_frame() {
         if (ok) push_rect(h.x - 3, h.y - 3, h.w + 6, h.h + 6);
         return;
     }
+    // Long press (~0.55 s, finger still) on a node row: its settings panel.
+    if (T.down && T.hasPressed && !T.dragging && millis() - T.downMs > 550 && !A.nodeEdit[0] && !A.detail &&
+        (T.pressed.act == H_NODEROW || (T.pressed.act == H_ROW && A.view == V_FLEET))) {
+        model_lock();
+        int i = T.pressed.arg;
+        if (i >= 0 && i < M->nnodes) {
+            strlcpy(A.nodeEdit, M->nodes[i].id, sizeof A.nodeEdit);
+            A.editNode = false;
+            A.rebootArm = 0;
+            if (S.sound) M5.Speaker.tone(2400, 40);
+        }
+        T.hasPressed = false;   // the release is not a tap any more
+        dirty = true;
+        model_unlock();
+    }
     bool anim = (T.down && T.dragging) || millis() < flashUntil || (mapAnimating && A.view == V_MAP);
     bool pulse = live_drones() && (A.view == V_MAP || A.view == V_DRONES);
     uint32_t period = anim ? 16 : A.otaActive ? 180 : alertShown ? 120 : pulse ? 150
@@ -3147,6 +3594,7 @@ void ui_frame() {
         default: break;
         }
         if (A.detail) draw_detail();
+        if (A.nodeEdit[0]) draw_node_editor();
         uint32_t p2 = micros();
         cached_band(topBand, top_key(), draw_top);
         uint32_t p3 = micros();

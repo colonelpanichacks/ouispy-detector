@@ -318,7 +318,8 @@ def start_sources():
         if port != "off":
             new["serial"] = SerialSource(fleet, on_source_status, port, record=args.record,
                                          get_pref=lambda: store.get_setting("home_usb_serial"),
-                                         set_pref=lambda sn: store.set_setting("home_usb_serial", sn))
+                                         set_pref=lambda sn: store.set_setting("home_usb_serial", sn),
+                                         get_ignore=lambda: store.get_setting("usb_ignore", []))
         m = s["mqtt"]
         if args.mqtt:
             host, _, p = args.mqtt.partition(":")

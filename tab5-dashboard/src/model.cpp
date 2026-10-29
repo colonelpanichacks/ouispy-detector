@@ -174,7 +174,10 @@ static void parse_node(Node &n, JsonObjectConst o) {
     n.filtersFresh = fr.isNull() ? -1 : (fr.as<bool>() ? 1 : 0);
     JsonObjectConst cfg = o["cfg"];
     n.filters = -1;
+    n.buzzer = n.led = -1;
     if (!cfg.isNull()) {
+        n.buzzer = cfg["buzzer"].is<int>() ? (int)cfg["buzzer"] : -1;
+        n.led = cfg["led"].is<int>() ? (int)cfg["led"] : -1;
         CPY(n.fw, cfg["fw"]);
         CPY(n.fcrc, cfg["fcrc"]);
         CPY(n.mode, cfg["mode"]);

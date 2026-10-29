@@ -65,7 +65,7 @@ class SerialSource(Source):
     kind = "serial"
 
     def __init__(self, fleet, on_status, port="auto", baud=115200, record=None,
-                 get_pref=None, set_pref=None):
+                 get_pref=None, set_pref=None, get_ignore=None):
         super().__init__(fleet, on_status)
         self.port_cfg = port or "auto"
         self.baud = baud
@@ -79,6 +79,10 @@ class SerialSource(Source):
         self.set_pref = set_pref or (lambda sn: None)
         self.skip = {}          # usb serial -> time it said role=remote
         self.cur_sn = None
+        # USB serial numbers never to open (a Tab5 resets when its port opens; boards
+        # from other projects): settings "usb_ignore".
+        self.get_ignore = get_ignore or (lambda: [])
+        self.fallback = False   # reading another node because the home is unplugged
 
     def _pick_port(self):
         if self.port_cfg != "auto":
@@ -86,13 +90,25 @@ class SerialSource(Source):
             # renames /dev/cu.usbmodem* whenever the board moves to another
             # hub slot, and the old path then never comes back.
             pref = self.get_pref()
+            self.fallback = False
             if pref:
                 for p in list_serial_ports():
                     if p["serial"] == pref:
+                        self.cur_sn = pref
                         return p["device"]
-                # The home is known by serial number and isn't plugged in: wait for it.
-                # Falling back to the old path opened whatever board got that name next
-                # (the Tab5 once, which resets when its port opens).
+                # Home unplugged: any other OUI-SPY node will do (one node carries the
+                # whole mesh: every node prints the status the others flood, relayed
+                # detections and drones). Never by the old /dev path (that opened the
+                # Tab5 once), never a board on the ignore list, and a board that sends
+                # no telemetry is released within 12 s.
+                ignore = set(self.get_ignore() or [])
+                now = time.time()
+                for p in list_serial_ports():
+                    if (p["espressif"] and p["serial"] and p["serial"] not in ignore
+                            and now - self.skip.get(p["serial"], 0) > 60):
+                        self.fallback = True
+                        self.cur_sn = p["serial"]
+                        return p["device"]
                 return None
             return self.port_cfg
         now = time.time()
@@ -150,8 +166,10 @@ class SerialSource(Source):
                 self.ser.write(b"\n")
                 last_rx = time.time()
                 opened_at = time.time()
-                proven = self.port_cfg != "auto"   # an explicit --serial port is trusted
-                self.set_state(connected=True, port=port, detail=f"{port} @ {self.baud}")
+                proven = self.port_cfg != "auto" and not self.fallback   # the home's own port is trusted
+                prefCheck = time.time()
+                self.set_state(connected=True, port=port,
+                               detail=(f"home unplugged: reading node on {port}" if self.fallback else f"{port} @ {self.baud}"))
                 buf = b""
                 while not self.stop_evt.is_set():
                     # Auto mode keeps a port only once it proves to be an
@@ -163,6 +181,12 @@ class SerialSource(Source):
                             self.skip[self.cur_sn] = time.time()
                         self.set_state(connected=False, detail=f"{port} is not an OUI-SPY node, released")
                         break
+                    if self.fallback and time.time() - prefCheck > 3:
+                        prefCheck = time.time()
+                        pref = self.get_pref()
+                        if pref and any(p["serial"] == pref for p in list_serial_ports()):
+                            self.set_state(detail="home plugged back in: switching to it")
+                            break
                     chunk = self.ser.read(self.ser.in_waiting or 1)
                     if not chunk:
                         # The firmware prints every 5 s. Silent for 12 s with the
