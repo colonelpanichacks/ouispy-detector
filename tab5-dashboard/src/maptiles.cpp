@@ -6,9 +6,11 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 
-const char *LAYER_IDS[NLAYERS] = {"esri-sat", "carto-dark", "esri-darkgray"};
-const char *LAYER_NAMES[NLAYERS] = {"SATELLITE", "DARK", "DARK GRAY"};
-const int8_t LAYER_MAX[NLAYERS] = {19, 20, 16};   // the dashboard tile proxy's limits
+// Keyless, checked by their pixels: Esri imagery, and Esri's dark gray canvas with its
+// labels composited in by the dashboard (or without). CARTO now wants an API key.
+const char *LAYER_IDS[NLAYERS] = {"esri-sat", "esri-dark", "esri-darkgray"};
+const char *LAYER_NAMES[NLAYERS] = {"SATELLITE", "DARK", "DARK, NO LABELS"};
+const int8_t LAYER_MAX[NLAYERS] = {19, 16, 16};   // the dashboard tile proxy's limits (overzoom beyond)
 
 namespace {
 

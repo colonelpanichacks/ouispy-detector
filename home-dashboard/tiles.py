@@ -14,14 +14,19 @@ CACHE = os.path.join(HERE, "tilecache")
 UA = "OUI-SPY-Mesh-dashboard/1.0 (local tile cache for a wall display)"
 
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/{svc}/MapServer/tile/{z}/{y}/{x}"
+# Dark and satellite only, every one keyless and checked by its pixels (CARTO's basemaps
+# answer 200 with an "API KEY REQUIRED" tile now, so they are gone; "carto-dark" stays as a
+# name for older Tab5 builds and serves the Esri dark map).
+DARK_REF = ESRI.replace("{svc}", "Canvas/World_Dark_Gray_Reference")
 LAYERS = {
-    "esri-sat":    {"url": ESRI.replace("{svc}", "World_Imagery"), "ext": "jpg", "max": 19, "name": "Satellite"},
-    "esri-street": {"url": ESRI.replace("{svc}", "World_Street_Map"), "ext": "jpg", "max": 19, "name": "Streets"},
-    "esri-topo":   {"url": ESRI.replace("{svc}", "World_Topo_Map"), "ext": "jpg", "max": 19, "name": "Topo"},
-    "carto-dark":  {"url": "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", "ext": "png", "max": 20, "name": "Dark"},
-    "esri-darkgray": {"url": ESRI.replace("{svc}", "Canvas/World_Dark_Gray_Base"), "ext": "jpg", "max": 16, "name": "Dark gray"},
-    "osm":         {"url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "ext": "png", "max": 19, "name": "OSM"},
+    "esri-sat":      {"url": ESRI.replace("{svc}", "World_Imagery"), "ext": "jpg", "max": 19, "name": "Satellite",
+                      "placeholder_under": 10_000},
+    "esri-dark":     {"url": ESRI.replace("{svc}", "Canvas/World_Dark_Gray_Base"), "ext": "jpg", "max": 16,
+                      "labels": DARK_REF, "name": "Dark"},
+    "esri-darkgray": {"url": ESRI.replace("{svc}", "Canvas/World_Dark_Gray_Base"), "ext": "jpg", "max": 16,
+                      "name": "Dark, no labels"},
 }
+LAYERS["carto-dark"] = LAYERS["esri-dark"]
 _locks = {}
 _glock = threading.Lock()
 
@@ -47,7 +52,19 @@ def tile(layer, z, x, y):
             req = urllib.request.Request(url, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=15) as r:
                 data = r.read()
-            if L["ext"] == "jpg" and len(data) < 10_000:
+            if L.get("labels"):   # base + its label layer, one JPEG (the Tab5 draws a single tile)
+                lreq = urllib.request.Request(L["labels"].format(z=z, x=x, y=y), headers={"User-Agent": UA})
+                try:
+                    with urllib.request.urlopen(lreq, timeout=15) as r:
+                        lab = Image.open(BytesIO(r.read())).convert("RGBA")
+                    base = Image.open(BytesIO(data)).convert("RGBA")
+                    base.alpha_composite(lab)
+                    out = BytesIO()
+                    base.convert("RGB").save(out, "JPEG", quality=88)
+                    data = out.getvalue()
+                except (OSError, ValueError):
+                    pass   # no labels for this tile: the base alone
+            if len(data) < L.get("placeholder_under", 0):
                 # Esri answers gap/over-zoom requests with a 200 "Map data not yet
                 # available" placeholder; caching it would poison this area forever.
                 with _glock:

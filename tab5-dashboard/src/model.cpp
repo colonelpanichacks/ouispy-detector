@@ -36,7 +36,9 @@ double server_now() {
 }
 
 static void clock_from(double ts) {
-    if (ts > 1e9) {
+    // Only ever forward (or a small step back): a stored record's old time (a drone from
+    // hours ago, loaded at boot) must not wind the clock back.
+    if (ts > 1e9 && (!M->serverMs || ts > server_now() - 5)) {
         M->serverTs = ts;
         M->serverMs = millis();
         M->clockValid = true;
@@ -709,6 +711,14 @@ void ingest_metrics(JsonDocument &doc, uint32_t range) {
 
 // ---------------------------------------------------------------- drones
 
+static bool droneNew = false;
+// A drone this screen hadn't seen, heard in the last minute: the popup. History loaded at
+// boot (and old drones re-sent by the dashboard) stays quiet.
+static void drone_alert(const Drone *d) {
+    if (droneNew && d->last && server_now() - d->last < 60) M->droneSeq++;
+    droneNew = false;
+}
+
 static Drone *drone_for(const char *mac) {
     for (int i = 0; i < M->ndrones; i++)
         if (!strcasecmp(M->drones[i].mac, mac)) return &M->drones[i];
@@ -723,7 +733,7 @@ static Drone *drone_for(const char *mac) {
     strlcpy(d->mac, mac, sizeof d->mac);
     d->pilotDist = -1;
     strlcpy(d->tag, "unknown", sizeof d->tag);
-    M->droneSeq++;
+    droneNew = true;   // alerted by drone_alert() if it is actually in the air now
     return d;
 }
 
@@ -798,6 +808,7 @@ void ingest_drone(JsonObjectConst o) {
     if (!ptr.isNull() && ptr.size()) track_parse(d->ptrack, d->nptrack, ptr);
     else if (d->hasPilot) track_add(d->ptrack, d->nptrack, d->plat, d->plon);
     clock_from(d->last);
+    drone_alert(d);
     M->version++;
 }
 
@@ -841,6 +852,7 @@ void ingest_rid(JsonObjectConst o, const char *homeId) {
     d->pilotDist = d->hasPos && d->hasPilot ? (int32_t)hav_m(d->lat, d->lon, d->plat, d->plon) : -1;
     if (d->hasPos) track_add(d->track, d->ntrack, d->lat, d->lon);
     if (d->hasPilot) track_add(d->ptrack, d->nptrack, d->plat, d->plon);
+    drone_alert(d);
     M->version++;
 }
 

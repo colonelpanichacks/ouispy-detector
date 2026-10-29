@@ -292,6 +292,16 @@ static void txTick(uint32_t now) {
     if (txState != TX_SEND) return;
     meshHoldRadio(2000);
     if (now - txReportAt > 2000) { txReportAt = now; txReport("sending"); }
+    // Progress watchdog. "Went silent" only catches a target that stops answering; one
+    // that keeps answering but never confirms the image (e.g. the staged image changed
+    // under the transfer) held the sender at 100% forever. No new chunk confirmed for 2 min
+    // ends it with an error the dashboard can retry on.
+    static uint16_t wdSession = 0;
+    static uint32_t wdGot = 0, wdAt = 0;
+    if (wdSession != txSession) wdSession = txSession, wdGot = UINT32_MAX, wdAt = now;
+    uint32_t got = txProto == 2 ? txGot : txBase;
+    if (got != wdGot) wdGot = got, wdAt = now;
+    else if (now - wdAt > 120000) { txFail("no progress for 2 min (target never confirmed the image)"); return; }
     if (txProto == 1) {
         uint32_t need = winFull(txBase) & ~txAcked & ~txSentMask;
         // Two TX slots stay free for announces, acks and relays.

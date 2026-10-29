@@ -305,10 +305,37 @@ class Commander(threading.Thread):
             self._sweep()
             self._auto_poll()
 
+    def _home_alive(self):
+        try:
+            return bool(self.fleet.snapshot(lists=False)["home"].get("alive"))
+        except Exception:
+            return True
+
+    def _ota_busy(self):
+        """A node is in the middle of a firmware transfer (the home sends one at a time)."""
+        try:
+            nodes = self.fleet.snapshot(lists=False)["nodes"]
+        except Exception:
+            return False
+        return any((n.get("ota") or {}).get("state") in ("offered", "sending", "running") for n in nodes)
+
     def _execute(self, job):
         sender = self.get_sender()
         if not sender:
             return self._finish(job, "failed", "home node disconnected")
+        if job["op"] in ("fw_stage", "fw_send", "fw_self"):
+            # Restaging the home (or a second send) while it is still sending an update would
+            # cut into that transfer: wait for it to end (an hour at most). After the home
+            # installed its own update it restarts: wait until it is back and talking too.
+            t0 = time.time()
+            while time.time() - t0 < 3600 and (self._ota_busy() or time.time() < getattr(self, "home_back_after", 0)
+                                                or not self.get_sender() or not self._home_alive()):
+                job["state"] = "waiting"
+                self._publish(job)
+                time.sleep(5)
+            sender = self.get_sender()
+            if not sender:
+                return self._finish(job, "failed", "home node disconnected")
         job["state"] = "sending"
         self._publish(job)
         if job["op"] == "fw_stage":
@@ -403,6 +430,9 @@ class Commander(threading.Thread):
                     return self._finish(job, "failed", f"the home stopped answering at byte {off}")
                 continue
             off = got
+            # Let other threads have the queue lock: this loop takes it thousands of times
+            # back to back, and an unfair lock starved new submissions until staging ended.
+            time.sleep(0.001)
             if time.time() - last_pub > 0.5:
                 job["progress"] = int(off * 100 / len(img))
                 self._publish(job)
@@ -526,6 +556,8 @@ class Commander(threading.Thread):
 
     def _finish(self, job, state, error=""):
         job["state"], job["error"], job["finished"] = state, error, time.time()
+        if job["op"] == "fw_self" and state == "done":
+            self.home_back_after = time.time() + 30   # it restarts into the new build
         self.store.save_command(job)
         self._publish(job)
         if state in ("done", "partial") and not job["auto"]:

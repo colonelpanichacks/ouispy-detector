@@ -372,15 +372,11 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 // attribution. `dark` runs the light OSM tiles through the CSS invert filter;
 // `labels` lays a transparent place-name layer over imagery.
 const A_OSM = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-const A_CARTO = A_OSM + ' &copy; <a href="https://carto.com/attributions">CARTO</a>';
 const A_ESRI = 'Tiles &copy; <a href="https://www.esri.com">Esri</a>';
 const ESRI = (svc) => `https://server.arcgisonline.com/ArcGIS/rest/services/${svc}/MapServer/tile/{z}/{y}/{x}`;
-const CARTO = (style) => `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`;
 const TILES = {
     "osm-dark":     { name: "OpenStreetMap, dark", url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", attr: A_OSM, max: 19, dark: true },
-    "carto-dark":   { name: "CARTO Dark Matter", url: CARTO("dark_all"), attr: A_CARTO, max: 20 },
-    "carto-dark-nl":{ name: "CARTO Dark Matter, no labels", url: CARTO("dark_nolabels"), attr: A_CARTO, max: 20 },
-    "esri-dark":    { name: "Esri Dark Gray", url: ESRI("Canvas/World_Dark_Gray_Base"), attr: A_ESRI, max: 16,
+    "esri-dark":    { name: "Dark gray (Esri)", url: ESRI("Canvas/World_Dark_Gray_Base"), attr: A_ESRI, max: 16,
                       labels: ESRI("Canvas/World_Dark_Gray_Reference") },
     "esri-sat":     { name: "Satellite (Esri)", url: ESRI("World_Imagery"), attr: A_ESRI + ", Maxar, Earthstar Geographics", max: 19 },
     "esri-hybrid":  { name: "Satellite + labels (Esri)", url: ESRI("World_Imagery"), attr: A_ESRI + ", Maxar, Earthstar Geographics", max: 19,
@@ -432,7 +428,8 @@ $("mapLayer").onchange = async () => {
 // Map layer picker (the map's top-right corner and Settings share one list).
 function tileOptions(sel) {
     const opt = (k, n) => `<option value="${k}">${esc(n)}</option>`;
-    const dark = ["osm-dark", "carto-dark", "carto-dark-nl", "esri-dark"];
+    // CARTO's basemaps now need an API key (a 200 "API KEY REQUIRED" tile): not offered.
+    const dark = ["esri-dark", "osm-dark"];
     const sat = ["esri-sat", "esri-hybrid", "usgs-sat"];
     // Dark and satellite only, every one keyless and checked to load (no light maps).
     sel.innerHTML =
