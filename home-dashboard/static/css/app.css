@@ -1064,3 +1064,16 @@ body.map-maxed .toasts { z-index: 1700; }
     white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; min-width: 0;
 }
 .grow .gname { max-width: none; }
+
+/* Transmitting now (a Remote ID frame in the last 5 s): bright lime ring, like mesh-mapper. */
+.drm.tx::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; border: 2.5px solid #7dff3a;
+    box-shadow: 0 0 10px #7dff3a, inset 0 0 6px #7dff3a66; animation: drtx 1s ease-out infinite; pointer-events: none; }
+@keyframes drtx { 0% { transform: scale(.85); opacity: 1; } 100% { transform: scale(1.25); opacity: .25; } }
+.drm.stale, .plm.stale { opacity: .35; }
+
+/* Node card header grows with a long name (two lines) instead of the name spilling out
+   of the card; badges and the role keep their size and the name takes what's left. */
+.node-top { height: auto; min-height: 20px; align-items: flex-start; flex-wrap: wrap; row-gap: 4px; }
+.node-top .dot { margin-top: 4px; flex-shrink: 0; }
+.node-top .node-name { flex: 1 1 110px; line-height: 1.3; overflow-wrap: anywhere; }   /* badges drop to a second line before the name is squeezed */
+.node-top .node-id, .node-top .node-tags, .node-top .role { flex-shrink: 0; }

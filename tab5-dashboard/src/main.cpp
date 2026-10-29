@@ -102,59 +102,84 @@ void rtc_sync() {
 // Events queue up and the UI loop replays them in order. This task also owns the other
 // internal-bus work (RTC), so nothing else talks on that I2C port concurrently.
 struct TouchEv {
-    uint8_t kind;   // 0 press, 1 move, 2 release, 3 pinch start, 4 pinch move, 5 pinch end
+    uint8_t kind;   // 0 press, 1 move, 2 release, 3 pinch start, 4 pinch move, 5 pinch end,
+                    // 6 pinch lift (down to one finger, the other may come back)
     int16_t x, y;   // pinch: midpoint
     int16_t d;      // pinch: finger distance
+    uint32_t ms;    // when it was sampled (the UI replays a queue, often a frame late)
 };
 QueueHandle_t touchQ;
 
 void hw_task(void *) {
-    int lastX = -1, lastY = -1, lastD = -1;
-    bool pinch = false;
+    int lastX = -1, lastY = -1, lastD = -1, lastMx = 0, lastMy = 0;
+    bool pinch = false, two = false;
+    int settle = 0, spikes = 0;
     for (;;) {
         M5.update();
         auto t = M5.Touch.getDetail();
         TouchEv e;
+        uint32_t ms = millis();
         // Two fingers: a pinch (zoom the map). It owns the gesture until every finger is
-        // up, so the finger left behind never turns into a tap or a drag.
+        // up, so the finger left behind never turns into a tap or a drag. Every fresh
+        // two-finger contact (also a finger put back mid-pinch) starts again from where the
+        // zoom is: measured against the first spacing, re-placing a finger closer read as a
+        // hard pinch-in and threw the map far out.
         if (M5.Touch.getCount() >= 2) {
             auto a = M5.Touch.getDetail(0), b = M5.Touch.getDetail(1);
             int16_t mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
             int16_t d = (int16_t)sqrtf((float)(a.x - b.x) * (a.x - b.x) + (float)(a.y - b.y) * (a.y - b.y));
-            if (!pinch) {
-                pinch = true;
-                e = {3, mx, my, d};
+            if (!two) two = true, settle = 0, spikes = 0;
+            if (settle < 2) {   // the controller's first report of a new finger is often off
+                if (++settle == 2) {
+                    pinch = true;
+                    e = {3, mx, my, d, ms};
+                    xQueueSend(touchQ, &e, 0);
+                    lastD = d, lastMx = mx, lastMy = my;
+                }
+            } else if (abs(d - lastD) > max(48, lastD / 3) && ++spikes <= 2) {
+                // a one-sample jump in spacing is a misread finger, not a pinch: skip it
+            } else if (abs(d - lastD) > 2 || abs(mx - lastMx) > 2 || abs(my - lastMy) > 2) {
+                spikes = 0;
+                e = {4, mx, my, d, ms};
                 xQueueSend(touchQ, &e, 0);
-            } else if (abs(d - lastD) > 2) {
-                e = {4, mx, my, d};
-                xQueueSend(touchQ, &e, 0);
+                lastD = d, lastMx = mx, lastMy = my;
+            } else {
+                spikes = 0;
             }
-            lastD = d;
             rtc_sync();
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        if (pinch) {
-            if (M5.Touch.getCount() == 0) {
-                pinch = false;
-                e = {5, 0, 0, 0};
+        if (two) {
+            two = false;
+            if (pinch) {
+                e = {6, 0, 0, 0, ms};
                 xQueueSend(touchQ, &e, 0);
+            }
+        }
+        if (pinch || settle) {
+            if (M5.Touch.getCount() == 0) {
+                if (pinch) {
+                    e = {5, 0, 0, 0, ms};
+                    xQueueSend(touchQ, &e, 0);
+                }
+                pinch = false, settle = 0;
             }
             rtc_sync();
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         if (t.wasPressed()) {
-            e = {0, (int16_t)t.x, (int16_t)t.y, 0};
+            e = {0, (int16_t)t.x, (int16_t)t.y, 0, ms};
             xQueueSend(touchQ, &e, 0);
             lastX = t.x, lastY = t.y;
         } else if (t.isPressed() && (t.x != lastX || t.y != lastY)) {
-            e = {1, (int16_t)t.x, (int16_t)t.y, 0};
+            e = {1, (int16_t)t.x, (int16_t)t.y, 0, ms};
             xQueueSend(touchQ, &e, 0);
             lastX = t.x, lastY = t.y;
         }
         if (t.wasReleased()) {
-            e = {2, (int16_t)t.x, (int16_t)t.y, 0};
+            e = {2, (int16_t)t.x, (int16_t)t.y, 0, ms};
             xQueueSend(touchQ, &e, 0);
         }
         rtc_sync();
@@ -266,7 +291,7 @@ void loop() {
         if (e.kind == 0) ui_press(e.x, e.y);
         else if (e.kind == 1) ui_drag(e.x, e.y);
         else if (e.kind == 2) ui_release(e.x, e.y);
-        else ui_pinch(e.kind - 3, e.x, e.y, e.d);
+        else ui_pinch(e.kind - 3, e.x, e.y, e.d, e.ms);
         if (e.kind == 0 || e.kind == 2) Serial.printf("touch %s %d,%d\n", e.kind ? "up" : "down", e.x, e.y);
     }
 

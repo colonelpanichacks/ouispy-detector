@@ -27,6 +27,7 @@ struct App {
     uint8_t mapPrevLayer = 0;   // shown under the new layer until its tiles arrive
     bool mapInit = false;       // centred once on the fleet
     bool mapFollow = false;     // keep the newest live drone centred
+    bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
     bool layerMenu = false;     // the map layer dropdown is open
     char nodeEdit[7] = "";      // node settings panel open for this node id (long press)
     bool editNode = false;      // typing that node's alias

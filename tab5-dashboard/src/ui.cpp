@@ -73,7 +73,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -426,6 +426,26 @@ const char *drone_name(const Drone &d) {
     return d.alias[0] ? d.alias : d.desc[0] ? d.desc : d.id[0] ? d.id : d.mac;
 }
 bool drone_live(const Drone &d) { return server_now() - d.last < DRONE_LIVE_S; }
+bool drone_tx(const Drone &d) { return server_now() - d.last <= DRONE_TX_S; }
+
+// Like mesh-mapper (and the web dashboard): each drone keeps its own colour, hashed from
+// its MAC, so several in the air never look alike; a tag the operator set takes over.
+uint16_t drone_color(const Drone &d) {
+    if (d.tag[0] && strcmp(d.tag, "unknown")) return tag_color(d.tag);
+    int32_t h = 0;
+    for (const char *p = d.mac; *p; p++) h = (int32_t)((uint32_t)h * 31u + (uint8_t)*p);
+    float hue = (float)((h < 0 ? -(int64_t)h : (int64_t)h) % 360);   // JS: Math.abs(h) % 360
+    // hsl(hue, 100%, 62%) -> rgb
+    float l = 0.62f, ch = (1 - fabsf(2 * l - 1)), x = ch * (1 - fabsf(fmodf(hue / 60.0f, 2) - 1)), m = l - ch / 2;
+    float r = 0, g = 0, b = 0;
+    if (hue < 60) r = ch, g = x;
+    else if (hue < 120) r = x, g = ch;
+    else if (hue < 180) g = ch, b = x;
+    else if (hue < 240) g = x, b = ch;
+    else if (hue < 300) r = x, b = ch;
+    else r = ch, b = x;
+    return rgb(((uint32_t)((r + m) * 255) << 16) | ((uint32_t)((g + m) * 255) << 8) | (uint32_t)((b + m) * 255));
+}
 
 // Drones, live first then newest.
 int droneIdx[MAX_DRONES], nDrone = 0;
@@ -477,10 +497,17 @@ void dashed(int x0, int y0, int x1, int y1, uint16_t col) {
 }
 
 // Quadcopter glyph: ring, X arms, rotors, heading nose.
-void drone_glyph(int x, int y, float hdg, bool hasHdg, uint16_t col, bool live, float scale = 1.0f) {
-    uint16_t c = live ? col : dim(col, 0.5f);
+void drone_glyph(int x, int y, float hdg, bool hasHdg, uint16_t col, bool live, float scale = 1.0f, bool tx = false) {
+    uint16_t c = live ? col : dim(col, 0.35f);
     int r = 17 * scale;
-    if (live) {
+    if (tx) {   // a Remote ID frame in the last 5 s: lime ring, like mesh-mapper
+        float p = fmodf(millis() / 1000.0f, 1.0f);
+        uint16_t lime = rgb(0x7dff3a);
+        int rr = r + 4 + (int)(7 * p);
+        C.drawCircle(x, y, rr, dim(lime, 1.0f - 0.7f * p));
+        C.drawCircle(x, y, rr + 1, dim(lime, 0.8f - 0.6f * p));
+        C.drawCircle(x, y, r + 3, lime);
+    } else if (live) {
         float p = 0.5f + 0.5f * sinf(millis() / 300.0f);
         C.drawCircle(x, y, r + 4 + (int)(4 * p), dim(c, 0.35f * (1 - p) + 0.1f));
     }
@@ -708,13 +735,18 @@ void draw_map() {
         double la, lo;
         // The dashboard's triangulated fix (same model as its web map), else a
         // signal-weighted estimate between the nodes that hear it.
-        bool tri = t.triOk && now - t.triTs < 120;
+        bool tri = A.triOn && t.triOk && now - t.triTs < 120;
         if (tri) la = t.triLat, lo = t.triLon;
         else if (!target_pos(t, la, lo)) continue;
         int x = sx(lo), y = sy(la);
         if (x < -40 || y < MY - 40 || x > W + 40 || y > H) continue;
         uint16_t c = mac_muted(t.mac) ? FAINT : PINK;
         if (tri) {
+            // Like the web map's Triangulate: a faint line to every node that heard it.
+            for (int s = 0; s < t.nseen; s++) {
+                const Node *n = node_by_id(t.seen[s].node);
+                if (n && n->hasPos) dashed(sx(n->lon), sy(n->lat), x, y, dim(rssi_color(t.seen[s].rssi), 0.55f));
+            }
             double mpp = 156543.03392 * cos(la * M_PI / 180) / pow(2.0, zf);
             int r = (int)(t.triErr / mpp);
             uint16_t rc = t.triRough ? AMBER : rgb(0x39ff88);
@@ -823,17 +855,17 @@ void draw_map() {
         const Drone &d = M->drones[droneIdx[k]];
         bool live = drone_live(d);
         if (!live && now - d.last > 1800) continue;
-        uint16_t c = tag_color(d.tag);
+        uint16_t c = drone_color(d);
         for (int p = 1; p < d.ntrack; p++) {
             int x0 = sx(d.track[p - 1][1]), y0 = sy(d.track[p - 1][0]), x1 = sx(d.track[p][1]), y1 = sy(d.track[p][0]);
-            uint16_t tc = dim(c, 0.35f + 0.65f * p / d.ntrack);
+            uint16_t tc = dim(c, (0.35f + 0.65f * p / d.ntrack) * (live ? 1.0f : 0.45f));
             C.drawLine(x0, y0, x1, y1, tc);
             C.drawLine(x0 + 1, y0, x1 + 1, y1, tc);
         }
         if (d.hasPilot) {
             int px = sx(d.plon), py = sy(d.plat);
             if (d.hasPos) dashed(px, py, sx(d.lon), sy(d.lat), dim(c, live ? 0.9f : 0.45f));
-            pilot_glyph(px, py, live ? c : dim(c, 0.5f));
+            pilot_glyph(px, py, live ? c : dim(c, 0.35f));
             font(F_SM);
             char b[32];
             if (d.pilotDist >= 0) snprintf(b, sizeof b, "PILOT  %ld m", (long)d.pilotDist);
@@ -843,7 +875,7 @@ void draw_map() {
         }
         if (d.hasPos) {
             int x = sx(d.lon), y = sy(d.lat);
-            drone_glyph(x, y, d.hdg, d.hasHdg, c, live);
+            drone_glyph(x, y, d.hdg, d.hasHdg, c, live, 1.0f, drone_tx(d));
             font(F_MD);
             map_text(x + 26, y - 9, fit_name(drone_name(d), 220), c);
             char b[48];
@@ -899,7 +931,7 @@ void draw_map() {
     // Controls, right edge.
     struct { const char *t; uint8_t act; bool on; } btn[] = {
         {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false},
-        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}};
+        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}, {"TRI", H_TRI, A.triOn}};
     int bw = 120, bh = 52, bx = W - PAD - bw, by = MY + 12;
     for (auto &k : btn) {
         hit(bx - 6, by - 4, bw + 12, bh + 8, k.act);
@@ -967,7 +999,7 @@ void draw_drones() {
         if (i >= nDrone) break;
         const Drone &d = M->drones[droneIdx[i]];
         bool live = drone_live(d), sel = i == A.sel[V_DRONES];
-        uint16_t c = tag_color(d.tag);
+        uint16_t c = drone_color(d);
         hit(PAD + 6, ry, lw - 12, rh - 6, H_ROW, i);
         if (sel) {
             C.fillRoundRect(PAD + 8, ry, lw - 16, rh - 8, 6, dim(c, 0.12f));
@@ -1007,32 +1039,41 @@ void draw_drones() {
     if (!nDrone) return;
     const Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
     bool live = drone_live(d);
-    uint16_t c = tag_color(d.tag);
+    uint16_t c = drone_color(d);
     font(F_BRAND);
     glow(x + 18, y + 40, fit_name(drone_name(d), w - 300), c, middle_left);
     font(F_SM);
     char sub[96];
     snprintf(sub, sizeof sub, "%s   %s   %s", d.mac, d.src[0] ? d.src : "", live ? (d.status[0] ? d.status : "live") : "not heard lately");
     text(x + 18, y + 66, sub, MUTED, middle_left);
-    // SHOW ON MAP, and the alias (tap or E to name it; saved on the dashboard).
+    // SHOW ON MAP, top right.
     font(F_SM);
     int cw;
     int mx = x + w - 18 - (C.textWidth("SHOW ON MAP") + 28);
     chip(mx, y + 26, "SHOW ON MAP", ACCENT, false, &cw, H_DRONEMAP);
+    // Its name: a full-width field of its own (tap or E, Enter saves to the dashboard and
+    // every screen), laid out like the node editor's.
     {
-        int ax0 = x + w - 18 - 300, aw = 300 - (C.textWidth("SHOW ON MAP") + 28) - 10;
-        hit(ax0, y + 66, aw, 34, net_online() ? H_DRALIAS : H_NONE);
-        fast_round(ax0, y + 66, aw, 30, 6, PANEL2);
-        if (A.editDrone) glow_rect(ax0, y + 66, aw, 30, 6, PINK);
-        else C.drawRoundRect(ax0, y + 66, aw, 30, 6, LINE2);
+        int ny = y + 84, nh = 40;
+        font(F_SM);
+        text(x + 18, ny + nh / 2, "NAME", dim(ACCENT, 0.9f), middle_left);
+        int fx = x + 18 + 64, fw = w - 36 - 64;
+        hit(fx, ny, fw, nh, net_online() ? H_DRALIAS : H_NONE);
+        fast_round(fx, ny, fw, nh, 8, PANEL2);
+        if (A.editDrone) glow_rect(fx, ny, fw, nh, 8, PINK);
+        else C.drawRoundRect(fx, ny, fw, nh, 8, d.alias[0] ? dim(c, 0.6f) : LINE2);
         char ab[48];
         if (A.editDrone) snprintf(ab, sizeof ab, "%s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
-        else snprintf(ab, sizeof ab, "%s", d.alias[0] ? d.alias : (net_online() ? "tap or E: name it" : "naming needs the dashboard"));
-        font(F_SM);
-        text(ax0 + 10, y + 81, fit(ab, aw - 20), A.editDrone || d.alias[0] ? PINK : FAINT, middle_left);
+        else snprintf(ab, sizeof ab, "%s", d.alias[0] ? d.alias : (net_online() ? "tap here or press E to name it" : "naming needs the dashboard"));
+        font(F_MD);
+        text(fx + 14, ny + nh / 2, fit(ab, fw - 28), A.editDrone ? PINK : d.alias[0] ? TEXT : FAINT, middle_left);
+        if (A.editDrone) {
+            font(F_SM);
+            text(fx + fw - 12, ny + nh / 2, "ENTER save   ESC cancel", MUTED, middle_right);
+        }
     }
     // Tags.
-    int tx = x + 18, ty = y + 88;
+    int tx = x + 18, ty = y + 134;
     for (int t = 0; t < 5; t++) {
         bool on = !strcmp(d.tag, DRONE_TAGS[t]);
         int tw2;
@@ -1051,16 +1092,16 @@ void draw_drones() {
     snprintf(b[6], 24, "%d dBm", d.rssi);
     strlcpy(b[7], node_name(d.closest), 24);
     snprintf(b[8], 24, "%u", (unsigned)d.reports);
-    int gx = x + 18, gy = y + 136, gw = (w - 36) / 3;
+    int gx = x + 18, gy = y + 180, gw = (w - 36) / 3;
     for (int i = 0; i < 9; i++) {
-        int cx2 = gx + (i % 3) * gw, cy2 = gy + (i / 3) * 62;
+        int cx2 = gx + (i % 3) * gw, cy2 = gy + (i / 3) * 56;
         font(F_SM);
         text(cx2, cy2, k[i], FAINT);
         font(F_LG);
         text(cx2, cy2 + 18, fit(b[i], gw - 12), i < 2 ? SKY : TEXT);
     }
     // Remote ID fields + a radar of its track around the pilot.
-    int fy = gy + 3 * 62 + 8;
+    int fy = gy + 3 * 56 + 8;
     // Who made it: the FAA registry's make and model for its serial, else the radio's
     // maker from its MAC (DJI's CTA-2063 serials start with manufacturer code 1581).
     char maker[64];
@@ -1071,7 +1112,7 @@ void draw_drones() {
     struct { const char *k; const char *v; } f[] = {{"MAKER", maker}, {"SERIAL / ID", d.id}, {"OPERATOR ID", d.op},
                                                     {"DESCRIPTION", d.desc}, {"AIRCRAFT", d.ua}};
     // Values run up to the radar box and wrap onto a second line rather than being cut.
-    int radarL = x + w - 18 - min(CB - (gy + 3 * 62) - 20, w / 2 - 40);
+    int radarL = x + w - 18 - min(CB - (gy + 3 * 56) - 20, w / 2 - 40);
     int vw = radarL - (gx + 150) - 12;
     for (auto &e : f) {
         font(F_SM);
@@ -1103,7 +1144,7 @@ void draw_drones() {
     font(F_SM);
     text(gx, fy + 4, ft, FAINT);
     // Radar box.
-    int rs = min(CB - (gy + 3 * 62) - 20, w / 2 - 40), rx = x + w - 18 - rs, ry2 = CB - 14 - rs;
+    int rs = min(CB - (gy + 3 * 56) - 20, w / 2 - 40), rx = x + w - 18 - rs, ry2 = CB - 14 - rs;
     C.fillRoundRect(rx, ry2, rs, rs, 8, PANEL2);
     C.drawRoundRect(rx, ry2, rs, rs, 8, LINE2);
     int ccx = rx + rs / 2, ccy = ry2 + rs / 2;
@@ -1556,10 +1597,9 @@ void draw_top() {
     C.drawFastHLine(0, TOP - 1, W, LINE2);
     // Brand, stacked so seven tabs keep a full-size label.
     font(F_MD);
-    glow(PAD, TOP / 2 - 9, "OUI-SPY", ACCENT, middle_left);
+    glow(PAD, TOP / 2 - 11, "OUI-SPY", ACCENT, middle_left);
     int bw = C.textWidth("OUI-SPY");
-    font(F_SM);
-    glow(PAD, TOP / 2 + 13, "MESH", PINK, middle_left);
+    glow(PAD + bw / 2, TOP / 2 + 12, "M E S H", PINK, middle_center);   // as big, centred under it
     int tabsL = PAD + bw + 20;
 
     // Top right: the data-source badge, the clock to its left.
@@ -3360,6 +3400,7 @@ static void dispatch(const Hit &h) {
         break;
     case H_FIT: A.mapFollow = false; map_fit(); maptiles_clear_requests(); break;
     case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
+    case H_TRI: A.triOn = !A.triOn; toast(A.triOn ? "triangulation on: devices at their fix" : "triangulation off"); break;
     case H_DOM:
         A.dom = h.arg >= 0 ? h.arg : (A.dom + 1) % 3;
         A.metricsGen++;
@@ -3624,31 +3665,62 @@ void ui_frame() {
 }
 
 // Two-finger pinch on the map: continuous zoom around the midpoint; on release it settles
-// to the nearest whole zoom level (where tiles are sharp).
-void ui_pinch(int phase, int x, int y, int dist) {
-    to_canvas(x, y);
+// to a whole zoom level (where tiles are sharp), leaning the way the fingers went. Each new
+// two-finger contact (phase 0, also a finger put back mid-gesture) restarts from the zoom on
+// screen. Lifting fingers rarely leave together and the last samples of a lifting finger
+// are unreliable, so a lift falls back to the zoom of ~70 ms before it.
+void ui_pinch(int phase, int x, int y, int dist, uint32_t ms) {
+    if (phase <= 1) to_canvas(x, y);
     model_lock();
     if (A.view != V_MAP || A.detail || A.settings || A.help) {
+        pinching = false;
         model_unlock();
         return;
     }
-    static float z0 = 17;
+    static float z0 = 17, zGesture = 17;
     static int d0 = 100;
+    static struct { uint32_t ms; float z; } hist[16];
+    static int hn = 0;
+    static bool moved = false;   // a two-finger touch that never moved leaves the zoom alone
+    auto settle_back = [&] {
+        for (int i = hn - 1; i >= 0; i--)
+            if (ms - hist[i].ms >= 70) {
+                A.mapZoomF = hist[i].z;
+                break;
+            }
+        hn = 0;
+    };
     T = {};   // whatever the first finger started is cancelled
     if (phase == 0) {
+        if (!pinching) zGesture = gZoomShown, moved = false;
         pinching = true;
-        z0 = gZoomShown;
+        z0 = A.mapZoomF;
         d0 = max(dist, 30);
+        hn = 0;
         ZA.on = true, ZA.x = x, ZA.y = y;
         screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
         A.mapFollow = false;
     } else if (phase == 1 && pinching) {
         float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)zmax_layer());
         A.mapZoomF = z;
+        moved = true;
         ZA.x = x, ZA.y = y;   // two-finger drag pans as it zooms
-    } else if (phase == 2) {
+        if (hn == 16) memmove(hist, hist + 1, sizeof hist[0] * 15), hn = 15;
+        hist[hn++] = {ms, z};
+    } else if (phase == 3 && pinching) {
+        settle_back();
+    } else if (phase == 2 && pinching) {
+        settle_back();
         pinching = false;
-        A.mapZoom = constrain((int)lroundf(A.mapZoomF), ZMIN, zmax_layer());
+        if (!moved) {
+            A.mapZoomF = z0;   // let the zoom it was easing to finish
+            dirty = true;
+            model_unlock();
+            return;
+        }
+        float dz = A.mapZoomF - zGesture;
+        float lean = dz > 0.15f ? 0.2f : dz < -0.15f ? -0.2f : 0;
+        A.mapZoom = constrain((int)lroundf(A.mapZoomF + lean), ZMIN, zmax_layer());
         maptiles_clear_requests();
     }
     dirty = true;

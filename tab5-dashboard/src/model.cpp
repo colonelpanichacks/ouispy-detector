@@ -848,9 +848,13 @@ void ingest_tri(JsonObjectConst f) {
     char up[18];
     strlcpy(up, mac, sizeof up);
     for (char *p = up; *p; p++) *p = toupper(*p);
-    Target *t = target_for(up, false);
+    // A fix can arrive before this screen has listed the device: keep it, so the map can
+    // place it (its name and nodes fill in with the next detection).
+    bool ok = f["ok"] | false;
+    Target *t = target_for(up, ok);
     if (!t) return;
-    t->triOk = f["ok"] | false;
+    if (!t->last) t->last = t->first = f["ts"] | 0.0;
+    t->triOk = ok;
     t->triRough = f["rough"] | false;
     t->triLat = f["lat"] | 0.0;
     t->triLon = f["lon"] | 0.0;

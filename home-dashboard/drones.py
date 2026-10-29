@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS drone_meta (
 );
 """
 
-LIVE_S = 90          # "in the air now"
+LIVE_S = 60          # "in the air now" (mesh-mapper staleThreshold)
 TRACK_KEEP = 600     # points kept per drone in memory
 STORE_EVERY_S = 2.0  # one stored report per drone per this many seconds
 FAA_ID_TYPES = {1, 2}   # CTA-2063 serial / CAA registration: what the FAA indexes

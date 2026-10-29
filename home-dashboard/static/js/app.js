@@ -3015,7 +3015,8 @@ async function boot() {
     S.groups = st.groups || [];
     S.groupOf = st.group_of || {};
     S.droneTags = st.drone_tags;
-    (st.drones || []).forEach((d) => { S.drones[d.mac] = d; S.droneSeen.add(d.mac); });
+    (st.drones || []).forEach((d) => { d._rx = Date.now(); S.drones[d.mac] = d; S.droneSeen.add(d.mac); });
+    S.droneCentred = Object.values(S.drones).some((d) => droneLive(d) && d.lat != null);   // don't yank a reload
     S.filterMeta = st.filter_meta;
     syncTrailSlider();
     try { await loadTrails(Math.max(trailMax(), 1800)); } catch (e) { /* older server */ }
@@ -3131,6 +3132,7 @@ async function boot() {
 setInterval(() => {
     $("clock").textContent = new Date().toLocaleTimeString([], { hour12: false });
     renderTargets();   // age lines out, drop devices gone quiet
+    if (Object.keys(S.drones).length) renderDrones();   // transmit ring + staleout follow the clock
     document.querySelectorAll("[data-age]").forEach((el) => {
         const ts = Number(el.dataset.age);
         const off = el.textContent.startsWith("last ");
@@ -3149,12 +3151,24 @@ S.droneOpen = null;
 S.droneSeen = new Set();
 const TAG_HUE = { unknown: 190, friendly: 140, neutral: 50, suspicious: 30, hostile: 330 };
 function droneName(d) { return d.alias || d.desc || d.id || d.mac; }
+// Like mesh-mapper: every drone keeps its own colour (hashed from its MAC) so several in
+// the air never look alike; a tag the operator set (friendly, hostile...) takes over.
+function droneHue(d) {
+    if (d.tag && d.tag !== "unknown" && TAG_HUE[d.tag] != null) return TAG_HUE[d.tag];
+    let h = 0;
+    for (const ch of d.mac || "") h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+    return Math.abs(h) % 360;
+}
+// Age now, from the age the server sent plus the time since it arrived (no clock skew).
+const DRONE_LIVE_S = 60, DRONE_TX_S = 5;
+function droneAge(d) { return (d.age || 0) + (d._rx ? (Date.now() - d._rx) / 1000 : 0); }
+function droneLive(d) { return droneAge(d) < DRONE_LIVE_S; }
 function fmtM(v) { return v == null ? "-" : `${Math.round(v)} m`; }
 function droneIcon(d) {
-    const hue = TAG_HUE[d.tag] ?? 190;
+    const hue = droneHue(d);
     const rot = d.hdg != null ? d.hdg : 0;
     return L.divIcon({ className: "", iconSize: [0, 0], html:
-        `<div class="drm ${d.live ? "" : "stale"}" style="--h:${hue}">
+        `<div class="drm ${droneLive(d) ? (droneAge(d) <= DRONE_TX_S ? "tx" : "") : "stale"}" style="--h:${hue}">
             <svg viewBox="-20 -20 40 40" style="transform:rotate(${rot}deg)">
                 <circle r="17" class="ring"/>
                 <path d="M-9-9L9 9M9-9L-9 9" class="arm"/>
@@ -3166,9 +3180,9 @@ function droneIcon(d) {
         </div>` });
 }
 function pilotIcon(d) {
-    const hue = TAG_HUE[d.tag] ?? 190;
+    const hue = droneHue(d);
     return L.divIcon({ className: "", iconSize: [0, 0], html:
-        `<div class="plm ${d.live ? "" : "stale"}" style="--h:${hue}">
+        `<div class="plm ${droneLive(d) ? "" : "stale"}" style="--h:${hue}">
             <svg viewBox="-12 -12 24 24"><circle cy="-5" r="4"/><path d="M-7 9c0-6 3-9 7-9s7 3 7 9z"/></svg>
             <span class="drm-label">PILOT<small>${d.pilot_dist_m != null ? `${d.pilot_dist_m} m to drone` : ""}</small></span>
         </div>` });
@@ -3179,10 +3193,11 @@ function renderDroneMap() {
     const keep = new Set();
     for (const d of Object.values(S.drones)) {
         if (d.lat == null && d.plat == null) continue;
-        if (!d.live && d.age > 1800) continue;
+        const live = droneLive(d);
+        if (!live && droneAge(d) > 1800) continue;
         keep.add(d.mac);
         const m = S.droneMarks[d.mac] = S.droneMarks[d.mac] || {};
-        const hue = TAG_HUE[d.tag] ?? 190;
+        const hue = droneHue(d);
         if (d.lat != null) {
             if (!m.drone) {
                 m.drone = L.marker([d.lat, d.lon], { zIndexOffset: 900 }).addTo(S.droneLayer);
@@ -3202,16 +3217,19 @@ function renderDroneMap() {
             const ll = [[d.plat, d.plon], [d.lat, d.lon]];
             if (!m.link) m.link = L.polyline(ll, { color: `hsl(${hue} 100% 60%)`, weight: 1.5, dashArray: "4 6", opacity: .9, interactive: false }).addTo(S.droneLayer);
             else m.link.setLatLngs(ll);
+            m.link.setStyle({ color: `hsl(${hue} 100% 60%)`, opacity: live ? .9 : .4 });
         } else if (m.link) { S.droneLayer.removeLayer(m.link); m.link = null; }
         const tr = showT ? (d.track || []).map((p) => [p[1], p[2]]) : [];
         if (tr.length > 1) {
-            if (!m.track) m.track = L.polyline(tr, { color: `hsl(${hue} 100% 62%)`, weight: 3, opacity: .85, interactive: false, className: "dr-track" }).addTo(S.droneLayer);
+            if (!m.track) m.track = L.polyline(tr, { color: `hsl(${hue} 100% 62%)`, weight: 3, interactive: false, className: "dr-track" }).addTo(S.droneLayer);
             else m.track.setLatLngs(tr);
+            m.track.setStyle({ color: `hsl(${hue} 100% 62%)`, opacity: live ? .9 : .45 });
         } else if (m.track) { S.droneLayer.removeLayer(m.track); m.track = null; }
         const pt = showT && showP ? (d.ptrack || []).map((p) => [p[1], p[2]]) : [];
         if (pt.length > 1) {
-            if (!m.ptrack) m.ptrack = L.polyline(pt, { color: `hsl(${hue} 60% 70%)`, weight: 2, opacity: .6, dashArray: "2 4", interactive: false }).addTo(S.droneLayer);
+            if (!m.ptrack) m.ptrack = L.polyline(pt, { weight: 2, dashArray: "5 5", interactive: false }).addTo(S.droneLayer);
             else m.ptrack.setLatLngs(pt);
+            m.ptrack.setStyle({ color: `hsl(${hue} 100% 62%)`, opacity: live ? .8 : .4 });
         } else if (m.ptrack) { S.droneLayer.removeLayer(m.ptrack); m.ptrack = null; }
     }
     for (const mac of Object.keys(S.droneMarks)) {
@@ -3219,13 +3237,17 @@ function renderDroneMap() {
         for (const l of Object.values(S.droneMarks[mac])) if (l) S.droneLayer.removeLayer(l);
         delete S.droneMarks[mac];
     }
+    if (!S.droneCentred && S.booted) {
+        const first = Object.values(S.drones).find((d) => droneLive(d) && d.lat != null);
+        if (first) { S.droneCentred = true; map.setView([first.lat, first.lon], Math.max(map.getZoom(), 17)); }
+    }
     if ($("drFollow").checked) {
-        const live = Object.values(S.drones).filter((d) => d.live && d.lat != null).sort((a, b) => a.age - b.age)[0];
+        const live = Object.values(S.drones).filter((d) => droneLive(d) && d.lat != null).sort((a, b) => droneAge(a) - droneAge(b))[0];
         if (live) map.panTo([live.lat, live.lon], { animate: true });
     }
 }
 function droneCard(d) {
-    const hue = TAG_HUE[d.tag] ?? 190;
+    const hue = droneHue(d);
     const cells = [
         ["Height", d.hagl != null ? `${Math.round(d.hagl)} m AGL` : fmtM(d.alt)],
         ["Speed", d.spd != null ? `${d.spd.toFixed(1)} m/s` : "-"],
@@ -3247,7 +3269,8 @@ function renderDrones() {
     const now = Date.now();
     if (now - drRenderAt < 400) { clearTimeout(drRenderTimer); drRenderTimer = setTimeout(renderDrones, 400); return; }
     drRenderAt = now;
-    const all = Object.values(S.drones).sort((a, b) => (b.live - a.live) || (a.age - b.age));
+    for (const d of Object.values(S.drones)) d.live = droneLive(d);
+    const all = Object.values(S.drones).sort((a, b) => (b.live - a.live) || (droneAge(a) - droneAge(b)));
     const live = all.filter((d) => d.live);
     const badge = $("droneBadge");
     badge.hidden = !live.length;
@@ -3276,6 +3299,7 @@ async function loadDroneTable() {
 }
 function onDrone(d) {
     const fresh = !S.drones[d.mac] && !S.droneSeen.has(d.mac);
+    d._rx = Date.now();
     S.drones[d.mac] = d;
     S.droneSeen.add(d.mac);
     if (fresh && S.booted) {

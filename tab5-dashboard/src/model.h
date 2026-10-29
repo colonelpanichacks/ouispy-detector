@@ -13,7 +13,8 @@ constexpr int MAX_BUCKETS = 192;
 constexpr int MAX_MUTED = 32;
 constexpr int MAX_DRONES = 16;
 constexpr int DRONE_TRACK = 48;    // flight track points kept per drone
-constexpr float DRONE_LIVE_S = 90;
+constexpr float DRONE_LIVE_S = 60;   // mesh-mapper's staleout: dimmed after this
+constexpr float DRONE_TX_S = 5;     // transmitting now
 
 constexpr float TARGET_LIVE_S = 60;     // server SEEN_WINDOW: "heard lately"
 constexpr float TARGET_KEEP_S = 600;    // drop a target this long after it was last heard
