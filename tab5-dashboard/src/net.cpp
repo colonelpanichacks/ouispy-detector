@@ -541,10 +541,41 @@ bool http_json(const String &path, JsonDocument &doc, JsonDocument *filter) {
         h.end();
         return false;
     }
-    DeserializationError e = filter
-        ? deserializeJson(doc, h.getStream(), DeserializationOption::Filter(*filter))
-        : deserializeJson(doc, h.getStream());
+    // Drain the body into PSRAM in big reads first, then parse from memory. Parsing straight
+    // off the socket is slow, and meanwhile the dashboard fills the whole 64 KB TCP window,
+    // all of it in internal-RAM network buffers: /api/state drained internal RAM to a few KB
+    // and the Wi-Fi driver crashed allocating its own buffers.
+    int len = h.getSize();
+    size_t cap = len > 0 ? (size_t)len + 1 : 64 * 1024, n = 0;
+    char *buf = (char *)heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+    WiFiClient *st = h.getStreamPtr();
+    uint32_t t0 = millis();
+    while (buf && st && millis() - t0 < 15000) {
+        int a = st->available();
+        if (a > 0) {
+            if (n + a + 1 > cap) {   // unknown length: grow (2 MB cap)
+                size_t nc = min<size_t>(cap * 2, 2 * 1024 * 1024);
+                if (nc <= cap) break;
+                char *nb = (char *)heap_caps_realloc(buf, nc, MALLOC_CAP_SPIRAM);
+                if (!nb) break;
+                buf = nb, cap = nc;
+            }
+            n += st->readBytes(buf + n, min((size_t)a, cap - n - 1));
+            if (len > 0 && (int)n >= len) break;
+        } else if (!h.connected()) {
+            break;
+        } else {
+            delay(2);
+        }
+    }
     h.end();
+    if (!buf) {
+        set_error("no memory for %s", path.c_str());
+        return false;
+    }
+    DeserializationError e = filter ? deserializeJson(doc, buf, n, DeserializationOption::Filter(*filter))
+                                    : deserializeJson(doc, buf, n);
+    free(buf);
     if (e) {
         set_error("bad JSON on %s: %s", path.c_str(), e.c_str());
         return false;
