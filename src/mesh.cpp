@@ -463,6 +463,50 @@ void mesh_saveConfig() {
 
 bool meshKeySet() { return meshCfg.key[0] != 0; }
 
+// ---------------------------------------------------------------- deny list
+// Nodes reported lost: everything from them is dropped before it is processed or relayed,
+// and seeing one is reported ("DENIED {..}") so the dashboard can raise the alarm. Kept in
+// NVS; replaced as a whole by MESH_CMD_DENY from the dashboard.
+#define DENY_MAX 32
+static uint8_t denyIds[DENY_MAX][3];
+static uint8_t denyN = 0;
+static bool denyLoaded = false;
+static uint32_t denyRx = 0;
+
+static void denyLoad() {
+    denyLoaded = true;
+    Preferences p;
+    p.begin("mesh", true);
+    size_t n = p.getBytesLength("deny");
+    if (n && n % 3 == 0 && n <= sizeof(denyIds)) {
+        p.getBytes("deny", denyIds, n);
+        denyN = n / 3;
+    }
+    p.end();
+}
+
+void meshSetDeny(const uint8_t* ids, uint8_t n) {
+    if (n > DENY_MAX) n = DENY_MAX;
+    memcpy(denyIds, ids, n * 3);
+    denyN = n;
+    denyLoaded = true;
+    Preferences p;
+    p.begin("mesh", false);
+    if (n) p.putBytes("deny", denyIds, n * 3);
+    else p.remove("deny");
+    p.end();
+}
+
+uint8_t meshDenyCount() { if (!denyLoaded) denyLoad(); return denyN; }
+uint32_t meshDeniedRx() { return denyRx; }
+
+static bool meshDenied(const uint8_t* id) {
+    if (!denyLoaded) denyLoad();
+    for (uint8_t i = 0; i < denyN; i++)
+        if (!memcmp(denyIds[i], id, 3)) return true;
+    return false;
+}
+
 void meshSetKey(const char* key) {
     if (strncmp(meshCfg.key, key, sizeof(meshCfg.key)) == 0) return;
     strlcpy(meshCfg.key, key, sizeof(meshCfg.key));
@@ -1839,6 +1883,18 @@ void meshTick() {
 
         uint8_t type = pkt[3];
         const uint8_t* nodeId = pkt + MESH_HDR_LEN;
+        if (meshDenied(nodeId)) {   // a node reported lost: drop, never relay, report
+            denyRx++;
+            static uint32_t lastReport = 0;
+            if (now - lastReport > 60000 || !lastReport) {
+                lastReport = now ? now : 1;
+                if (isSerialConnected())
+                    Serial.printf("DENIED {\"node\":\"%02X%02X%02X\",\"via\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ch\":%u,\"n\":%lu}\n",
+                                  nodeId[0], nodeId[1], nodeId[2], rxHop[0], rxHop[1], rxHop[2], rxHop[3], rxHop[4], rxHop[5],
+                                  ch, (unsigned long)denyRx);
+            }
+            continue;
+        }
         bool isAnnounce = (type == MESH_T_ANNOUNCE);
         uint8_t role = isAnnounce ? pkt[MESH_HDR_LEN + 3] : 0xFF;
         // Announces from current builds state the sender's channel; that

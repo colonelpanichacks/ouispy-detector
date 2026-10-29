@@ -229,6 +229,13 @@
         <div class="tab-body" id="tab-fleetctl">
             <div class="nocmd" id="fNoCmd">Connect the home node over USB to manage the fleet. Commands go out over the mesh from the home.</div>
             <div class="fleet-actions">
+                <div class="fa danger-zone">
+                    <h4>Security</h4>
+                    <div class="ctl-row">
+                        <button class="btn ghost danger" id="fWipeAll" title="Every remote node, then the home: keys, settings, filters, logs and firmware erased. Unusable until reflashed over USB.">Wipe ALL nodes</button>
+                        <span class="lbl-hint" id="fLostList"></span>
+                    </div>
+                </div>
                 <div class="fa">
                     <h4>Read</h4>
                     <div class="ctl-row">
@@ -417,6 +424,10 @@
         <div class="alias-row">
             <input type="text" id="dAlias" class="field" maxlength="40" placeholder="Friendly name">
             <button class="btn" id="dSave">Save</button>
+        </div>
+        <div class="drawer-actions top sec-actions">
+            <button class="btn ghost danger" id="dLost" title="Every node drops it and reports it if it shows up again; you get an alarm">Report lost</button>
+            <button class="btn ghost danger" id="dWipe" title="Erase its keys, settings, filters, logs and firmware over the mesh: unusable until reflashed over USB">Wipe node</button>
         </div>
         <div class="drawer-actions top">
             <button class="btn ghost" id="dPlace">Place on map</button>

@@ -33,6 +33,10 @@ void mesh_saveConfig();
 // remembered counters. Persists to NVS.
 bool meshKeySet();
 void meshSetKey(const char* key);
+// Lost nodes: their packets are dropped (not relayed) and reported as "DENIED {...}".
+void meshSetDeny(const uint8_t* ids, uint8_t n);
+uint8_t meshDenyCount();
+uint32_t meshDeniedRx();
 
 // Starts ESP-NOW on the mesh channel with the LR protocol enabled. Requires
 // WiFi STA mode to be started already. Returns false on init failure.
@@ -152,6 +156,8 @@ void meshSetHealAllowed(bool allowed);
 #define MESH_CMD_FILTER_ADD 11     // payload: filter records merged into the list (live)
 #define MESH_CMD_FILTER_DEL 12     // payload: filter records removed by (type, id) (live)
 #define MESH_CMD_ALIAS 14          // payload: the node's new alias (0-32 plain ASCII, empty clears)
+#define MESH_CMD_WIPE 17           // payload: "WIPE". Erase keys, settings, filters, logs and the firmware: unusable
+#define MESH_CMD_DENY 18           // payload: n x 3-byte node ids (n may be 0): the lost-node list, replaces it
 #define MESH_CMD_LOCATE 16         // payload: u8 mode: 0 stop, 1 one triple beep, 2 triple beeps until stopped
 #define MESH_CMD_WARDRIVE 15       // payload: u8 255, u8 raw (255 keep), u16 le channel mask (0 keep); wardrive.h
 // Filter edits ack with count = filters installed afterwards; status 1 when

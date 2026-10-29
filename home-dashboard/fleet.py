@@ -141,6 +141,14 @@ class Fleet:
             else:
                 self._node_filters(obj)
             return
+        if line.startswith("DENIED "):
+            # A node reported lost is talking on the mesh: the nodes drop it; raise the alarm.
+            try:
+                o = json.loads(line[7:])
+            except ValueError:
+                return
+            self._lost_seen(str(o.get("node", "")).upper(), f"on the mesh (via {o.get('via', '?')}, ch {o.get('ch', '?')})")
+            return
         if line.startswith("WD "):
             # A wardriver's sighting (bridged by a Tab5, which stamps its GPS fix).
             if self.wardrive:
@@ -376,8 +384,30 @@ class Fleet:
     # ------------------------------------------------------------------
     # node bookkeeping
     # ------------------------------------------------------------------
+    def lost_ids(self):
+        return sorted((self.store.get_setting("lost_nodes") or {}).keys())
+
+    def _lost_seen(self, nid, how):
+        """A lost node showed up: one alarm a minute per node (toast, notification, log)."""
+        lost = self.store.get_setting("lost_nodes") or {}
+        if nid not in lost:
+            return
+        now = time.time()
+        last = self._lost_alarm.get(nid, 0) if hasattr(self, "_lost_alarm") else 0
+        if not hasattr(self, "_lost_alarm"):
+            self._lost_alarm = {}
+        if now - last < 60:
+            return
+        self._lost_alarm[nid] = now
+        lost[nid]["seen"] = now
+        lost[nid]["how"] = how
+        self.store.set_setting("lost_nodes", lost)
+        self.emit("lost_node", {"node": nid, "how": how, "ts": now, "note": lost[nid].get("note", "")})
+
     def _node_seen(self, nid, role, last_s, pkts, rssi, now=None, from_det=False):
         now = now or time.time()
+        if nid and nid in (self.store.get_setting("lost_nodes") or {}):
+            self._lost_seen(nid, "in the fleet roster" if not from_det else "reporting detections")
         with self.lock:
             st = self.nodes.get(nid)
             if st is None:
@@ -626,12 +656,13 @@ class Fleet:
         lists (the bulk of it, and they rarely change): live updates carry
         those in their own node_filters event, only when a list changes."""
         meta = self.store.nodes_meta()
+        lost = self.store.get_setting("lost_nodes") or {}
         now = time.time()
         with self.lock:
             nodes = []
             for nid, st in self.nodes.items():
                 m = meta.get(nid, {})
-                nodes.append({**st, "alias": m.get("alias") or "", "lat": m.get("lat"),
+                nodes.append({**st, "lost": nid in lost, "alias": m.get("alias") or "", "lat": m.get("lat"),
                               "lon": m.get("lon"), "notes": m.get("notes") or "",
                               "color": m.get("color"),
                               "first_seen": m.get("first_seen"),

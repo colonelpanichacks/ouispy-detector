@@ -25,6 +25,8 @@
 #include "devinfo.h"
 #include "rid.h"
 #include "wardrive.h"
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <rom/crc.h>
 #include <mbedtls/sha256.h>
 
@@ -1489,6 +1491,25 @@ static bool presetLookup(uint8_t idx, const PresetEntry*& table, size_t& count, 
 // Command handler invoked by meshTick (loop context) with a complete,
 // CRC-verified payload. Acks before any reboot-triggering action, and the
 // TX queue is flushed so the ack actually leaves the radio.
+// Remote / local wipe, for a node that is lost or about to be: settings and the fleet key
+// (NVS), filter lists and logs (LittleFS), then the firmware itself (both app slots' first
+// sector and the boot selector), so it cannot boot, join or tell anyone anything until it
+// is reflashed over USB. Fast: a few hundred ms.
+void wipeNode(const char* why) {
+    if (isSerialConnected()) { Serial.printf("WIPE {\"why\":\"%s\"}\n", why); Serial.flush(); }
+    ledcWrite(0, 0);   // buzzer off
+    nvs_flash_deinit();
+    nvs_flash_erase();
+    LittleFS.format();
+    const esp_partition_t* od = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+    if (od) esp_partition_erase_range(od, 0, od->size);
+    const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
+    if (other) esp_partition_erase_range(other, 0, 0x10000);
+    const esp_partition_t* run = esp_ota_get_running_partition();
+    if (run) esp_partition_erase_range(run, 0, 0x10000);   // this code may not come back from here
+    esp_restart();
+}
+
 void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint16_t len) {
     switch (cmd) {
     case MESH_CMD_AUDIO: {
@@ -1527,6 +1548,22 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
                           OP_NAMES[op], changed, n);
         }
         if (liveEditNeedsRestart()) restartAfterAck("first BLE filter installed");
+        break;
+    }
+    case MESH_CMD_WIPE:
+        if (len != 4 || memcmp(payload, "WIPE", 4)) { meshSendAck(cmd, cmdId, 1, 0); return; }
+        meshSendAck(cmd, cmdId, 0, 0);
+        for (int i = 0; i < 30 && meshTxPending() > 0; i++) {   // the ack goes out first
+            meshFlushTxNow();
+            delay(100);
+        }
+        wipeNode("commanded over the mesh");
+        break;
+    case MESH_CMD_DENY: {
+        if (len % 3) { meshSendAck(cmd, cmdId, 1, 0); return; }
+        meshSetDeny(payload, (uint8_t)min<uint16_t>(len / 3, 255));
+        meshSendAck(cmd, cmdId, 0, (uint8_t)(len / 3));
+        if (isSerialConnected()) Serial.printf("[MESH] lost-node list: %u node(s)\n", (unsigned)(len / 3));
         break;
     }
     case MESH_CMD_REBOOT:
@@ -2144,6 +2181,11 @@ static bool remoteConsoleCommand(const String& line) {
         return true;
     }
     if (verb == "reboot") { localReboot("reboot"); return true; }
+    if (verb == "wipe") {           // wipe NOW: this node, over USB
+        if (arg[0] != "NOW") { Serial.println("ERR usage: wipe NOW  (erases everything; reflash over USB after)"); return true; }
+        wipeNode("asked over USB");
+        return true;
+    }
     if (verb == "locate") {         // locate 0|1|2: stop / one triple beep / until stopped
         int mode = arg[0].length() ? arg[0].toInt() : 1;
         locateStart((uint8_t)constrain(mode, 0, 2));
@@ -2160,7 +2202,7 @@ static bool remoteConsoleCommand(const String& line) {
     }
 
     bool remote = verb == "rstatus" || verb == "raudio" || verb == "rreboot" ||
-                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias" || verb == "rwd" || verb == "rlocate";
+                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias" || verb == "rwd" || verb == "rlocate" || verb == "rwipe" || verb == "rdeny";
     if (remote) {
         if (!parseTarget(arg[0], t, all)) { Serial.printf("ERR %s: target must be a node ID or all\n", verb.c_str()); return true; }
         if (verb == "rstatus") {
@@ -2180,6 +2222,26 @@ static bool remoteConsoleCommand(const String& line) {
             int secs = arg[1].length() ? arg[1].toInt() : 10;
             uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
             sendMgmt("rident", t, all, MESH_CMD_IDENTIFY, p, 2);
+        } else if (verb == "rwipe") {   // rwipe <target|all> WIPE  (the word guards against typos)
+            if (arg[1] != "WIPE") { Serial.println("ERR usage: rwipe <node|all> WIPE"); return true; }
+            sendMgmt("rwipe", t, all, MESH_CMD_WIPE, (const uint8_t*)"WIPE", 4);
+        } else if (verb == "rdeny") {   // rdeny all <id,id,...|->: the lost-node list, fleet-wide
+            uint8_t ids[96];
+            uint8_t n = 0;
+            String lst = arg[1];
+            if (lst != "-") {
+                int st = 0;
+                while (st < (int)lst.length() && n < 32) {
+                    int c = lst.indexOf(',', st);
+                    String id = c < 0 ? lst.substring(st) : lst.substring(st, c);
+                    st = c < 0 ? lst.length() : c + 1;
+                    if (id.length() != 6) { Serial.println("ERR rdeny: ids are 6 hex digits"); return true; }
+                    for (int k = 0; k < 3; k++) ids[n * 3 + k] = (uint8_t)strtol(id.substring(k * 2, k * 2 + 2).c_str(), nullptr, 16);
+                    n++;
+                }
+            }
+            meshSetDeny(ids, n);   // this node too
+            sendMgmt("rdeny", t, all, MESH_CMD_DENY, ids, n * 3);
         } else if (verb == "rlocate") {   // rlocate <target> 0|1|2
             uint8_t p[1] = { (uint8_t)constrain(arg[1].length() ? arg[1].toInt() : 1, 0, 2) };
             sendMgmt("rlocate", t, all, MESH_CMD_LOCATE, p, 1);

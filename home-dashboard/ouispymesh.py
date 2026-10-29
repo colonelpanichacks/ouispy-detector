@@ -596,6 +596,26 @@ def api_device_detail(mac):
     })
 
 
+@app.route("/api/nodes/<nid>/lost", methods=["POST"])
+def api_node_lost(nid):
+    """Report a node lost (or found): every node gets the new lost-node list, drops it and
+    reports it if it shows up again; the dashboard raises the alarm."""
+    nid = nid.upper()
+    data = request.get_json(silent=True) or {}
+    lost = store.get_setting("lost_nodes") or {}
+    if data.get("lost", True):
+        lost[nid] = {"ts": time.time(), "note": str(data.get("note") or "")[:120]}
+    else:
+        lost.pop(nid, None)
+    store.set_setting("lost_nodes", lost)
+    try:
+        job = commander.submit("deny", "all", {"ids": sorted(lost)})
+    except PlanError as e:
+        job = {"error": str(e)}
+    fleet._broadcast()
+    return jsonify({"ok": True, "lost": sorted(lost), "job": job})
+
+
 @app.route("/api/firmware/library")
 def api_fw_library():
     return jsonify(fw.library())

@@ -1146,3 +1146,9 @@ body.map-maxed .toasts { z-index: 1700; }
 @media (max-width: 900px) { .ov-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } .ov-grid { grid-template-columns: 1fr; }
     .ov-det { grid-template-columns: 40px minmax(0, 1fr) 40px; } .ov-det .ov-mac, .ov-det .ov-nd { display: none; } }
 .ov-fleet h4, .ov-feed h4, .ov-act h4 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+
+/* Security controls */
+.sec-actions { margin-top: 4px; }
+.danger-zone { border: 1px solid rgba(255, 77, 109, .35); box-shadow: inset 0 0 12px rgba(255, 77, 109, .08); }
+.danger-zone h4 { color: #ff4d6d; }
+.node.lost { box-shadow: inset 3px 0 0 #ff4d6d; }

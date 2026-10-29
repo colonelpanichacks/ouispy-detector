@@ -32,7 +32,7 @@ LABELS = {
     "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
     "rechan": "Re-channel fleet", "meshpush": "Push home filters",
     "setkey": "Set fleet key", "wardrive": "Wardriver settings", "locate": "Locate beep",
-    "fw_install": "Install firmware",
+    "fw_install": "Install firmware", "wipe": "WIPE node", "deny": "Lost-node list",
     "fw_stage": "Stage firmware on home", "fw_send": "Update firmware", "fw_self": "Update home firmware",
 }
 
@@ -43,7 +43,7 @@ LABELS = {
 KNOWN_VERBS = {"nodealias", "ralias", "status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
                "rreboot", "rident", "rpreset", "mfbegin", "mfadd", "mfdel", "mfdata", "mfend",
                "fadd", "fdel", "meshpush", "meshrechan", "fwbegin", "fwdata", "fwend", "fwsend",
-               "fwself", "fwabort", "preset", "meshkey", "rwd", "wd", "locate", "rlocate"}
+               "fwself", "fwabort", "preset", "meshkey", "rwd", "wd", "locate", "rlocate", "rwipe", "rdeny", "wipe"}
 ERR_VERBS = {"mfend": {"mfend", "filters", "fadd", "fdel"}}
 
 
@@ -82,6 +82,18 @@ def plan(op, target, args, home_id):
         label = f"Name node {a!r}" if a else "Clear node name"
         return ([(f"nodealias {a or '-'}", "OK")], "local", label) if local else \
                ([(f"ralias {tgt} {a or '-'}", "CMD")], "ack", label)
+    if op == "wipe":
+        # Erases the node's keys, settings, filters, logs and firmware (unusable until it is
+        # reflashed over USB). The caller must echo the target back: no accidental wipes.
+        want = "WIPE ALL" if target == "all" else f"WIPE {target}"
+        if str(args.get("confirm", "")).strip().upper() != want:
+            raise PlanError(f'type "{want}" to confirm')
+        if local:
+            return [("wipe NOW", "OK")], "local", "WIPE home node"
+        return [(f"rwipe {tgt} WIPE", "CMD")], "ack", ("WIPE ALL remote nodes" if target == "all" else f"WIPE {target}")
+    if op == "deny":
+        ids = [str(i).upper() for i in (args.get("ids") or []) if re.fullmatch(r"[0-9A-Fa-f]{6}", str(i))]
+        return [(f"rdeny all {','.join(ids) or '-'}", "CMD")], "ack", f"Lost-node list ({len(ids)})"
     if op == "locate":
         # 0 stop, 1 one triple beep, 2 triple beeps until stopped (find a node by ear).
         mode = max(0, min(2, int(args.get("mode", 1))))
@@ -208,6 +220,14 @@ class Commander(threading.Thread):
                                     {**args, "filters": part}, auto) for i, part in enumerate(parts)]
                 return jobs[-1]
         home = self.fleet.home_id
+        if op == "wipe" and target == "all":
+            # Every remote first (one signed flood), then the home itself.
+            last = self.submit("wipe", "all-remotes", args, auto)
+            if home:
+                last = self.submit("wipe", home, {**(args or {}), "confirm": f"WIPE {home}"}, auto)
+            return last
+        if op == "wipe" and target == "all-remotes":
+            op, target = "wipe", "all"
         if op == "fw_install":
             # Any of the three firmwares onto any node: stage that build on the home,
             # then send it over the mesh (or the home updates itself). Each job loads its

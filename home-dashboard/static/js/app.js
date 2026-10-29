@@ -3084,6 +3084,7 @@ async function boot() {
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
     sock.on("drone", onDrone);
+    sock.on("lost_node", (e) => onLostNode(e));
     sock.on("wd", (e) => onWd(e));   // late-bound: the Live tab wraps onWd
     sock.on("wd_session", () => loadWd());
     sock.on("groups", (g) => {
@@ -3720,4 +3721,46 @@ function renderOverview() {
 document.querySelector('.tab[data-tab="overview"]').addEventListener("click", () => setTimeout(renderOverview, 0));
 setInterval(renderOverview, 1500);
 renderOverview();
+
+// ------------------------------------------------------------------
+// Security: lost nodes (denied fleet-wide, alarm when seen) and remote wipe
+// ------------------------------------------------------------------
+function onLostNode(e) {
+    toast("bad", `LOST NODE ${nodeName(e.node)} IS BACK`, `${e.node} seen ${e.how}${e.note ? " - " + e.note : ""}. The fleet drops it.`);
+    beep(true);
+    if (window.Notification && Notification.permission === "granted")
+        new Notification("OUI-SPY: lost node seen", { body: `${e.node} ${e.how}` });
+}
+function syncLost() {
+    const n = nodeById(S.selected);
+    if (n) $("dLost").textContent = n.lost ? "Found (clear lost)" : "Report lost";
+    const lost = (S.fleet && S.fleet.nodes || []).filter((x) => x.lost).map((x) => nodeName(x.id));
+    $("fLostList").textContent = lost.length ? `Lost: ${lost.join(", ")}` : "";
+}
+$("dLost").onclick = async () => {
+    const n = nodeById(S.selected);
+    if (!n) return;
+    const lost = !n.lost;
+    let note = "";
+    if (lost) {
+        note = prompt(`Report ${nodeName(n.id)} (${n.id}) lost?\n\nEvery node will drop it and report it if it shows up again. Optional note:`, "");
+        if (note === null) return;
+    }
+    const r = await api(`/api/nodes/${n.id}/lost`, { method: "POST", body: { lost, note } }).catch((e) => ({ ok: false, error: String(e) }));
+    toast(r.ok ? "ok" : "bad", lost ? "Reported lost" : "Cleared", r.ok ? `Lost list: ${r.lost.join(", ") || "empty"}` : r.error);
+};
+$("dWipe").onclick = () => {
+    const n = nodeById(S.selected);
+    if (!n) return;
+    const want = `WIPE ${n.id}`;
+    const got = prompt(`Wipe ${nodeName(n.id)} (${n.id})?\n\nIts fleet key, settings, filters, logs and firmware are erased over the mesh. ` +
+                       `It will not work again until it is reflashed over USB.\n\nType ${want} to confirm:`);
+    if (got && got.trim().toUpperCase() === want) command(n.id, "wipe", { confirm: want });
+};
+$("fWipeAll").onclick = () => {
+    const got = prompt("Wipe EVERY node, the home last?\n\nAll fleet keys, settings, filters, logs and firmware are erased. " +
+                       "No node will work again until reflashed over USB.\n\nType WIPE ALL to confirm:");
+    if (got && got.trim().toUpperCase() === "WIPE ALL") command("all", "wipe", { confirm: "WIPE ALL" });
+};
+setInterval(syncLost, 1500);
 })();
