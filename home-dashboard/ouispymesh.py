@@ -26,7 +26,7 @@ import filters as flt
 import firmware as fw
 from commands import Commander, PlanError
 from fleet import Fleet
-from sources import (DemoSource, MqttSource, ReplaySource, SerialSource,
+from sources import (DemoSource, MqttSource, ReplaySource, SerialSource, Source,
                      list_serial_ports)
 from store import Store
 
@@ -70,6 +70,8 @@ def parse_args():
     ap.add_argument("--require-token", action="store_true",
                     help="require the token from every device except this computer, trusted networks included")
     ap.add_argument("--port", type=int, default=int(os.environ.get("OUISPY_PORT", 5077)))
+    ap.add_argument("--no-advertise", action="store_true",
+                    help="don't announce the dashboard on the LAN (mDNS _ouispy._tcp, used by the Tab5 display)")
     ap.add_argument("--serial", help="serial port, 'auto' (USB VID 0x303A) or 'off'")
     ap.add_argument("--mqtt", help="MQTT broker host[:port] (enables MQTT)")
     ap.add_argument("--mqtt-user")
@@ -234,16 +236,21 @@ def emit(event, payload):
 
 
 fleet = Fleet(store, emit)
+import drones as drones_mod
+drones = drones_mod.Drones(store, emit)
+fleet.drones = drones
 sources = {}
 src_lock = threading.Lock()
 
 
 def command_sender():
-    """The feed that can carry console commands: live serial, or the demo."""
+    """The feed that can carry console commands: live serial, a node bridged by a Tab5
+    display, or the demo."""
     with src_lock:
-        ser = sources.get("serial")
-        if ser and ser.status().get("connected"):
-            return ser
+        for key in ("serial", "bridge"):
+            ser = sources.get(key)
+            if ser and ser.status().get("connected"):
+                return ser
         return sources.get("demo")
 
 
@@ -422,6 +429,9 @@ def api_state():
     return jsonify({"fleet": fleet.snapshot(), "sources": sources_status(),
                     "settings": public_settings(), "stats": store.detection_stats(),
                     "hourly": store.hourly(), "mac_aliases": store.mac_aliases(),
+                    "device_names": store.device_names(), "groups": store.groups(),
+                    "drones": drones.snapshot(), "drone_tags": drones_mod.TAGS,
+                    "group_of": store.group_of(),
                     "jobs": _jobs(None), "can_command": command_sender() is not None,
                     "filter_meta": _filter_meta(),
                     "recent": recent, "console": fleet.console_tail(),
@@ -488,12 +498,186 @@ def api_devices():
     return jsonify({"total": total, "rows": rows})
 
 
+@app.route("/api/devices/<mac>", methods=["GET"])
+def api_device_detail(mac):
+    """Everything known about one device: what it said over the air (merged
+    intel, with names for the numbers), its history, who heard it, its group
+    and the devices that keep turning up with it."""
+    import lookups
+    mac = mac.upper()
+    rec = store.device_intel(mac) or {}
+    intel = lookups.decorate(rec.get("intel") or {})
+    agg, hist = store.device_history(mac, limit=int(request.args.get("limit", 60)))
+    alias = store.mac_aliases().get(mac, {})
+    comps = store.companions(mac)
+    names = store.device_names()
+    groups = store.group_of()
+    for c in comps:
+        c["name"] = names.get(c["mac"], "")
+        c["alias"] = store.mac_aliases().get(c["mac"], {}).get("alias", "")
+        c["group"] = groups.get(c["mac"])
+        c["vendor"] = lookups.oui_vendor(c["mac"])
+    from fleet import intel_name
+    if request.args.get("flat"):
+        info = {"intel": intel, "mac_kind": lookups.mac_kind(mac), "oui_vendor": lookups.oui_vendor(mac), "stats": agg}
+        return jsonify({"mac": mac, "name": intel_name(rec.get("intel")) or "", "alias": alias.get("alias", ""),
+                        "group": groups.get(mac), "rows": _flat_intel(info, lookups),
+                        "companions": [{"mac": c["mac"], "label": c["alias"] or c["name"] or c["descr"] or c["vendor"],
+                                        "together": c["together"], "occasions": c["occasions"],
+                                        "group": (c["group"] or {}).get("name", "")} for c in comps[:8]],
+                        "groups": [{"id": g["id"], "name": g["name"], "n": len(g["members"])} for g in store.groups()]})
+    return jsonify({
+        "mac": mac, "name": intel_name(rec.get("intel")) or "",
+        "alias": alias.get("alias", ""), "notes": alias.get("notes", ""),
+        "group": groups.get(mac), "oui_vendor": lookups.oui_vendor(mac),
+        "mac_kind": lookups.mac_kind(mac),
+        "intel": intel, "intel_first": rec.get("first"), "intel_last": rec.get("last"),
+        "intel_reports": rec.get("reports", 0),
+        "stats": agg, "history": hist, "companions": comps,
+    })
+
+
+@app.route("/api/drones")
+def api_drones():
+    return jsonify({"live": drones.snapshot(track=int(request.args.get("track", 60))),
+                    "recent": drones.recent(hours=float(request.args.get("hours", 24))),
+                    "tags": drones_mod.TAGS})
+
+
+@app.route("/api/drones/<mac>", methods=["GET"])
+def api_drone(mac):
+    d = drones.detail(mac, since=float(request.args["since"]) if request.args.get("since") else None)
+    return (jsonify(d), 200) if d else (jsonify({"error": "unknown drone"}), 404)
+
+
+@app.route("/api/drones/<mac>", methods=["POST"])
+def api_drone_meta(mac):
+    data = request.get_json(silent=True) or {}
+    drones.set_meta(mac, alias=(str(data["alias"])[:40].strip() if "alias" in data else None),
+                    tag=data.get("tag"), notes=(str(data["notes"])[:500] if "notes" in data else None))
+    return jsonify({"ok": True, "drone": drones.detail(mac)})
+
+
+@app.route("/api/drones/<mac>/faa", methods=["POST"])
+def api_drone_faa(mac):
+    """On-demand FAA UAS DOC lookup of the drone's serial number (online)."""
+    d = drones.detail(mac)
+    serial = (request.get_json(silent=True) or {}).get("serial") or (d or {}).get("id")
+    if not serial:
+        return jsonify({"ok": False, "error": "no serial number broadcast yet"}), 400
+    try:
+        res = drones_mod.faa_lookup(serial)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"FAA lookup failed: {e}"}), 502
+    drones.set_meta(mac, faa=res)
+    return jsonify({"ok": True, "faa": res})
+
+
+@app.route("/tiles/<layer>/<int:z>/<int:x>/<int:y>")
+def tile_proxy(layer, z, x, y):
+    import tiles
+    try:
+        data, mime = tiles.tile(layer, z, x, y)
+    except KeyError:
+        return ("", 404)
+    except Exception as e:
+        return (f"tile fetch failed: {e}", 502)
+    resp = app.response_class(data, mimetype=mime)
+    resp.headers["Cache-Control"] = "public, max-age=604800"
+    return resp
+
+
+@app.route("/api/tiles")
+def api_tiles():
+    import tiles
+    return jsonify({k: {"name": v["name"], "max": v["max"], "ext": v["ext"]} for k, v in tiles.LAYERS.items()})
+
+
+def _flat_intel(info, lookups):
+    """Device detail as [label, value] text rows, for small displays."""
+    it = info.get("intel") or {}
+    kind = info.get("mac_kind") or {}
+    rows = []
+    def add(k, v):
+        if v not in (None, "", [], {}):
+            rows.append([k, str(v)])
+    by_last = lambda o: sorted(o or {}, key=lambda k: -(o[k].get("last") or 0))
+    add("Broadcast name", f'"{it["name"]}"' if it.get("name") else "")
+    add("Earlier names", ", ".join(f'"{n}"' for n in by_last(it.get("names")) if n != it.get("name")))
+    add("MAC vendor", info.get("oui_vendor") or ("randomized address" if kind.get("local") else "not registered"))
+    if "rnd" in it:
+        add("Address", ("random (" + kind.get("ble_random_kind", "") + ")") if it["rnd"] else "public")
+    if "conn" in it:
+        add("Connectable", "yes" if it["conn"] else "no")
+    if it.get("cid"):
+        add("Company ID", f'0x{it["cid"]} {it.get("cid_name", "")}'.strip())
+    add("Manufacturer data", it.get("mfr"))
+    add("Services", ", ".join(f'{u["uuid"]} {u["name"]}'.strip() for u in it.get("uuids_named") or []))
+    add("128-bit service", it.get("uuid128"))
+    add("Service data", ", ".join(f'{u["uuid"]}={u["data"]}' for u in it.get("sdata_named") or []))
+    if it.get("app") is not None:
+        add("Appearance", it.get("app_name") or it["app"])
+    if it.get("tx") is not None:
+        add("TX power", f'{it["tx"]} dBm')
+    add("Frames", it.get("frame"))
+    ssids = by_last(it.get("ssids"))
+    ap = it.get("frame") in ("beacon", "probe-resp")
+    add("SSID" if ap else "Looks for", ", ".join(s or "(hidden)" for s in ssids))
+    add("Joins", ", ".join(f'{b} {it["aps"][b].get("ssid", "")}'.strip() for b in by_last(it.get("aps"))))
+    add("Security", it.get("sec"))
+    add("Channel", it.get("ch"))
+    if it.get("phy"):
+        add("Wi-Fi", "802.11" + it["phy"] + (f' (to {it["rate"]} Mb/s legacy)' if it.get("rate") else ""))
+    if it.get("wps"):
+        add("WPS", "on")
+    add("Country", it.get("cc"))
+    add("Vendor IEs", ", ".join(f'{v["oui"]} {v["name"]}'.strip() for v in it.get("vie_named") or []))
+    st = info.get("stats") or {}
+    if st.get("n"):
+        add("Detections", f'{st["n"]}  best {st.get("best")} dBm  avg {round(st.get("avg") or 0)} dBm')
+    return rows
+
+
+@app.route("/api/groups", methods=["GET"])
+def api_groups():
+    return jsonify({"groups": store.groups(), "group_of": store.group_of()})
+
+
+@app.route("/api/groups", methods=["POST"])
+def api_group_save():
+    """{id?, name, notes?, color?, add?: [mac], remove?: [mac]} -> saves the
+    group and its membership. {id, delete: true} removes it."""
+    data = request.get_json(silent=True) or {}
+    gid = data.get("id")
+    if data.get("delete") and gid:
+        store.delete_group(int(gid))
+    else:
+        name = str(data.get("name") or "").strip()[:40]
+        if not name and not gid:
+            return jsonify({"ok": False, "error": "name required"}), 400
+        if name or data.get("notes") is not None or data.get("color") is not None:
+            cur = next((g for g in store.groups() if g["id"] == gid), {}) if gid else {}
+            gid = store.save_group(int(gid) if gid else None, name or cur.get("name", ""),
+                                   str(data.get("notes") if data.get("notes") is not None else cur.get("notes") or "")[:500],
+                                   data.get("color", cur.get("color")))
+        for m in data.get("add") or []:
+            store.set_group(str(m).upper(), int(gid))
+        for m in data.get("remove") or []:
+            store.set_group(str(m).upper(), None)
+    payload = {"groups": store.groups(), "group_of": store.group_of()}
+    emit("groups", payload)
+    return jsonify({"ok": True, "id": gid, **payload})
+
+
 @app.route("/api/devices/<mac>", methods=["POST"])
 def api_device_alias(mac):
     data = request.get_json(silent=True) or {}
     mac = mac.upper()
-    store.set_mac_alias(mac, str(data.get("alias") or "")[:40].strip(),
-                        str(data.get("notes") or "")[:500] or None)
+    cur = store.mac_aliases().get(mac) or {}
+    # A field left out keeps its value (the Tab5 sends just the alias).
+    alias = str(data["alias"] if "alias" in data else cur.get("alias", "") or "")[:40].strip()
+    notes = str(data["notes"] if "notes" in data else cur.get("notes", "") or "")[:500] or None
+    store.set_mac_alias(mac, alias, notes)
     aliases = store.mac_aliases()
     emit("mac_aliases", aliases)
     return jsonify({"ok": True, "mac_aliases": aliases})
@@ -530,7 +714,15 @@ def api_node_update(nid):
         fields["color"] = None if v is None or v == "" else int(v) % 360
     store.update_node(nid.upper(), **fields)
     emit("fleet", fleet.snapshot())
-    return jsonify({"ok": True})
+    pushed = None
+    if "alias" in fields and command_sender() is not None:
+        # Push the name to the node itself (nodes on older firmware just
+        # answer "unknown command"; the dashboard name still applies here).
+        try:
+            pushed = {"ok": True, "job": commander.submit("alias", nid.upper(), {"alias": fields["alias"]})}
+        except Exception as e:      # PlanError (bad characters), no USB, ...
+            pushed = {"ok": False, "error": str(e)}
+    return jsonify({"ok": True, "pushed": pushed})
 
 
 # GPS from a phone carrying the node: moves the node live and keeps a trail.
@@ -849,6 +1041,78 @@ def on_connect():
     socketio.emit("sources", sources_status(), to=request.sid)
 
 
+# ----------------------------------------------------------------------
+# Bridge: a node on a Tab5 display's USB port, relayed over its Socket.IO link
+# ----------------------------------------------------------------------
+class BridgeSource(Source):
+    """The home node plugged into a Tab5 instead of this computer. The Tab5 sends its
+    serial lines up (bridge_lines) and console commands go back down (bridge_tx)."""
+    kind = "bridge"
+
+    def __init__(self, fleet, on_status, sid, dev):
+        super().__init__(fleet, on_status)
+        self.sid = sid
+        self.set_state(connected=True, detail=f"node on a Tab5 display (USB {dev})")
+
+    def run(self):
+        self.stop_evt.wait()
+        self.set_state(connected=False, detail="stopped")
+
+    def send(self, line):
+        socketio.emit("bridge_tx", {"line": line.strip()}, to=self.sid)
+        return True
+
+
+def _bridge():
+    with src_lock:
+        b = sources.get("bridge")
+    return b if b and b.sid == request.sid else None
+
+
+@socketio.on("bridge_hello")
+def on_bridge_hello(data):
+    # Sent on connect and every 30 s while a node is plugged into the Tab5 (it also
+    # brings the bridge back after start_sources() restarts the feeds).
+    if _bridge():
+        return
+    dev = str((data or {}).get("dev", ""))[:16]
+    with src_lock:
+        old = sources.pop("bridge", None)
+        src = sources["bridge"] = BridgeSource(fleet, on_source_status, request.sid, dev)
+    if old:
+        old.stop()
+    src.start()
+    on_source_status()
+
+
+@socketio.on("bridge_lines")
+def on_bridge_lines(data):
+    if not _bridge():
+        return
+    for line in (data or {}).get("lines", [])[:256]:
+        if isinstance(line, str) and line:
+            fleet.feed_line(line[:4096], "bridge")
+
+
+@socketio.on("bridge_bye")
+def on_bridge_bye(*_):
+    _bridge_drop()
+
+
+@socketio.on("disconnect")
+def on_disconnect(*_):
+    _bridge_drop()
+
+
+def _bridge_drop():
+    b = _bridge()
+    if b:
+        with src_lock:
+            sources.pop("bridge", None)
+        b.stop()
+        on_source_status()
+
+
 def _addresses():
     """This computer's network addresses, to print as ready-made links.
     Portable (Linux, macOS, Windows): no ifconfig/ip/ipconfig parsing. A UDP
@@ -877,10 +1141,65 @@ def _addresses():
     return seen
 
 
+def advertise():
+    """Announce the dashboard on the local network as _ouispy._tcp so wall displays
+    (the Tab5 firmware) find it without an address typed in. LAN-only multicast DNS,
+    with the generic instance name "OUI-SPY Mesh": no node IDs, no hostname, no token.
+    Uses whatever the OS has (dns-sd on macOS, avahi on Linux, python-zeroconf if
+    installed); quietly does nothing otherwise."""
+    if args.no_advertise or args.host in ("127.0.0.1", "localhost"):
+        return
+    import shutil
+    import subprocess
+    name, kind, txt = "OUI-SPY Mesh", "_ouispy._tcp", "api=1"
+    for cmd in (["dns-sd", "-R", name, kind, "local", str(args.port), txt],
+                ["avahi-publish-service", name, kind, str(args.port), txt]):
+        if shutil.which(cmd[0]):
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import atexit
+                atexit.register(proc.terminate)
+                print(f"  mDNS           {kind} on port {args.port} (--no-advertise turns this off)")
+            except OSError:
+                pass
+            return
+    try:
+        from zeroconf import ServiceInfo, Zeroconf
+        ips = [socket.inet_aton(ip) for ip in _addresses()]
+        if ips:
+            zc = Zeroconf()
+            zc.register_service(ServiceInfo(f"{kind}.local.", f"{name}.{kind}.local.", port=args.port,
+                                            addresses=ips, properties={"api": "1"}))
+            print(f"  mDNS           {kind} on port {args.port} (--no-advertise turns this off)")
+    except Exception:
+        pass
+
+
+def _prewarm_tiles():
+    """Fill the tile cache around the nodes (satellite, zoom 12-19) in the
+    background, then again every 6 h in case a node moved: the Tab5 map
+    opens on tiles that are already on this disk."""
+    import tiles
+    while True:
+        if not args.demo:
+            pts = [(m["lat"], m["lon"]) for m in store.nodes_meta().values()
+                   if m.get("lat") is not None and m.get("lon") is not None]
+            try:
+                n = tiles.prewarm(pts)
+                if n:
+                    print(f"[tiles] cached {n} new tiles around the fleet")
+            except Exception as e:
+                print(f"[tiles] prewarm: {e}")
+        time.sleep(6 * 3600)
+
+
 if __name__ == "__main__":
     refresh_access()
     start_sources()
     commander.start()
+    threading.Thread(target=_prewarm_tiles, daemon=True, name="tile-prewarm").start()
+    import lookups
+    threading.Thread(target=lookups.ensure_data, daemon=True, name="lookup-data").start()
     import atexit
     import signal
 
@@ -908,4 +1227,5 @@ if __name__ == "__main__":
             print(f"  network        http://{ip}:{args.port}{q}")
         if not args.require_token and not args.open:
             print(f"  (trusted networks open without a token; anything else needs ?token={ACCESS_TOKEN})")
+    advertise()
     socketio.run(app, host=args.host, port=args.port, allow_unsafe_werkzeug=True)

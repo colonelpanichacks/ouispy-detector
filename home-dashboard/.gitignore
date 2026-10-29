@@ -1,8 +1,10 @@
+*.db
+*.db-shm
+*.db-wal
+*.log
 .venv/
 __pycache__/
-*.db
-*.db-wal
-*.db-shm
-*.log
 access_token
+data/
 firmware/
+tilecache/

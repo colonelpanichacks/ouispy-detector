@@ -27,7 +27,7 @@ BUSY_RETRIES = 12        # "mesh busy" = a previous transfer is still going out
 BUSY_WAIT = 1.5
 REPLY_WINDOW = {"ack": 20, "rst": 12, "rfl": 30, "ota": 2400}
 LABELS = {
-    "status": "Read status", "audio": "Set buzzer/LED", "identify": "Identify",
+    "status": "Read status", "alias": "Name node", "audio": "Set buzzer/LED", "identify": "Identify",
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
     "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
     "rechan": "Re-channel fleet", "meshpush": "Push home filters",
@@ -39,7 +39,7 @@ LABELS = {
 # Console verbs that prefix their own ERR lines ("ERR rstatus: ..."). A
 # line's answer may also come under the mesh op it floods (mfend -> filters
 # / fadd / fdel).
-KNOWN_VERBS = {"status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
+KNOWN_VERBS = {"nodealias", "ralias", "status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
                "rreboot", "rident", "rpreset", "mfbegin", "mfadd", "mfdel", "mfdata", "mfend",
                "fadd", "fdel", "meshpush", "meshrechan", "fwbegin", "fwdata", "fwend", "fwsend",
                "fwself", "fwabort", "preset", "meshkey"}
@@ -72,6 +72,15 @@ def plan(op, target, args, home_id):
         label = f"Identify {secs} s"
         return ([(f"ident {secs}", "OK")], "local", label) if local else \
                ([(f"rident {tgt} {secs} 3", "CMD")], "ack", label)
+    if op == "alias":
+        # The node keeps its own name (NVS), so its status, its web UI and a
+        # display on its USB all show what the dashboard calls it.
+        a = str(args.get("alias") or "").strip()[:32]
+        if any(c in a for c in '"\\') or any(not (0x20 <= ord(c) < 0x7f) for c in a):
+            raise PlanError("node names are plain ASCII without quotes or backslashes")
+        label = f"Name node {a!r}" if a else "Clear node name"
+        return ([(f"nodealias {a or '-'}", "OK")], "local", label) if local else \
+               ([(f"ralias {tgt} {a or '-'}", "CMD")], "ack", label)
     if op == "reboot":
         return ([("reboot", "OK")], "local", label) if local else \
                ([(f"rreboot {tgt}", "CMD")], "ack", label)
@@ -170,6 +179,15 @@ class Commander(threading.Thread):
                                     {**args, "filters": part}, auto) for i, part in enumerate(parts)]
                 return jobs[-1]
         home = self.fleet.home_id
+        if op in ("fw_send", "fw_self"):
+            # Never turn a detector into a Sky-Spy node (or back) by accident.
+            meta = fw.current() or {}
+            node = (self.fleet.nodes.get(target) or {}) if hasattr(self.fleet, "nodes") else {}
+            have = fw.node_kind(((node.get("cfg") or {}).get("fw")))
+            want = meta.get("kind", "detector")
+            if want != have and not (args or {}).get("convert"):
+                raise PlanError(f"the uploaded image is a {want} build but {target} is a {have} node "
+                                f"(upload the {have} build, or convert it on purpose)")
         lines, expect, label = plan(op, target, args, home)
         if not self.get_sender():
             raise PlanError("no USB connection to the home node: remote settings need the serial feed")

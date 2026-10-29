@@ -69,7 +69,26 @@ def inspect(img):
         "date": _cstr(img[128:144]),
         "idf": _cstr(img[144:176]),
         "build": build_stamp(img),
+        # Which build of the node firmware: "detector" (OUI-SPY Mesh node) or
+        # "skyspy" (dedicated drone node). Images from before the marker are detectors.
+        "kind": _kind(img),
     }
+
+
+def _kind(img):
+    i = img.find(b"OUISPY-KIND=")
+    if i < 0:
+        return "detector"
+    j = i + 12
+    k = j
+    while k < len(img) and k - j < 16 and 0x61 <= img[k] <= 0x7a:
+        k += 1
+    return img[j:k].decode() or "detector"
+
+
+def node_kind(fw):
+    """A node's kind from the build stamp it reports ("Oct28 20:37:51S" = Sky-Spy)."""
+    return "skyspy" if (fw or "").rstrip().endswith("S") else "detector"
 
 
 def save(img, filename=""):

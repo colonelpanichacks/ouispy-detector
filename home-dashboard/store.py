@@ -81,6 +81,30 @@ CREATE TABLE IF NOT EXISTS tracks (
 );
 CREATE INDEX IF NOT EXISTS trk_node_ts ON tracks(node, ts);
 
+-- Everything the nodes heard a device say over the air (firmware "info"),
+-- merged across reports: lists (probed SSIDs, UUIDs, names) accumulate.
+CREATE TABLE IF NOT EXISTS device_intel (
+    mac    TEXT PRIMARY KEY,
+    first  REAL,
+    last   REAL,
+    reports INTEGER DEFAULT 0,
+    intel  TEXT
+);
+
+-- Groups: one overarching alias over several devices (a Cradlepoint and the
+-- phones / tags that travel with it).
+CREATE TABLE IF NOT EXISTS device_groups (
+    id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name   TEXT NOT NULL,
+    notes  TEXT,
+    color  INTEGER,
+    created REAL
+);
+CREATE TABLE IF NOT EXISTS group_members (
+    mac      TEXT PRIMARY KEY,
+    group_id INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -103,6 +127,9 @@ class Store:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(nodes)")}
         if "color" not in cols:
             self.db.execute("ALTER TABLE nodes ADD COLUMN color INTEGER")   # hue 0-359, NULL = default
+        dcols = {r[1] for r in self.db.execute("PRAGMA table_info(detections)")}
+        if "info" not in dcols:
+            self.db.execute("ALTER TABLE detections ADD COLUMN info TEXT")  # JSON, per report
         self.db.commit()
 
     # ---------- settings ----------
@@ -274,11 +301,12 @@ class Store:
     def add_detection(self, d):
         with self.lock:
             cur = self.db.execute(
-                "INSERT INTO detections(ts,node,mac,alias,rssi,type,match,descr,dom,source,is_new) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO detections(ts,node,mac,alias,rssi,type,match,descr,dom,source,is_new,info) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (d["ts"], d["node"], d["mac"], d.get("alias"), d.get("rssi"), d.get("type"),
                  d.get("match"), d.get("descr"), d.get("dom"), d.get("source"),
-                 1 if d.get("is_new") else 0))
+                 1 if d.get("is_new") else 0,
+                 json.dumps(d["info"]) if d.get("info") else None))
             self.db.commit()
             return cur.lastrowid
 
@@ -313,7 +341,21 @@ class Store:
             rows = self.db.execute(
                 f"SELECT * FROM detections{w} ORDER BY ts DESC LIMIT ? OFFSET ?",
                 (*args, int(limit), int(offset))).fetchall()
-        return total, [dict(r) for r in rows]
+        names = self.device_names()
+        aliases = self.mac_aliases()
+        groups = self.group_of()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["alias"] = (aliases.get(d["mac"]) or {}).get("alias") or d.get("alias") or ""
+            d["group"] = groups.get(d["mac"])
+            try:
+                d["info"] = json.loads(d["info"]) if d.get("info") else None
+            except ValueError:
+                d["info"] = None
+            d["name"] = names.get(d["mac"], "")
+            out.append(d)
+        return total, out
 
     def export_detections(self, fmt, **filters):
         w, args = self._det_where(**filters)
@@ -367,12 +409,193 @@ class Store:
                 f"GROUP BY mac ORDER BY last DESC LIMIT ?", (*args, int(limit))).fetchall()
             total = self.db.execute(
                 f"SELECT COUNT(DISTINCT mac) FROM detections{w}", args).fetchone()[0]
+        names = self.device_names()
         out = []
         for r in rows:
             d = dict(r)
             d["nodes"] = sorted(set((d["nodes"] or "").split(","))) if d["nodes"] else []
+            d["name"] = names.get(d["mac"], "")
             out.append(d)
         return total, out
+
+    # ---------- device intel ----------
+    # Lists that grow with every report (value -> count / last seen), and
+    # scalars where the newest report wins.
+    INTEL_SETS = {"ssid": "ssids", "bssid": "aps", "name": "names", "cid": "cids"}
+    INTEL_LISTS = ("uuids", "vie")
+
+    def merge_intel(self, mac, info, node=None, rssi=None, ts=None):
+        """Fold one report's info into the device's record; returns the record."""
+        ts = ts or time.time()
+        with self.lock:
+            row = self.db.execute("SELECT * FROM device_intel WHERE mac=?", (mac,)).fetchone()
+            cur = json.loads(row["intel"]) if row and row["intel"] else {}
+            for k, v in info.items():
+                if k in self.INTEL_SETS:
+                    bucket = cur.setdefault(self.INTEL_SETS[k], {})
+                    key = str(v)
+                    e = bucket.setdefault(key, {"n": 0, "first": ts})
+                    e["n"] += 1
+                    e["last"] = ts
+                    if k == "bssid" and info.get("ssid"):
+                        e["ssid"] = info["ssid"]
+                    if len(bucket) > 64:   # keep the most recent 64
+                        for old in sorted(bucket, key=lambda x: bucket[x]["last"])[:len(bucket) - 64]:
+                            del bucket[old]
+                    if k in ("name", "cid"):
+                        cur[k] = v
+                elif k in self.INTEL_LISTS:
+                    have = cur.setdefault(k, [])
+                    for x in v:
+                        if x not in have:
+                            have.append(x)
+                elif k == "sdata":
+                    have = cur.setdefault("sdata", {})
+                    for x in v:
+                        have[x.get("uuid", "?")] = x.get("data", "")
+                else:
+                    cur[k] = v
+            if node:
+                per = cur.setdefault("heard_by", {})
+                e = per.setdefault(node, {"n": 0, "first": ts})
+                e["n"] += 1
+                e["last"] = ts
+                if rssi is not None:
+                    e["rssi"] = rssi
+                    e["best"] = max(e.get("best", -200), rssi)
+            self.db.execute(
+                "INSERT INTO device_intel(mac, first, last, reports, intel) VALUES(?,?,?,1,?) "
+                "ON CONFLICT(mac) DO UPDATE SET last=excluded.last, reports=reports+1, "
+                "intel=excluded.intel", (mac, ts, ts, json.dumps(cur)))
+            self.db.commit()
+        return cur
+
+    def device_intel(self, mac):
+        with self.lock:
+            row = self.db.execute("SELECT * FROM device_intel WHERE mac=?", (mac,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["intel"] = json.loads(d["intel"]) if d["intel"] else {}
+        return d
+
+    def device_names(self):
+        """mac -> best name a device gave itself (BLE name, else its SSID)."""
+        with self.lock:
+            rows = self.db.execute("SELECT mac, intel FROM device_intel").fetchall()
+        out = {}
+        for r in rows:
+            try:
+                it = json.loads(r["intel"] or "{}")
+            except ValueError:
+                continue
+            nm = it.get("name")
+            if not nm and it.get("frame") in ("beacon", "probe-resp") and it.get("ssid"):
+                nm = it["ssid"]
+            if nm:
+                out[r["mac"]] = nm
+        return out
+
+    def device_history(self, mac, limit=100):
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT ts, node, rssi, type, match, descr, dom, info FROM detections "
+                "WHERE mac=? ORDER BY ts DESC LIMIT ?", (mac, int(limit))).fetchall()
+            agg = self.db.execute(
+                "SELECT COUNT(*) n, MIN(ts) first, MAX(ts) last, MAX(rssi) best, MIN(rssi) worst, "
+                "AVG(rssi) avg FROM detections WHERE mac=?", (mac,)).fetchone()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["info"] = json.loads(d["info"]) if d["info"] else None
+            except ValueError:
+                d["info"] = None
+            out.append(d)
+        return dict(agg), out
+
+    # ---------- groups ----------
+    def groups(self):
+        with self.lock:
+            gs = [dict(r) for r in self.db.execute("SELECT * FROM device_groups ORDER BY name")]
+            mem = self.db.execute("SELECT mac, group_id FROM group_members").fetchall()
+        by = {}
+        for m in mem:
+            by.setdefault(m["group_id"], []).append(m["mac"])
+        for g in gs:
+            g["members"] = sorted(by.get(g["id"], []))
+        return gs
+
+    def group_of(self):
+        """mac -> {"id", "name"} for every grouped device."""
+        with self.lock:
+            rows = self.db.execute("SELECT m.mac, g.id, g.name, g.color FROM group_members m "
+                                   "JOIN device_groups g ON g.id=m.group_id").fetchall()
+        return {r["mac"]: {"id": r["id"], "name": r["name"], "color": r["color"]} for r in rows}
+
+    def save_group(self, gid, name, notes=None, color=None):
+        with self.lock:
+            if gid:
+                self.db.execute("UPDATE device_groups SET name=?, notes=?, color=? WHERE id=?",
+                                (name, notes, color, gid))
+            else:
+                gid = self.db.execute("INSERT INTO device_groups(name, notes, color, created) "
+                                      "VALUES(?,?,?,?)", (name, notes, color, time.time())).lastrowid
+            self.db.commit()
+        return gid
+
+    def delete_group(self, gid):
+        with self.lock:
+            self.db.execute("DELETE FROM group_members WHERE group_id=?", (gid,))
+            self.db.execute("DELETE FROM device_groups WHERE id=?", (gid,))
+            self.db.commit()
+
+    def set_group(self, mac, gid):
+        """Put a device in a group (gid None = take it out)."""
+        with self.lock:
+            if gid:
+                self.db.execute("INSERT INTO group_members(mac, group_id) VALUES(?,?) "
+                                "ON CONFLICT(mac) DO UPDATE SET group_id=excluded.group_id", (mac, gid))
+            else:
+                self.db.execute("DELETE FROM group_members WHERE mac=?", (mac,))
+            self.db.commit()
+
+    def companions(self, mac, window=60, limit=12):
+        """Devices that keep turning up with `mac`: heard by the same node within
+        `window` s of one of its detections. score = share of its sightings
+        (by node + minute) that had the other device alongside."""
+        with self.lock:
+            mine = self.db.execute("SELECT ts, node FROM detections WHERE mac=? ORDER BY ts DESC "
+                                   "LIMIT 400", (mac,)).fetchall()
+            if not mine:
+                return []
+            # One "occasion" per node per window: repeats inside it count once.
+            occ = []
+            for r in mine:
+                if not any(o[1] == r["node"] and abs(o[0] - r["ts"]) < window for o in occ):
+                    occ.append((r["ts"], r["node"]))
+            hits = {}
+            for ts, node in occ:
+                rows = self.db.execute(
+                    "SELECT DISTINCT mac FROM detections WHERE node=? AND ts BETWEEN ? AND ? AND mac<>?",
+                    (node, ts - window, ts + window, mac)).fetchall()
+                for o in rows:
+                    hits[o["mac"]] = hits.get(o["mac"], 0) + 1
+            if not hits:
+                return []
+            info = {r["mac"]: dict(r) for r in self.db.execute(
+                f"SELECT mac, MAX(descr) descr, MAX(dom) dom, COUNT(*) n, MAX(ts) last FROM detections "
+                f"WHERE mac IN ({','.join('?' * len(hits))}) GROUP BY mac", list(hits)).fetchall()}
+        out = []
+        for m, n in hits.items():
+            i = info.get(m, {})
+            # Jaccard-ish: together / (occasions of either), so a device that is
+            # everywhere (a neighbour's AP) does not top every list.
+            score = n / max(1, len(occ) + min(i.get("n", n), 400) - n) if i.get("n") else 0
+            out.append({"mac": m, "together": n, "occasions": len(occ), "score": round(min(1.0, score), 3),
+                        "descr": i.get("descr", ""), "dom": i.get("dom", ""), "last": i.get("last")})
+        out.sort(key=lambda x: (-x["together"], -x["score"]))
+        return out[:limit]
 
     def mac_aliases(self):
         with self.lock:

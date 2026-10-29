@@ -113,6 +113,7 @@
         <div class="tabs">
             <button class="tab active" data-tab="history">History</button>
             <button class="tab" data-tab="devices">Devices</button>
+            <button class="tab" data-tab="drones">Drones <span class="tab-badge" id="droneBadge" hidden>0</span></button>
             <button class="tab" data-tab="fleetctl">Fleet Control</button>
             <button class="tab" data-tab="metrics">Metrics</button>
             <button class="tab" data-tab="console">Console</button>
@@ -184,6 +185,27 @@
                     <table class="htable">
                         <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
                         <tbody id="vBody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-body" id="tab-drones">
+            <div class="drone-head">
+                <div class="drone-kpis" id="drKpis"></div>
+                <div class="drone-opts">
+                    <label class="chk"><input type="checkbox" id="drShowPilot" checked> Pilots</label>
+                    <label class="chk"><input type="checkbox" id="drShowTrack" checked> Flight tracks</label>
+                    <label class="chk"><input type="checkbox" id="drFollow"> Follow live drone</label>
+                </div>
+            </div>
+            <div class="drone-grid" id="drCards"></div>
+            <div class="fa fa-table">
+                <h4><span>Seen in the last 24 h</span><span class="fa-count" id="drTotal"></span></h4>
+                <div class="table-wrap">
+                    <table class="htable">
+                        <thead><tr><th>Drone</th><th>MAC</th><th>Tag</th><th>Reports</th><th>Max alt</th><th>First seen</th><th>Last seen</th></tr></thead>
+                        <tbody id="drBody"></tbody>
                     </table>
                 </div>
             </div>
@@ -469,6 +491,14 @@
             <input type="text" id="vAlias" class="field" maxlength="40" placeholder="e.g. Neighbor's doorbell">
             <button class="btn" id="vSave">Save</button>
         </div>
+        <label>Group <span class="lbl-hint">(one alias over devices that belong together)</span></label>
+        <div class="alias-row">
+            <select id="vGroup" class="field"></select>
+            <button class="btn ghost" id="vGroupNew" type="button">New</button>
+        </div>
+        <div class="dintel" id="vIntel"></div>
+        <h4>Travels with <span class="lbl-hint">(heard by the same node within a minute of it)</span></h4>
+        <div class="dcomp" id="vComp"></div>
         <label>Triangulation calibration</label>
         <div class="help-text cal-info" id="vCalInfo"></div>
         <div class="ctl-row">
@@ -487,6 +517,39 @@
         <div class="drawer-actions">
             <button class="btn ghost" id="vHistory">Show in history</button>
             <button class="btn ghost danger" id="vClearDets" title="Deletes this device's detections from the history (alias and notes stay)">Clear detections</button>
+        </div>
+    </div>
+</aside>
+
+<aside class="drawer" id="drDrawer">
+    <div class="drawer-head">
+        <div>
+            <div class="drawer-title" id="drTitle">DRONE</div>
+            <div class="drawer-sub" id="drSub"></div>
+        </div>
+        <button class="icon-btn" id="drClose" title="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+    </div>
+    <div class="drawer-body">
+        <label>Alias</label>
+        <div class="alias-row">
+            <input type="text" id="drAlias" class="field" maxlength="40" placeholder="e.g. Neighbor's Mavic">
+            <button class="btn" id="drSave">Save</button>
+        </div>
+        <label>Tag</label>
+        <div class="tag-row" id="drTags"></div>
+        <div class="dstats" id="drStats"></div>
+        <div class="dintel" id="drInfo"></div>
+        <h4>FAA registry <span class="lbl-hint">(online lookup, only when you press it)</span></h4>
+        <div id="drFaa" class="dfaa"></div>
+        <button class="btn ghost" id="drFaaGo" type="button">Look up serial with the FAA</button>
+        <label>Notes</label>
+        <textarea id="drNotes" class="field" rows="2" placeholder="Who, where, why..."></textarea>
+        <h4>Altitude (last 24 h)</h4>
+        <svg class="dr-alt" id="drAlt" viewBox="0 0 320 80" preserveAspectRatio="none"></svg>
+        <div class="drawer-actions">
+            <button class="btn ghost" id="drZoom">Show on map</button>
         </div>
     </div>
 </aside>

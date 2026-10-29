@@ -51,10 +51,22 @@ HOME_STAT_KEYS = ("rx", "q", "dup", "self", "bad", "tx", "txf", "txcb", "pend",
                   "nvs")
 
 
+def intel_name(intel):
+    """The name a device gives itself: BLE local name, else an AP's SSID."""
+    if not intel:
+        return None
+    if intel.get("name"):
+        return intel["name"]
+    if intel.get("frame") in ("beacon", "probe-resp") and intel.get("ssid"):
+        return intel["ssid"]
+    return None
+
+
 class Fleet:
     def __init__(self, store, emit):
         self.store = store
         self.emit = emit                 # emit(event_name, payload)
+        self.drones = None               # drones.Drones, set by the app
         self.lock = threading.RLock()
         self.home_id = None
         self.home = {}                   # latest home stats
@@ -121,6 +133,14 @@ class Fleet:
             else:
                 self._node_filters(obj)
             return
+        if line.startswith("RID "):
+            # Drone Remote ID from a mesh node (rid.cpp).
+            if self.drones:
+                try:
+                    self.drones.feed(json.loads(line[4:]), "rid", self.home_id)
+                except ValueError:
+                    pass
+            return
         if line.startswith("TLM "):
             try:
                 self.feed_tlm(json.loads(line[4:]), source)
@@ -128,6 +148,14 @@ class Fleet:
                 pass
             return
         body = line[4:] if line.startswith("DET ") else line
+        if body.startswith("{") and '"drone_lat"' in body:
+            # A Sky-Spy board (mesh-mapper.py format) on this serial port.
+            if self.drones:
+                try:
+                    self.drones.feed(json.loads(body), "skyspy", None)
+                except ValueError:
+                    pass
+            return
         if body.startswith("{") and '"mac"' in body:
             try:
                 self.feed_detection(json.loads(body), source)
@@ -217,6 +245,19 @@ class Fleet:
             dom = "wifi" if str(d.get("type", "")).upper() in ("PROBE", "BEACON") else "ble"
         key = (node, mac, d.get("type"))
         seen_by = self._sighting(mac, node, d.get("rssi"), now)
+        # Device intel (name, services, SSIDs...) is merged from EVERY report,
+        # signal updates and dedup repeats included: each can carry something new.
+        info = d.get("info") if isinstance(d.get("info"), dict) else None
+        name = None
+        if info:
+            try:
+                intel = self.store.merge_intel(mac, info, node=node, rssi=d.get("rssi"), ts=now)
+                name = intel_name(intel)
+            except Exception as e:      # never lose the detection over intel
+                print(f"[intel] {mac}: {e}")
+        if name is None:
+            rec = self.store.device_intel(mac)
+            name = intel_name(rec["intel"]) if rec else None
         if d.get("upd"):
             # A signal update: the device is still in view of `node`. It moves
             # the live target and the "closest" call; no feed row, no alert.
@@ -224,7 +265,8 @@ class Fleet:
             self._node_seen(node, role, 0, None, None, now, from_det=True)
             self.emit("sighting", {"ts": now, "node": node, "mac": mac, "rssi": d.get("rssi"),
                                    "type": d.get("type"), "match": d.get("match"),
-                                   "descr": descr.strip(), "dom": dom, "seen_by": seen_by})
+                                   "descr": descr.strip(), "dom": dom, "seen_by": seen_by,
+                                   "name": name or "", "info": info})
             return
         with self.lock:
             for k, ts in list(self.recent.items()):
@@ -233,10 +275,13 @@ class Fleet:
             if key in self.recent:
                 return
             self.recent[key] = now
+        dash_alias = (self.store.mac_aliases().get(mac) or {}).get("alias") if hasattr(self.store, "mac_aliases") else None
         det = {
-            "ts": now, "node": node, "mac": mac, "alias": d.get("alias") or "",
+            "ts": now, "node": node, "mac": mac, "alias": dash_alias or d.get("alias") or "",
             "rssi": d.get("rssi"), "type": d.get("type"), "match": d.get("match"),
             "descr": descr.strip(), "dom": dom, "source": source,
+            "name": name or "", "info": info,
+            "group": self.store.group_of().get(mac) if hasattr(self.store, "group_of") else None,
             "is_new": not self.store.mac_known(mac),
             # Every node that heard this device lately, strongest first; with
             # two or more, the strongest is the one it is closest to.

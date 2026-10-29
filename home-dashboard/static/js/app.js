@@ -17,6 +17,9 @@ const S = {
     statsBase: null,
     hourly: [],               // [{h, c}] detections per hour, last 24 h
     macAliases: {},           // MAC -> {alias, notes}, dashboard-local
+    deviceNames: {},          // MAC -> name it advertises (BLE name / AP SSID)
+    groups: [],               // [{id, name, notes, color, members}]
+    groupOf: {},              // MAC -> {id, name, color}
     links: null,              // Leaflet layer group for home-to-remote lines
     device: null,             // MAC open in the device drawer
     booted: false,
@@ -53,6 +56,8 @@ async function api(path, opts = {}) {
 // Per-browser preferences (layout, toggles); every access survives a blocked or private storage.
 function lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } }
+// A dedicated Sky-Spy drone node reports its build stamp with an "S" suffix.
+function isSkySpy(n) { return !!(n && n.cfg && /S$/.test(String(n.cfg.fw || "").trim())); }
 function nodeById(id) { return S.fleet.nodes.find((n) => n.id === id); }
 function nodeName(id) {
     const n = nodeById(id);
@@ -61,6 +66,13 @@ function nodeName(id) {
 function devAlias(mac, fallback) {
     const a = S.macAliases[mac];
     return (a && a.alias) || fallback || "";
+}
+// The name a device gives itself over the air (BLE local name, an AP's SSID).
+function devName(mac, fallback) { return S.deviceNames[mac] || fallback || ""; }
+function devGroup(mac) { return S.groupOf[mac] || null; }
+function groupTag(mac) {
+    const g = devGroup(mac);
+    return g ? `<span class="gtag" style="--gh:${g.color ?? 280}">${esc(g.name)}</span>` : "";
 }
 function metres(a, b) {
     return map.distance([a.lat, a.lon], [b.lat, b.lon]);
@@ -285,6 +297,7 @@ function renderNodes() {
                 <span class="node-tags">
                     ${n.cfg && n.cfg.buzzer === 0 ? `<span class="ntag muted" title="Buzzer muted">MUTED</span>` : ""}
                     ${syncState(n) === "drift" ? `<span class="ntag drift" title="Filter list differs from the home node">DRIFT</span>` : ""}
+                    ${isSkySpy(n) ? `<span class="ntag sky" title="Dedicated Sky-Spy drone node (Remote ID)">SKY-SPY</span>` : ""}
                 </span>
                 <span class="role ${role}">${role}</span>
             </div>
@@ -817,52 +830,62 @@ document.addEventListener("visibilitychange", async () => {
 // doesn't overlap a label already placed or another marker, so nodes a few
 // metres apart stay readable. Re-run after every render, zoom and pan.
 const LABEL_SIDES = ["lab-r", "lab-l", "lab-t", "lab-b"];
+// Candidate spots: each side as is, then the left/right sides stepped up and
+// down a label height at a time (a column of labels beside a tight cluster).
+function labelSpots(h) {
+    const out = LABEL_SIDES.map((side) => [side, 0]);
+    for (let k = 1; k <= 4; k++) for (const side of ["lab-r", "lab-l"]) out.push([side, k * h], [side, -k * h]);
+    return out;
+}
 function declutterLabels() {
     if (!map._loaded) return;
     const marks = Object.values(S.markers).map((m) => m.getElement() && m.getElement().querySelector(".nmark"))
         .filter(Boolean);
-    const placed = [];
     const tgts = Object.values(S.targets || {}).map((g) => g.marker.getElement() && g.marker.getElement().querySelector(".tgt"))
         .filter(Boolean);
-    // Node dots and target dots are both off limits to every label.
+    // Dots and drone markers are off limits to every label; drone labels are
+    // fixed and count as placed.
     const cores = marks.map((el) => el.querySelector(".core").getBoundingClientRect())
-        .concat(tgts.map((el) => el.querySelector(".tgt-dot").getBoundingClientRect()));
+        .concat(tgts.map((el) => el.querySelector(".tgt-dot").getBoundingClientRect()))
+        .concat([...document.querySelectorAll(".drm svg, .plm svg")].map((el) => el.getBoundingClientRect()));
+    const placed = [...document.querySelectorAll(".drm-label")].map((el) => el.getBoundingClientRect());
     const hit = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-    // selected node first, so it gets the best spot
-    marks.sort((a, b) => (b.classList.contains("sel") ? 1 : 0) - (a.classList.contains("sel") ? 1 : 0));
+    const free = (lab) => {
+        const r = lab.getBoundingClientRect();
+        const box = { left: r.left - 3, right: r.right + 3, top: r.top - 3, bottom: r.bottom + 3 };
+        return !placed.some((p) => hit(box, p)) && !cores.some((c) => hit(box, c));
+    };
+    const place = (el, lab, extraCls) => {
+        el.classList.remove("lab-compact", "lab-hidden");
+        if (extraCls) el.classList.add(extraCls);
+        const h = lab.getBoundingClientRect().height + 4;
+        for (const [side, dy] of labelSpots(h)) {
+            el.classList.remove(...LABEL_SIDES);
+            el.classList.add(side);
+            lab.style.marginTop = dy ? `${dy}px` : "";
+            if (free(lab)) return true;
+        }
+        el.classList.remove(...LABEL_SIDES);
+        lab.style.marginTop = "";
+        return false;
+    };
+    // Home and the selected node first: they get the best spots.
+    marks.sort((a, b) => ((b.classList.contains("sel") ? 2 : 0) + (b.classList.contains("home") ? 1 : 0)) -
+                         ((a.classList.contains("sel") ? 2 : 0) + (a.classList.contains("home") ? 1 : 0)));
     for (const el of marks) {
         const lab = el.querySelector(".label");
         if (!lab) continue;
-        let best = LABEL_SIDES[0];
-        for (const side of LABEL_SIDES) {
-            el.classList.remove(...LABEL_SIDES);
-            el.classList.add(side);
-            const r = lab.getBoundingClientRect();
-            const box = { left: r.left - 3, right: r.right + 3, top: r.top - 3, bottom: r.bottom + 3 };
-            if (!placed.some((p) => hit(box, p)) && !cores.some((c) => hit(box, c))) { best = side; break; }
-        }
-        el.classList.remove(...LABEL_SIDES);
-        el.classList.add(best);
-        placed.push(lab.getBoundingClientRect());
+        lab.title = lab.innerText.replace(/\n/g, " ");
+        // Full label, then name only, then dot only (the name shows on hover).
+        if (place(el, lab, null) || place(el, lab, "lab-compact")) placed.push(lab.getBoundingClientRect());
+        else { el.classList.add("lab-r", "lab-hidden"); }
     }
-    // Then the live-target labels, which yield to node labels: the first
-    // side clear of every label and dot; none clear = dot only (the label
-    // shows on hover, and the Nearest list has it all).
+    // Live-target labels yield to node labels: none clear = dot only.
     for (const el of tgts) {
         const lab = el.querySelector(".tgt-label");
         el.classList.remove("tgt-mini");
-        let best = null;
-        for (const side of LABEL_SIDES) {
-            el.classList.remove(...LABEL_SIDES);
-            el.classList.add(side);
-            const r = lab.getBoundingClientRect();
-            const box = { left: r.left - 3, right: r.right + 3, top: r.top - 3, bottom: r.bottom + 3 };
-            if (!placed.some((p) => hit(box, p)) && !cores.some((c) => hit(box, c))) { best = side; break; }
-        }
-        el.classList.remove(...LABEL_SIDES);
-        el.classList.add(best || "lab-r");
-        if (best) placed.push(lab.getBoundingClientRect());
-        else el.classList.add("tgt-mini");
+        if (place(el, lab, null)) placed.push(lab.getBoundingClientRect());
+        else { el.classList.add("lab-r", "tgt-mini"); }
     }
 }
 map.on("zoomend moveend", () => { renderLinks(); declutterLabels(); });
@@ -934,7 +957,7 @@ function hitNode(id) {
 function detHtml(d, fresh) {
     const node = nodeById(d.node);
     const home = node && node.is_home;
-    return `<div class="det ${d.is_new ? "new" : ""} ${fresh ? "fresh" : ""}" data-node="${esc(d.node)}">
+    return `<div class="det ${d.is_new ? "new" : ""} ${fresh ? "fresh" : ""}" data-node="${esc(d.node)}" data-mac="${esc(d.mac)}">
         <div class="det-top">
             <span class="det-vendor">${esc(d.descr || d.match || "UNKNOWN")}</span>
             ${d.is_new ? `<span class="tag newtag">NEW</span>` : ""}
@@ -945,6 +968,8 @@ function detHtml(d, fresh) {
         <div class="det-mid">
             <span class="det-mac" data-mac="${esc(d.mac)}">${esc(d.mac)}</span>
             ${devAlias(d.mac, d.alias) ? `<span class="mal">${esc(devAlias(d.mac, d.alias))}</span>` : ""}
+            ${devName(d.mac, d.name) ? `<span class="dname" title="Name it broadcasts">"${esc(devName(d.mac, d.name))}"</span>` : ""}
+            ${groupTag(d.mac)}
             <span class="rssi-v">${d.rssi ?? "?"} dBm</span>
             <span class="det-node ${home ? "home" : ""}">via ${esc(nodeName(d.node))}</span>
         </div>
@@ -962,9 +987,9 @@ function renderFeed() {
 }
 function wireDet(el) {
     el.onclick = (e) => {
-        const m = e.target.closest(".det-mac");
-        if (m) openDevice(m.dataset.mac);
-        else selectNode(el.dataset.node, true);
+        // The card opens the device; only the "via <node>" chip goes to the node.
+        if (e.target.closest(".det-node")) selectNode(el.dataset.node, true);
+        else openDevice(el.dataset.mac);
     };
 }
 function renderKpis() {
@@ -1417,7 +1442,7 @@ function liveTargets() {
     for (const d of rows) {
         if (now - d.ts > TARGET_WINDOW_S) break;          // newest first
         if (d.rssi == null) continue;
-        const t = by[d.mac] = by[d.mac] || { mac: d.mac, name: devAlias(d.mac, d.descr || d.match), last: d.ts, per: {}, samples: {}, dom: d.dom };
+        const t = by[d.mac] = by[d.mac] || { mac: d.mac, name: devAlias(d.mac, devName(d.mac, d.descr || d.match)), last: d.ts, per: {}, samples: {}, dom: d.dom };
         if (!t.per[d.node]) t.per[d.node] = { rssi: d.rssi, ts: d.ts };   // newest per node
         (t.samples[d.node] = t.samples[d.node] || []).push({ rssi: d.rssi, ts: d.ts });
     }
@@ -1510,6 +1535,7 @@ function renderTargets() {
 
 function onDetection(d) {
     mxOnDetection();
+    if (d.name) S.deviceNames[d.mac] = d.name;
     S.dets.unshift(d);
     S.dets.length = Math.min(S.dets.length, 300);
     renderTargets();
@@ -1829,7 +1855,7 @@ $("fwFile").onchange = async () => {
     const d = await r.json();
     if (!d.ok) { toast("bad", "Firmware not accepted", d.error); return; }
     S.firmware = d.firmware;
-    toast("good", "Firmware uploaded", `build ${d.firmware.build || d.firmware.date}, ${(d.firmware.size / 1024).toFixed(0)} KB`);
+    toast("good", "Firmware uploaded", `${d.firmware.kind === "skyspy" ? "Sky-Spy" : "detector"} build ${d.firmware.build || d.firmware.date}, ${(d.firmware.size / 1024).toFixed(0)} KB`);
     renderFirmware();
     $("fwFile").value = "";
 };
@@ -2288,7 +2314,8 @@ async function loadDevices() {
     $("vTotal").textContent = `${r.total} device${r.total === 1 ? "" : "s"}${r.total > r.rows.length ? ` (showing ${r.rows.length})` : ""}`;
     $("vBody").innerHTML = r.rows.map((d) => {
         const al = devAlias(d.mac);
-        return `<tr data-mac="${esc(d.mac)}"><td class="v">${al ? `<span class="mal">${esc(al)}</span> ` : ""}${esc(d.descr || "")}</td>
+        const nm = devName(d.mac, d.name);
+        return `<tr data-mac="${esc(d.mac)}"><td class="v">${al ? `<span class="mal">${esc(al)}</span> ` : ""}${nm ? `<span class="dname">"${esc(nm)}"</span> ` : ""}${groupTag(d.mac)}${esc(d.descr || "")}</td>
             <td>${esc(d.mac)}</td><td>${d.dom === "wifi" ? "WiFi" : "BLE"} ${esc(d.type || "")}</td><td>${d.hits}</td>
             <td>${fullTime(d.first)}</td><td>${ago(d.last)}</td><td>${d.best ?? ""}</td>
             <td class="nodes">${d.nodes.map((n) => esc(nodeName(n))).join(", ")}</td></tr>`;
@@ -2335,7 +2362,121 @@ async function openDevice(mac) {
         selectNode(el.dataset.node, true);
     });
     $("vDets").innerHTML = rows.slice(0, 60).map((d) => detHtml(d)).join("") || `<div class="empty">No sightings.</div>`;
+    renderGroupSelect(mac);
+    let info;
+    try { info = await api(`/api/devices/${encodeURIComponent(mac)}?limit=1`); } catch (e) { return; }
+    if (S.device !== mac) return;
+    if (info.name) {
+        S.deviceNames[mac] = info.name;
+        if (!a.alias) $("vTitle").textContent = info.name;
+    }
+    $("vSub").textContent = [mac, info.name && a.alias ? `"${info.name}"` : "", vendor, info.oui_vendor && info.oui_vendor !== vendor ? info.oui_vendor : ""]
+        .filter(Boolean).join(" | ");
+    $("vIntel").innerHTML = intelHtml(info);
+    $("vComp").innerHTML = compHtml(info.companions || []);
+    $("vComp").querySelectorAll("[data-open]").forEach((el) => el.onclick = () => openDevice(el.dataset.open));
+    $("vComp").querySelectorAll("[data-join]").forEach((el) => el.onclick = (e) => { e.stopPropagation(); joinGroup(mac, el.dataset.join); });
 }
+
+// What the device said over the air, merged across every report the nodes sent.
+function intelHtml(info) {
+    const it = info.intel || {};
+    const kind = info.mac_kind || {};
+    const rows = [];
+    const row = (k, v, cls) => { if (v !== undefined && v !== null && v !== "") rows.push(`<div class="ik">${k}</div><div class="iv ${cls || ""}">${v}</div>`); };
+    const keys = (o) => Object.keys(o || {}).sort((x, y) => (o[y].last || 0) - (o[x].last || 0));
+    row("Broadcast name", it.name ? `"${esc(it.name)}"` : "", "hl");
+    const names = keys(it.names).filter((n) => n !== it.name);
+    row("Earlier names", names.map((n) => `"${esc(n)}"`).join(", "));
+    row("MAC vendor (IEEE)", esc(info.oui_vendor || (kind.local ? "none: locally administered (randomized) address" : "not registered")));
+    if (it.rnd !== undefined) row("Address", it.rnd ? `random${kind.ble_random_kind ? ` (${esc(kind.ble_random_kind)})` : ""}` : "public");
+    else if (kind.local) row("Address", "locally administered (randomized)");
+    if (it.conn !== undefined) row("Connectable", it.conn ? "yes" : "no");
+    if (it.cid) row("Company ID", `0x${esc(it.cid)}${it.cid_name ? ` <span class="sub">${esc(it.cid_name)}</span>` : ""}`);
+    const cids = Object.keys(it.cids_named || {}).filter((c) => c !== it.cid);
+    if (cids.length) row("Other company IDs", cids.map((c) => `0x${esc(c)} ${esc(it.cids_named[c] || "")}`).join(", "));
+    if (it.mfr) row("Manufacturer data", `<code>${esc(it.mfr)}</code>`);
+    if (it.uuids_named) row("Service UUIDs", it.uuids_named.map((u) => `<span class="chip">0x${esc(u.uuid)}${u.name ? ` ${esc(u.name)}` : ""}</span>`).join(""));
+    if (it.uuid128) row("128-bit service", `<code>${esc(it.uuid128.replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-"))}</code>`);
+    if (it.sdata_named) row("Service data", it.sdata_named.map((u) => `<div>0x${esc(u.uuid)}${u.name ? ` ${esc(u.name)}` : ""}: <code>${esc(u.data || "(empty)")}</code></div>`).join(""));
+    if (it.app !== undefined) row("Appearance", `${esc(it.app_name || "unknown")} <span class="sub">(${it.app})</span>`);
+    if (it.tx !== undefined) row("TX power", `${it.tx} dBm`);
+    if (it.adv !== undefined) row("Advert type", ["ADV_IND (connectable)", "ADV_DIRECT_IND", "ADV_SCAN_IND", "ADV_NONCONN_IND", "SCAN_RSP"][it.adv] || it.adv);
+    // WiFi
+    if (it.frame) row("Frames heard", esc(it.frame));
+    const ssids = keys(it.ssids);
+    if (ssids.length) {
+        const ap = it.frame === "beacon" || it.frame === "probe-resp";
+        row(ap ? "Network (SSID)" : "Networks it looks for",
+            ssids.map((s) => `<span class="chip ssid" title="${it.ssids[s].n}x, last ${esc(ago(it.ssids[s].last))}">${s ? esc(s) : "<i>hidden</i>"}</span>`).join(""), "hl");
+    }
+    const aps = keys(it.aps);
+    if (aps.length) row("Joins (BSSID)", aps.map((b) => `<div><code>${esc(b)}</code>${it.aps[b].ssid ? ` "${esc(it.aps[b].ssid)}"` : ""} <span class="sub">${it.aps[b].n}x</span></div>`).join(""));
+    if (it.hidden) row("Hidden SSID", "yes");
+    if (it.sec) row("Security", esc(it.sec), it.sec === "open" || it.sec === "WEP" ? "bad" : "");
+    if (it.ch) row("Channel", it.ch);
+    if (it.phy) row("Wi-Fi standard", `802.11${esc(it.phy)}${it.rate ? ` <span class="sub">(legacy rates to ${it.rate} Mb/s)</span>` : ""}`);
+    if (it.wps) row("WPS", "on", "bad");
+    if (it.cc) row("Country", esc(it.cc));
+    if (it.vie_named) row("Vendor IEs", it.vie_named.map((v) => `<span class="chip">${esc(v.oui)}${v.name ? ` ${esc(v.name)}` : ""}</span>`).join(""));
+    const hb = it.heard_by || {};
+    const hbk = Object.keys(hb).sort((x, y) => (hb[y].best ?? -200) - (hb[x].best ?? -200));
+    if (hbk.length) row("Heard by", hbk.map((n) => `<span class="chip">${esc(nodeName(n))} ${hb[n].n}x${hb[n].best !== undefined ? `, best ${hb[n].best} dBm` : ""}</span>`).join(""));
+    if (info.intel_reports) row("Intel reports", `${info.intel_reports} <span class="sub">since ${esc(fullTime(info.intel_first))}</span>`);
+    if (!rows.length) return `<h4>Over the air</h4><div class="empty">Nothing beyond the MAC yet. Nodes on firmware with device intel report names, services and networks with each detection.</div>`;
+    return `<h4>Over the air</h4><div class="igrid">${rows.join("")}</div>`;
+}
+
+function compHtml(list) {
+    if (!list.length) return `<div class="empty">No other device has turned up with it yet.</div>`;
+    const g = devGroup(S.device);
+    return list.map((c) => {
+        const label = c.alias || c.name || c.descr || c.vendor || c.mac;
+        const pct = Math.round((c.score || 0) * 100);
+        const inMine = g && c.group && c.group.id === g.id;
+        return `<div class="comp" data-open="${esc(c.mac)}">
+            <div class="cm"><b>${esc(label)}</b>${c.name && label !== c.name ? ` <span class="dname">"${esc(c.name)}"</span>` : ""}
+                ${c.group ? `<span class="gtag" style="--gh:${c.group.color ?? 280}">${esc(c.group.name)}</span>` : ""}
+                <div class="sub">${esc(c.mac)} | ${c.dom === "wifi" ? "WiFi" : "BLE"} | together ${c.together} of ${c.occasions}x | last ${esc(ago(c.last))}</div></div>
+            <div class="cbar"><i style="width:${Math.max(4, pct)}%"></i></div>
+            ${inMine ? `<span class="sub">in group</span>` : `<button class="btn ghost" data-join="${esc(c.mac)}" title="Put both in ${g ? esc(g.name) : "a new group"}">Group</button>`}
+        </div>`;
+    }).join("");
+}
+
+function renderGroupSelect(mac) {
+    const g = devGroup(mac);
+    $("vGroup").innerHTML = `<option value="">No group</option>` +
+        S.groups.map((x) => `<option value="${x.id}" ${g && g.id === x.id ? "selected" : ""}>${esc(x.name)} (${x.members.length})</option>`).join("");
+}
+async function saveGroup(body) {
+    const r = await api("/api/groups", { method: "POST", body });
+    S.groups = r.groups; S.groupOf = r.group_of;
+    renderFeed();
+    if ($("tab-devices").classList.contains("active")) loadDevices();
+    return r;
+}
+async function newGroupFor(macs) {
+    const al = devAlias(macs[0]) || devName(macs[0]) || "";
+    const name = (prompt("Group name (an alias for all of these devices)", al ? `${al} group` : "") || "").trim();
+    if (!name) return null;
+    const hue = Math.floor(Math.random() * 360);
+    return saveGroup({ name, color: hue, add: macs });
+}
+async function joinGroup(mac, other) {
+    const g = devGroup(mac) || devGroup(other);
+    if (g) await saveGroup({ id: g.id, add: [mac, other] });
+    else await newGroupFor([mac, other]);
+    openDevice(mac);
+}
+$("vGroup").onchange = async () => {
+    const v = $("vGroup").value;
+    const g = devGroup(S.device);
+    if (v) await saveGroup({ id: Number(v), add: [S.device] });
+    else if (g) await saveGroup({ id: g.id, remove: [S.device] });
+    openDevice(S.device);
+};
+$("vGroupNew").onclick = async () => { if (await newGroupFor([S.device])) openDevice(S.device); };
 function closeDevice() { $("vDrawer").classList.remove("open"); S.device = null; }
 $("vClose").onclick = closeDevice;
 $("vSave").onclick = async () => {
@@ -2867,6 +3008,11 @@ async function boot() {
     S.dets.forEach((d) => { if (!S.macSeen[d.mac] || d.ts > S.macSeen[d.mac]) S.macSeen[d.mac] = d.ts; });
     S.hourly = st.hourly || [];
     S.macAliases = st.mac_aliases || {};
+    S.deviceNames = st.device_names || {};
+    S.groups = st.groups || [];
+    S.groupOf = st.group_of || {};
+    S.droneTags = st.drone_tags;
+    (st.drones || []).forEach((d) => { S.drones[d.mac] = d; S.droneSeen.add(d.mac); });
     S.filterMeta = st.filter_meta;
     syncTrailSlider();
     try { await loadTrails(Math.max(trailMax(), 1800)); } catch (e) { /* older server */ }
@@ -2895,6 +3041,7 @@ async function boot() {
     st.console.forEach(([ts, src, line]) => appendConsole(ts, src, line));
     loadHistory(false);
     S.booted = true;
+    renderDrones();
     renderJobs();
     renderFleetCtl();
 
@@ -2907,9 +3054,17 @@ async function boot() {
         applyFleet(S.fleet);
     });
     sock.on("det", onDetection);
-    sock.on("sighting", onSighting);
+    sock.on("sighting", (s) => { if (s.name) S.deviceNames[s.mac] = s.name; onSighting(s); });
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
+    sock.on("drone", onDrone);
+    sock.on("groups", (g) => {
+        S.groups = g.groups || [];
+        S.groupOf = g.group_of || {};
+        renderFeed();
+        if ($("tab-devices").classList.contains("active")) loadDevices();
+        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+    });
     sock.on("mac_aliases", (m) => {
         S.macAliases = m;
         renderFeed();
@@ -2982,3 +3137,248 @@ setInterval(() => {
 
 boot();
 })();
+
+// ------------------------------------------------------------------
+// drones: Remote ID from every mesh node (and Sky-Spy boards on USB)
+// ------------------------------------------------------------------
+S.drones = {};          // mac -> latest public state (drones.py _public)
+S.droneLayer = null;
+S.droneMarks = {};      // mac -> {drone, pilot, link, track, ptrack}
+S.droneOpen = null;
+S.droneSeen = new Set();
+const TAG_HUE = { unknown: 190, friendly: 140, neutral: 50, suspicious: 30, hostile: 330 };
+function droneName(d) { return d.alias || d.desc || d.id || d.mac; }
+function fmtM(v) { return v == null ? "-" : `${Math.round(v)} m`; }
+function droneIcon(d) {
+    const hue = TAG_HUE[d.tag] ?? 190;
+    const rot = d.hdg != null ? d.hdg : 0;
+    return L.divIcon({ className: "", iconSize: [0, 0], html:
+        `<div class="drm ${d.live ? "" : "stale"}" style="--h:${hue}">
+            <svg viewBox="-20 -20 40 40" style="transform:rotate(${rot}deg)">
+                <circle r="17" class="ring"/>
+                <path d="M-9-9L9 9M9-9L-9 9" class="arm"/>
+                <circle cx="-9" cy="-9" r="4.5" class="rotor"/><circle cx="9" cy="-9" r="4.5" class="rotor"/>
+                <circle cx="-9" cy="9" r="4.5" class="rotor"/><circle cx="9" cy="9" r="4.5" class="rotor"/>
+                ${d.hdg != null ? `<path d="M0-19L4-12H-4Z" class="nose"/>` : ""}
+            </svg>
+            <span class="drm-label">${esc(droneName(d))}<small>${d.hagl != null ? `${Math.round(d.hagl)} m AGL` : d.alt != null ? `${Math.round(d.alt)} m MSL` : ""}${d.spd != null ? ` | ${d.spd.toFixed(1)} m/s` : ""}</small></span>
+        </div>` });
+}
+function pilotIcon(d) {
+    const hue = TAG_HUE[d.tag] ?? 190;
+    return L.divIcon({ className: "", iconSize: [0, 0], html:
+        `<div class="plm ${d.live ? "" : "stale"}" style="--h:${hue}">
+            <svg viewBox="-12 -12 24 24"><circle cy="-5" r="4"/><path d="M-7 9c0-6 3-9 7-9s7 3 7 9z"/></svg>
+            <span class="drm-label">PILOT<small>${d.pilot_dist_m != null ? `${d.pilot_dist_m} m to drone` : ""}</small></span>
+        </div>` });
+}
+function renderDroneMap() {
+    if (!S.droneLayer) S.droneLayer = L.layerGroup().addTo(map);
+    const showP = $("drShowPilot").checked, showT = $("drShowTrack").checked;
+    const keep = new Set();
+    for (const d of Object.values(S.drones)) {
+        if (d.lat == null && d.plat == null) continue;
+        if (!d.live && d.age > 1800) continue;
+        keep.add(d.mac);
+        const m = S.droneMarks[d.mac] = S.droneMarks[d.mac] || {};
+        const hue = TAG_HUE[d.tag] ?? 190;
+        if (d.lat != null) {
+            if (!m.drone) {
+                m.drone = L.marker([d.lat, d.lon], { zIndexOffset: 900 }).addTo(S.droneLayer);
+                m.drone.on("click", () => openDrone(d.mac));
+            }
+            m.drone.setLatLng([d.lat, d.lon]).setIcon(droneIcon(d));
+        }
+        const pOk = showP && d.plat != null;
+        if (pOk) {
+            if (!m.pilot) {
+                m.pilot = L.marker([d.plat, d.plon], { zIndexOffset: 880 }).addTo(S.droneLayer);
+                m.pilot.on("click", () => openDrone(d.mac));
+            }
+            m.pilot.setLatLng([d.plat, d.plon]).setIcon(pilotIcon(d));
+        } else if (m.pilot) { S.droneLayer.removeLayer(m.pilot); m.pilot = null; }
+        if (pOk && d.lat != null) {
+            const ll = [[d.plat, d.plon], [d.lat, d.lon]];
+            if (!m.link) m.link = L.polyline(ll, { color: `hsl(${hue} 100% 60%)`, weight: 1.5, dashArray: "4 6", opacity: .9, interactive: false }).addTo(S.droneLayer);
+            else m.link.setLatLngs(ll);
+        } else if (m.link) { S.droneLayer.removeLayer(m.link); m.link = null; }
+        const tr = showT ? (d.track || []).map((p) => [p[1], p[2]]) : [];
+        if (tr.length > 1) {
+            if (!m.track) m.track = L.polyline(tr, { color: `hsl(${hue} 100% 62%)`, weight: 3, opacity: .85, interactive: false, className: "dr-track" }).addTo(S.droneLayer);
+            else m.track.setLatLngs(tr);
+        } else if (m.track) { S.droneLayer.removeLayer(m.track); m.track = null; }
+        const pt = showT && showP ? (d.ptrack || []).map((p) => [p[1], p[2]]) : [];
+        if (pt.length > 1) {
+            if (!m.ptrack) m.ptrack = L.polyline(pt, { color: `hsl(${hue} 60% 70%)`, weight: 2, opacity: .6, dashArray: "2 4", interactive: false }).addTo(S.droneLayer);
+            else m.ptrack.setLatLngs(pt);
+        } else if (m.ptrack) { S.droneLayer.removeLayer(m.ptrack); m.ptrack = null; }
+    }
+    for (const mac of Object.keys(S.droneMarks)) {
+        if (keep.has(mac)) continue;
+        for (const l of Object.values(S.droneMarks[mac])) if (l) S.droneLayer.removeLayer(l);
+        delete S.droneMarks[mac];
+    }
+    if ($("drFollow").checked) {
+        const live = Object.values(S.drones).filter((d) => d.live && d.lat != null).sort((a, b) => a.age - b.age)[0];
+        if (live) map.panTo([live.lat, live.lon], { animate: true });
+    }
+}
+function droneCard(d) {
+    const hue = TAG_HUE[d.tag] ?? 190;
+    const cells = [
+        ["Height", d.hagl != null ? `${Math.round(d.hagl)} m AGL` : fmtM(d.alt)],
+        ["Speed", d.spd != null ? `${d.spd.toFixed(1)} m/s` : "-"],
+        ["Heading", d.hdg != null ? `${Math.round(d.hdg)}&deg;` : "-"],
+        ["Climb", d.vspd != null ? `${d.vspd.toFixed(1)} m/s` : "-"],
+        ["Pilot", d.pilot_dist_m != null ? `${d.pilot_dist_m} m away` : d.plat != null ? "located" : "unknown"],
+        ["Signal", d.rssi != null ? `${d.rssi} dBm` : "-"],
+    ];
+    return `<div class="dr-card ${d.live ? "live" : "stale"}" style="--h:${hue}" data-mac="${esc(d.mac)}">
+        <div class="dr-top"><span class="dr-name">${esc(droneName(d))}</span>
+            <span class="dr-st">${esc(d.live ? (d.status || "LIVE") : `seen ${ago(d.last)}`)}</span></div>
+        <div class="dr-sub">${esc(d.ua_type || "UA type not sent")} | ${esc((d.src || "").toUpperCase())} | via ${esc(nodeName(d.closest))}</div>
+        ${d.id ? `<div class="dr-id">${esc(d.id)}</div>` : ""}
+        <div class="dr-cells">${cells.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("")}</div>
+    </div>`;
+}
+let drRenderAt = 0, drRenderTimer = null;
+function renderDrones() {
+    const now = Date.now();
+    if (now - drRenderAt < 400) { clearTimeout(drRenderTimer); drRenderTimer = setTimeout(renderDrones, 400); return; }
+    drRenderAt = now;
+    const all = Object.values(S.drones).sort((a, b) => (b.live - a.live) || (a.age - b.age));
+    const live = all.filter((d) => d.live);
+    const badge = $("droneBadge");
+    badge.hidden = !live.length;
+    badge.textContent = live.length;
+    renderDroneMap();
+    if (!$("tab-drones").classList.contains("active")) return;
+    const airborne = live.filter((d) => d.status === "Airborne").length;
+    const pilots = live.filter((d) => d.plat != null).length;
+    const hi = live.reduce((m, d) => Math.max(m, d.hagl ?? -1), -1);
+    $("drKpis").innerHTML = [["Live", live.length, live.length ? "hot" : ""], ["Airborne", airborne], ["Pilots located", pilots],
+        ["Highest", hi >= 0 ? `${Math.round(hi)} m` : "-"], ["Seen today", all.length]]
+        .map(([k, v, c]) => `<div class="hs"><div class="k">${k}</div><div class="v ${c || ""}">${v}</div></div>`).join("");
+    $("drCards").innerHTML = all.slice(0, 12).map(droneCard).join("") ||
+        `<div class="empty">No drones yet. Every node on firmware with Remote ID decodes drones (WiFi beacon, WiFi NAN and Bluetooth) and they show up here and on the map with their pilot.</div>`;
+    $("drCards").querySelectorAll(".dr-card").forEach((el) => el.onclick = () => openDrone(el.dataset.mac));
+}
+async function loadDroneTable() {
+    const r = await api("/api/drones?hours=24&track=0");
+    $("drTotal").textContent = `${r.recent.length} drone${r.recent.length === 1 ? "" : "s"}`;
+    $("drBody").innerHTML = r.recent.map((d) => `<tr data-mac="${esc(d.mac)}">
+        <td class="v">${esc(d.alias || (S.drones[d.mac] && droneName(S.drones[d.mac])) || "")}</td><td>${esc(d.mac)}</td>
+        <td><span class="dtag" style="--h:${TAG_HUE[d.tag || "unknown"]}">${esc(d.tag || "unknown")}</span></td><td>${d.n}</td>
+        <td>${fmtM(d.max_alt)}</td><td>${fullTime(d.first)}</td><td>${ago(d.last)}</td></tr>`).join("") ||
+        `<tr><td colspan="7" style="text-align:center;padding:20px">No drones in the last 24 h</td></tr>`;
+    $("drBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () => openDrone(tr.dataset.mac));
+}
+function onDrone(d) {
+    const fresh = !S.drones[d.mac] && !S.droneSeen.has(d.mac);
+    S.drones[d.mac] = d;
+    S.droneSeen.add(d.mac);
+    if (fresh && S.booted) {
+        toast("bad", "Drone detected", `${droneName(d)}${d.ua_type ? ", " + d.ua_type : ""} via ${nodeName(d.closest)}`, () => openDrone(d.mac));
+        if (S.settings && S.settings.sound) beep();
+    }
+    renderDrones();
+    if (S.droneOpen === d.mac && $("drDrawer").classList.contains("open")) fillDroneLive(d);
+}
+function fillDroneLive(d) {
+    $("drTitle").textContent = droneName(d);
+    $("drSub").textContent = [d.mac, d.ua_type, d.live ? (d.status || "live") : `last seen ${ago(d.last)}`].filter(Boolean).join(" | ");
+    const cells = [
+        ["Height AGL", fmtM(d.hagl)], ["Altitude MSL", fmtM(d.alt)], ["Baro alt", fmtM(d.altb)],
+        ["Speed", d.spd != null ? `${d.spd.toFixed(1)} m/s` : "-"], ["Climb", d.vspd != null ? `${d.vspd.toFixed(1)} m/s` : "-"],
+        ["Heading", d.hdg != null ? `${Math.round(d.hdg)}&deg;` : "-"],
+        ["Pilot distance", d.pilot_dist_m != null ? `${d.pilot_dist_m} m` : "-"], ["Signal", d.rssi != null ? `${d.rssi} dBm` : "-"],
+        ["Reports", d.reports ?? "-"],
+    ];
+    $("drStats").innerHTML = cells.map(([k, v]) => `<div class="hs"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+    const rows = [];
+    const row = (k, v, cls) => { if (v !== undefined && v !== null && v !== "") rows.push(`<div class="ik">${k}</div><div class="iv ${cls || ""}">${v}</div>`); };
+    row("Serial / UAS ID", d.id ? `<code>${esc(d.id)}</code>` : "", "hl");
+    row("ID type", esc(d.id_type || ""));
+    row("Aircraft", esc(d.ua_type || ""));
+    row("Status", esc(d.status || ""), d.status === "Emergency" ? "bad" : "");
+    row("Operator ID", d.op ? `<code>${esc(d.op)}</code>` : "");
+    row("Self description", d.desc ? `"${esc(d.desc)}"` : "");
+    row("Drone position", d.lat != null ? `${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}` : "");
+    row("Pilot position", d.plat != null ? `${d.plat.toFixed(6)}, ${d.plon.toFixed(6)}${d.op_loc ? ` <span class="sub">(${esc(d.op_loc)})</span>` : ""}` : "");
+    row("Pilot altitude", d.palt != null ? `${Math.round(d.palt)} m MSL` : "");
+    row("Broadcast over", esc({ wifi: "WiFi beacon", nan: "WiFi NAN", ble: "Bluetooth", skyspy: "Sky-Spy (USB)" }[d.src] || d.src || ""));
+    const nodes = Object.entries(d.nodes || {}).sort((a, b) => (b[1].rssi ?? -200) - (a[1].rssi ?? -200));
+    row("Heard by", nodes.map(([n, v]) => `<span class="chip">${esc(nodeName(n))} ${v.rssi ?? "?"} dBm, ${v.n}x</span>`).join(""));
+    row("First seen", esc(fullTime(d.first)));
+    $("drInfo").innerHTML = `<h4>Remote ID</h4><div class="igrid">${rows.join("")}</div>`;
+}
+function faaHtml(f) {
+    if (!f) return `<div class="empty">Not looked up.</div>`;
+    const items = (f.data && f.data.items) || f.items || [];
+    if (!items.length) return `<div class="empty">No FAA record for this serial.</div>`;
+    return items.map((it) => `<div class="igrid">${Object.entries(it).filter(([, v]) => v !== null && v !== "" && typeof v !== "object")
+        .slice(0, 14).map(([k, v]) => `<div class="ik">${esc(k)}</div><div class="iv">${esc(String(v))}</div>`).join("")}</div>`).join("<hr>");
+}
+async function openDrone(mac) {
+    S.droneOpen = mac;
+    closeDrawer();
+    $("vDrawer").classList.remove("open");
+    $("drDrawer").classList.add("open");
+    const live = S.drones[mac];
+    if (live) fillDroneLive(live);
+    let d;
+    try { d = await api(`/api/drones/${encodeURIComponent(mac)}`); } catch (e) { return; }
+    if (S.droneOpen !== mac) return;
+    fillDroneLive({ ...d, ...(S.drones[mac] || {}) });
+    if (document.activeElement !== $("drAlias")) $("drAlias").value = d.alias || "";
+    if (document.activeElement !== $("drNotes")) $("drNotes").value = d.notes || "";
+    $("drTags").innerHTML = (S.droneTags || ["unknown", "friendly", "neutral", "suspicious", "hostile"]).map((t) =>
+        `<button class="dtag ${d.tag === t ? "on" : ""}" data-tag="${t}" style="--h:${TAG_HUE[t]}">${t}</button>`).join("");
+    $("drTags").querySelectorAll("[data-tag]").forEach((b) => b.onclick = async () => {
+        await api(`/api/drones/${encodeURIComponent(mac)}`, { method: "POST", body: { tag: b.dataset.tag } });
+        openDrone(mac);
+    });
+    $("drFaa").innerHTML = faaHtml(d.faa) + (d.faa_ts ? `<div class="sub">looked up ${esc(ago(d.faa_ts))}</div>` : "");
+    $("drFaaGo").disabled = !d.id;
+    const h = (d.history || []).filter((x) => x.hagl != null || x.alt != null);
+    const ys = h.map((x) => x.hagl ?? x.alt);
+    if (ys.length > 1) {
+        const t0 = h[0].ts, t1 = h[h.length - 1].ts || t0 + 1, lo = Math.min(...ys, 0), hiY = Math.max(...ys, 10);
+        const pts = h.map((x, i) => `${((x.ts - t0) / Math.max(1, t1 - t0) * 320).toFixed(1)},${(78 - (ys[i] - lo) / (hiY - lo) * 74).toFixed(1)}`);
+        $("drAlt").innerHTML = `<polyline points="${pts.join(" ")}" class="altline"/><text x="2" y="10">${Math.round(hiY)} m</text>`;
+    } else $("drAlt").innerHTML = `<text x="2" y="44">No altitude history yet</text>`;
+}
+$("drClose").onclick = () => { $("drDrawer").classList.remove("open"); S.droneOpen = null; };
+$("drSave").onclick = async () => {
+    await api(`/api/drones/${encodeURIComponent(S.droneOpen)}`, { method: "POST", body: { alias: $("drAlias").value, notes: $("drNotes").value } });
+    toast("good", "Drone saved", $("drAlias").value || S.droneOpen);
+    openDrone(S.droneOpen);
+    loadDroneTable();
+};
+$("drAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("drSave").click(); });
+$("drFaaGo").onclick = async () => {
+    $("drFaaGo").disabled = true;
+    $("drFaa").innerHTML = `<div class="empty">Asking the FAA...</div>`;
+    const r = await api(`/api/drones/${encodeURIComponent(S.droneOpen)}/faa`, { method: "POST", body: {} }).catch((e) => ({ ok: false, error: String(e) }));
+    $("drFaa").innerHTML = r.ok ? faaHtml(r.faa) : `<div class="empty bad">${esc(r.error || "lookup failed")}</div>`;
+    $("drFaaGo").disabled = false;
+};
+$("drZoom").onclick = () => {
+    const d = S.drones[S.droneOpen];
+    if (!d) return;
+    const pts = [[d.lat, d.lon], [d.plat, d.plon]].filter((p) => p[0] != null);
+    if (pts.length > 1) map.fitBounds(pts, { padding: [60, 60], maxZoom: 18 });
+    else if (pts.length) map.setView(pts[0], Math.max(map.getZoom(), 17));
+};
+["drShowPilot", "drShowTrack"].forEach((id) => $(id).addEventListener("change", renderDroneMap));
+document.querySelector('.tab[data-tab="drones"]').addEventListener("click", () => { setTimeout(() => { renderDrones(); loadDroneTable(); }, 0); });
+setInterval(() => {
+    // age the live flags between reports
+    let changed = false;
+    for (const d of Object.values(S.drones)) {
+        d.age = (d.age || 0) + 5;
+        const live = d.age < 90;
+        if (live !== d.live) { d.live = live; changed = true; }
+    }
+    if (changed) renderDrones();
+}, 5000);

@@ -82,6 +82,14 @@ class SerialSource(Source):
 
     def _pick_port(self):
         if self.port_cfg != "auto":
+            # A pinned port follows the home's USB serial number: macOS
+            # renames /dev/cu.usbmodem* whenever the board moves to another
+            # hub slot, and the old path then never comes back.
+            pref = self.get_pref()
+            if pref:
+                for p in list_serial_ports():
+                    if p["serial"] == pref:
+                        return p["device"]
             return self.port_cfg
         now = time.time()
         cands = [p for p in list_serial_ports() if p["espressif"]

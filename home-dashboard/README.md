@@ -42,6 +42,7 @@ network links.
 | `--mqtt 192.168.1.10 --topic ouispy/detection` | Subscribe to the home node's MQTT detections |
 | `--record capture.log` | Also append every raw serial line (with a timestamp) to a file |
 | `--replay capture.log --speed 4` | Replay a recorded capture through the dashboard |
+| `--no-advertise` | Don't announce the dashboard on the LAN. By default it registers `_ouispy._tcp` over mDNS (name "OUI-SPY Mesh", LAN only) so the Tab5 wall display finds it with no address typed in |
 | `--host` / `--port` | Bind address and port (default all interfaces, port 5077). `--host 127.0.0.1` restricts it to this computer |
 
 **Linux serial permissions:** add yourself to the serial group once with
