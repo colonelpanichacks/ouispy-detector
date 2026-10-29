@@ -27,6 +27,8 @@ struct App {
     uint8_t mapPrevLayer = 0;   // shown under the new layer until its tiles arrive
     bool mapInit = false;       // centred once on the fleet
     bool mapFollow = false;     // keep the newest live drone centred
+    bool layerMenu = false;     // the map layer dropdown is open
+    bool editDrone = false;     // typing the selected drone's alias
     // detail pages
     bool detail = false;        // device detail open (M->detail.mac)
     bool editAlias = false;     // typing the device's alias

@@ -110,6 +110,8 @@ struct Drone {
     char tag[12];
     char src[8];
     char closest[7];
+    char vendor[32];      // its radio's maker (MAC OUI)
+    char maker[48];       // FAA registry: make + model (from the serial)
     double lat, lon, plat, plon;
     float alt, hagl, spd, vspd, hdg;
     bool hasPos, hasPilot, hasAlt, hasHagl, hasSpd, hasHdg;

@@ -679,6 +679,16 @@ void ingest_drone(JsonObjectConst o) {
     if (o["tag"].is<const char *>()) CPY(d->tag, o["tag"]);
     if (o["src"].is<const char *>()) CPY(d->src, o["src"]);
     if (o["closest"].is<const char *>()) CPY(d->closest, o["closest"]);
+    if (o["vendor"].is<const char *>()) CPY(d->vendor, o["vendor"]);
+    JsonVariantConst faa = o["faa"];
+    if (!faa.isNull()) {   // FAA UAS DOC answer: data.items[0] (or items[0])
+        JsonVariantConst it = faa["data"]["items"][0];
+        if (it.isNull()) it = faa["items"][0];
+        if (!it.isNull()) {
+            const char *mk = it["makeName"] | "", *md = it["modelName"] | "";
+            snprintf(d->maker, sizeof d->maker, "%s%s%s", mk, *mk && *md ? " " : "", md);
+        }
+    }
     if (o["lat"].is<double>()) d->lat = o["lat"], d->lon = o["lon"] | 0.0, d->hasPos = true;
     if (o["plat"].is<double>()) d->plat = o["plat"], d->plon = o["plon"] | 0.0, d->hasPilot = true;
     if (o["alt"].is<float>()) d->alt = o["alt"], d->hasAlt = true;

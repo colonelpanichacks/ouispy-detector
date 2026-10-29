@@ -12,6 +12,7 @@
 #include "net.h"
 #include "maptiles.h"
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include <esp_system.h>
 #include "settings.h"
 #include "ui.h"
@@ -231,6 +232,18 @@ void setup() {
 }
 
 void loop() {
+    // Watchdog: a UI loop stuck for 10 s (a freeze) restarts the device instead of
+    // leaving a dead screen; /info then reports "CRASH (task watchdog)".
+    static bool wdtOn = false;
+    if (!wdtOn) {
+        esp_task_wdt_config_t wc = {};
+        wc.timeout_ms = 10000;
+        wc.idle_core_mask = 0;
+        wc.trigger_panic = true;
+        if (esp_task_wdt_reconfigure(&wc) != ESP_OK) esp_task_wdt_init(&wc);
+        wdtOn = esp_task_wdt_add(nullptr) == ESP_OK;
+    }
+    if (wdtOn) esp_task_wdt_reset();
     serial_poll();
 
     if (kbOk) {

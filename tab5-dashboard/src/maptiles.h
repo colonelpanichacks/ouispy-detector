@@ -8,6 +8,7 @@ constexpr int TILE = 256;
 constexpr int NLAYERS = 4;
 extern const char *LAYER_IDS[NLAYERS];     // dashboard layer ids
 extern const char *LAYER_NAMES[NLAYERS];
+extern const int8_t LAYER_MAX[NLAYERS];    // each source's last real tile zoom
 
 void maptiles_start();
 // The decoded tile (row-major 256x256 rgb565), or nullptr (it is then requested). Call

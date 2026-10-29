@@ -69,7 +69,8 @@ enum HitAct : uint8_t {
     H_TAB, H_ROW, H_TARGET, H_DOM, H_NODE, H_SEARCH, H_CLEAR, H_RANGE, H_ACK, H_MUTE, H_SILENCE,
     H_HELP, H_SETUP, H_CLOSE, H_FIELD, H_SRC, H_NET, H_SAVE, H_BACK, H_REVEAL, H_RESCAN,
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
-    H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG
+    H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
+    H_LAYERMENU, H_LAYERPICK, H_DRALIAS
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -393,7 +394,10 @@ double y2lat(double y, int z) {
 
 constexpr int MX = 0, MY = TOP, MW = W, MH = H - TOP - BOT;
 constexpr int L_MAP = 11;    // scroll id: dragging the map pans it
-constexpr int ZMIN = 3, ZMAX = 19;
+constexpr int ZMIN = 3, ZMAX = 19;   // ZMAX: map_fit's limit
+constexpr int OVERZOOM = 2;          // zoom this far past a layer's last real tiles (scaled up)
+int zmax_layer() { return LAYER_MAX[A.mapLayer] + OVERZOOM; }
+double gZoomShown = 17;              // the zoom actually on screen (snapped): all screen <-> map maths
 
 const uint16_t ORANGE = rgb(0xfb923c);
 uint16_t tag_color(const char *tag) {
@@ -553,10 +557,10 @@ void apply_anchor(double zf) {
 }
 
 void map_zoom_at(int dz, int x, int y) {
-    int nz = constrain(A.mapZoom + dz, ZMIN, ZMAX);
+    int nz = constrain(A.mapZoom + dz, ZMIN, zmax_layer());
     if (nz == A.mapZoom) return;
     ZA.on = true, ZA.x = x, ZA.y = y;
-    screen_to_ll(x, y, A.mapZoomF, ZA.lat, ZA.lon);
+    screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
     A.mapZoom = nz;
     A.mapFollow = false;
     maptiles_clear_requests();
@@ -618,14 +622,17 @@ void draw_map() {
         A.mapZoomF = target;
         mapAnimating = false;
     }
-    apply_anchor(A.mapZoomF);
-    if (!mapAnimating) ZA.on = false;
     float zf = A.mapZoomF;
-    int zb = constrain((int)floorf(zf + 0.0001f), ZMIN, ZMAX);
+    int zb = constrain((int)floorf(zf + 0.0001f), ZMIN, zmax_layer());
     // Base-zoom pixels -> screen pixels, snapped to the PPA's 1/16 scale steps so every tile
     // is a whole number of pixels and neighbours meet exactly while zooming.
     double sc = round(pow(2.0, zf - zb) * 16.0) / 16.0;
     if (sc < 1.0) sc = 1.0;
+    // Everything that maps screen <-> map (the finger anchor, drags, taps) uses this same
+    // snapped zoom: mixing it with the unsnapped one slid the map under the finger.
+    gZoomShown = zb + log2(sc);
+    apply_anchor(gZoomShown);
+    if (!mapAnimating) ZA.on = false;
     double ts = TILE * sc;
     int z = zb;
     double cx = lon2x(A.mapLon, zb) * sc, cy = lat2y(A.mapLat, zb) * sc;
@@ -649,14 +656,18 @@ void draw_map() {
         for (int tx = tx0; tx <= tx1; tx++) {
             int wx = ((tx % n) + n) % n;
             int x = MX + (int)floor(tx * ts - left), y = MY + (int)floor(ty * ts - top);
-            const uint16_t *img = online ? (settled ? maptile(A.mapLayer, zb, wx, ty) : maptile_peek(A.mapLayer, zb, wx, ty)) : nullptr;
+            // Past the layer's last real zoom (kz levels): its closest tiles, scaled up.
+            int kz = max(0, zb - (int)LAYER_MAX[A.mapLayer]);
+            int zt = zb - kz;
+            const uint16_t *img = !online ? nullptr
+                : settled ? maptile(A.mapLayer, zt, wx >> kz, ty >> kz) : maptile_peek(A.mapLayer, zt, wx >> kz, ty >> kz);
             if (img) {
-                tile_blit(img, 0, wx, ty, ts, x, y);
+                tile_blit(img, kz, wx, ty, ts, x, y);
                 continue;
             }
             missing++;
             bool drawn = false;
-            for (int k = 1; k <= 3 && !drawn && zb - k >= 0; k++) {
+            for (int k = kz + 1; k <= kz + 3 && k <= 3 + OVERZOOM && !drawn && zb - k >= 0; k++) {
                 const uint16_t *anc = maptile_peek(A.mapLayer, zb - k, wx >> k, ty >> k);
                 if (anc) tile_blit(anc, k, wx, ty, ts, x, y), drawn = true;
             }
@@ -838,24 +849,46 @@ void draw_map() {
     C.clearClipRect();
     uint32_t q5 = micros();
 
-    // Info card, top left.
+    // Layer dropdown + status, top left: tap to pick the base map.
     int ix = PAD, iy = MY + 12, iw = 360, ih = 64;
-    C.fillRoundRect(ix, iy, iw, ih, 8, dim(PANEL, 0.9f));
-    C.drawRoundRect(ix, iy, iw, ih, 8, LINE2);
+    hit(ix, iy, iw, ih, H_LAYERMENU);
+    fast_round(ix, iy, iw, ih, 8, PANEL);
+    if (A.layerMenu) glow_rect(ix, iy, iw, ih, 8, ACCENT);
+    else C.drawRoundRect(ix, iy, iw, ih, 8, LINE2);
     font(F_MD);
     char b[64];
-    snprintf(b, sizeof b, "%s   z%d", LAYER_NAMES[A.mapLayer], A.mapZoom);
+    snprintf(b, sizeof b, "%s", LAYER_NAMES[A.mapLayer]);
     glow(ix + 14, iy + 20, b, ACCENT, middle_left);
+    int ax = ix + 14 + C.textWidth(b) + 14, ay = iy + 20;   // the dropdown arrow
+    if (A.layerMenu) C.fillTriangle(ax, ay + 4, ax + 12, ay + 4, ax + 6, ay - 4, ACCENT);
+    else C.fillTriangle(ax, ay - 4, ax + 12, ay - 4, ax + 6, ay + 4, ACCENT);
+    font(F_SM);
+    char zt[12];
+    snprintf(zt, sizeof zt, "zoom %d", A.mapZoom);
+    text(ix + iw - 14, iy + 20, zt, MUTED, middle_right);
     font(F_SM);
     int ld = live_drones();
     if (!online) snprintf(b, sizeof b, "map tiles come from the dashboard (Wi-Fi)");
     else if (missing) snprintf(b, sizeof b, "loading %d tiles   %d drone%s live", missing, ld, ld == 1 ? "" : "s");
     else snprintf(b, sizeof b, "%u tiles in memory   %d drone%s live", (unsigned)maptiles_cached(), ld, ld == 1 ? "" : "s");
     text(ix + 14, iy + 46, b, online ? MUTED : AMBER, middle_left);
+    if (A.layerMenu) {
+        int ly = iy + ih + 6, lh = 52;
+        fast_round(ix, ly, iw, NLAYERS * lh + 8, 8, PANEL);
+        glow_rect(ix, ly, iw, NLAYERS * lh + 8, 8, dim(ACCENT, 0.8f));
+        for (int i = 0; i < NLAYERS; i++) {
+            int yy = ly + 4 + i * lh;
+            hit(ix, yy, iw, lh, H_LAYERPICK, i);
+            bool cur = i == A.mapLayer;
+            if (cur) fast_fill(ix + 6, yy + 4, iw - 12, lh - 8, dim(ACCENT, 0.18f));
+            font(F_MD);
+            text(ix + 20, yy + lh / 2, LAYER_NAMES[i], cur ? ACCENT : TEXT, middle_left);
+        }
+    }
 
     // Controls, right edge.
     struct { const char *t; uint8_t act; bool on; } btn[] = {
-        {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false}, {"LAYER", H_LAYER, false},
+        {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false},
         {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}};
     int bw = 120, bh = 52, bx = W - PAD - bw, by = MY + 12;
     for (auto &k : btn) {
@@ -884,7 +917,8 @@ void map_warm() {
         A.mapZoomF = A.mapZoom;
     }
     auto want = [&](int z, double fracW, double fracH) {
-        if (z < ZMIN || z > ZMAX) return;
+        if (z > LAYER_MAX[A.mapLayer]) z = LAYER_MAX[A.mapLayer];   // overzoom draws the last real tiles
+        if (z < ZMIN) return;
         int n = 1 << z;
         double cx = lon2x(A.mapLon, z), cy = lat2y(A.mapLat, z);
         double hw = MW * fracW / 2, hh = MH * fracH / 2;
@@ -970,11 +1004,23 @@ void draw_drones() {
     char sub[96];
     snprintf(sub, sizeof sub, "%s   %s   %s", d.mac, d.src[0] ? d.src : "", live ? (d.status[0] ? d.status : "live") : "not heard lately");
     text(x + 18, y + 66, sub, MUTED, middle_left);
-    // SHOW ON MAP
+    // SHOW ON MAP, and the alias (tap or E to name it; saved on the dashboard).
     font(F_SM);
     int cw;
     int mx = x + w - 18 - (C.textWidth("SHOW ON MAP") + 28);
     chip(mx, y + 26, "SHOW ON MAP", ACCENT, false, &cw, H_DRONEMAP);
+    {
+        int ax0 = x + w - 18 - 300, aw = 300 - (C.textWidth("SHOW ON MAP") + 28) - 10;
+        hit(ax0, y + 66, aw, 34, net_online() ? H_DRALIAS : H_NONE);
+        fast_round(ax0, y + 66, aw, 30, 6, PANEL2);
+        if (A.editDrone) glow_rect(ax0, y + 66, aw, 30, 6, PINK);
+        else C.drawRoundRect(ax0, y + 66, aw, 30, 6, LINE2);
+        char ab[48];
+        if (A.editDrone) snprintf(ab, sizeof ab, "%s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
+        else snprintf(ab, sizeof ab, "%s", d.alias[0] ? d.alias : (net_online() ? "tap or E: name it" : "naming needs the dashboard"));
+        font(F_SM);
+        text(ax0 + 10, y + 81, fit(ab, aw - 20), A.editDrone || d.alias[0] ? PINK : FAINT, middle_left);
+    }
     // Tags.
     int tx = x + 18, ty = y + 88;
     for (int t = 0; t < 5; t++) {
@@ -1005,8 +1051,15 @@ void draw_drones() {
     }
     // Remote ID fields + a radar of its track around the pilot.
     int fy = gy + 3 * 62 + 8;
-    struct { const char *k; const char *v; } f[] = {{"SERIAL / ID", d.id}, {"OPERATOR ID", d.op}, {"DESCRIPTION", d.desc},
-                                                    {"AIRCRAFT", d.ua}};
+    // Who made it: the FAA registry's make and model for its serial, else the radio's
+    // maker from its MAC (DJI's CTA-2063 serials start with manufacturer code 1581).
+    char maker[64];
+    if (d.maker[0]) snprintf(maker, sizeof maker, "%s (FAA)", d.maker);
+    else if (!strncmp(d.id, "1581", 4)) snprintf(maker, sizeof maker, "DJI (serial code 1581)");
+    else if (d.vendor[0]) snprintf(maker, sizeof maker, "%s (radio)", d.vendor);
+    else maker[0] = 0;
+    struct { const char *k; const char *v; } f[] = {{"MAKER", maker}, {"SERIAL / ID", d.id}, {"OPERATOR ID", d.op},
+                                                    {"DESCRIPTION", d.desc}, {"AIRCRAFT", d.ua}};
     for (auto &e : f) {
         font(F_SM);
         text(gx, fy, e.k, FAINT);
@@ -2190,8 +2243,49 @@ void draw_help() {
     text(x + 24, y + h - 26, b, FAINT);
 }
 
+void tint_rect(int x, int y, int w, int h, uint16_t col, int a);
+
+// Behind the update: a field of ASCII characters morphing like plasma, dim, its colours
+// drifting through the theme's gradient (teal -> sky -> purple -> pink).
+uint16_t mix565(uint16_t a, uint16_t b, float t) {
+    int ar = a >> 11, ag = (a >> 5) & 63, ab = a & 31, br = b >> 11, bg = (b >> 5) & 63, bb = b & 31;
+    return ((int)(ar + (br - ar) * t) << 11) | ((int)(ag + (bg - ag) * t) << 5) | (int)(ab + (bb - ab) * t);
+}
+
+void ascii_plasma(float t) {
+    static const char RAMP[] = " .,:;-=+*x#%@";
+    const int nr = sizeof(RAMP) - 2;
+    const uint16_t G[] = {ACCENT, SKY, PURPLE, PINK, ACCENT};
+    const int CW = 16, CH = 22;
+    font(F_SM);
+    C.setTextDatum(middle_center);
+    char one[2] = {0, 0};
+    for (int gy = 0; gy * CH < H; gy++) {
+        for (int gx = 0; gx * CW < W; gx++) {
+            float x = gx * 0.18f, y = gy * 0.24f;
+            float cx = x - 40 * 0.18f, cy = y - 16 * 0.24f;
+            float v = sinf(x + t) + sinf(y * 1.3f - t * 1.1f) + sinf((x + y) * 0.7f + t * 0.6f) +
+                      sinf(sqrtf(cx * cx + cy * cy) * 1.6f - t * 1.7f);
+            float u = (v + 4) / 8;   // 0..1
+            int ci = (int)(u * nr + 0.5f);
+            if (ci <= 0) continue;
+            float gp = fmodf(u * 2.0f + gx * 0.01f + t * 0.05f, 1.0f) * 4;   // position on the gradient
+            int gi = (int)gp;
+            uint16_t col = dim(mix565(G[gi], G[gi + 1], gp - gi), 0.12f + 0.30f * u);
+            one[0] = RAMP[ci];
+            C.setTextColor(col);
+            C.drawString(one, gx * CW + CW / 2, gy * CH + CH / 2);
+        }
+    }
+}
+
 void draw_ota() {
-    C.fillScreen(BG);
+    ppa_fill(0, 0, W, H, BG);
+    // ~5 frames a second: flash writes slow PSRAM, and 12 full-frame redraws a second on top
+    // starved the display's scan-out (it flashed blue). Gentle motion keeps it fluid.
+    ascii_plasma(millis() / 1600.0f);
+    // A dark plate under the title and the bar keeps them crisp over the art.
+    tint_rect(W / 2 - 420, H / 2 - 110, 840, 210, BG, 200);
     font(F_BRAND_L);
     glow(W / 2, H / 2 - 60, "FIRMWARE UPDATE", ACCENT, middle_center);
     int bw = 700, bx = (W - bw) / 2, by = H / 2;
@@ -2581,6 +2675,29 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         A.help = false;
         return;
     }
+    if (A.editDrone) {   // typing the selected drone's alias
+        size_t n = strlen(A.editBuf);
+        if (kc == 0x29) A.editDrone = false;
+        else if (kc == 0x28) {
+            if (nDrone) {
+                Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
+                JsonDocument j;
+                j["alias"] = A.editBuf;
+                char body[96], path[48];
+                serializeJson(j, body, sizeof body);
+                snprintf(path, sizeof path, "/api/drones/%s", d.mac);
+                if (net_post(path, body)) strlcpy(d.alias, A.editBuf, sizeof d.alias);
+            }
+            A.editDrone = false;
+        } else if (kc == 0x2A || kc == 0x4C) { if (n) A.editBuf[n - 1] = 0; }
+        else if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\' && n + 1 < 24) A.editBuf[n] = ch, A.editBuf[n + 1] = 0;
+        return;
+    }
+    if (A.view == V_DRONES && (ch == 'e' || ch == 'E') && nDrone && net_online()) {
+        A.editDrone = true;
+        strlcpy(A.editBuf, M->drones[droneIdx[A.sel[V_DRONES]]].alias, sizeof A.editBuf);
+        return;
+    }
     if (A.detail) {
         if (A.editAlias || A.newGroup) {
             size_t n = strlen(A.editBuf);
@@ -2758,7 +2875,7 @@ static void dispatch(const Hit &h) {
         return;
     }
     switch (h.act) {
-    case H_TAB: A.view = (View)h.arg; A.searching = false; break;
+    case H_TAB: A.view = (View)h.arg; A.searching = false; A.layerMenu = false; A.editDrone = false; break;
     case H_ROW:
         // Tap a row to select it, tap it again for everything about it.
         if (A.view == V_LIVE && A.sel[V_LIVE] == h.arg && nLive) open_detail(det_at(liveIdx[h.arg])->mac);
@@ -2794,6 +2911,21 @@ static void dispatch(const Hit &h) {
         A.mapLayer = (A.mapLayer + 1) % NLAYERS;
         maptiles_clear_requests();
         toast("map: %s", LAYER_NAMES[A.mapLayer]);
+        break;
+    case H_LAYERMENU: A.layerMenu = !A.layerMenu; break;
+    case H_LAYERPICK:
+        if (h.arg != A.mapLayer) {
+            A.mapPrevLayer = A.mapLayer;
+            A.mapLayer = h.arg;
+            maptiles_clear_requests();
+        }
+        A.layerMenu = false;
+        break;
+    case H_DRALIAS:
+        if (nDrone && net_online()) {
+            A.editDrone = true;
+            strlcpy(A.editBuf, M->drones[droneIdx[A.sel[V_DRONES]]].alias, sizeof A.editBuf);
+        }
         break;
     case H_FIT: A.mapFollow = false; map_fit(); maptiles_clear_requests(); break;
     case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
@@ -2836,9 +2968,8 @@ static void dispatch(const Hit &h) {
 static void apply_drag(int dx, int dy) {
     const ScrollArea &a = T.area;
     if (a.list == L_MAP) {
-        int z = A.mapZoom;
-        A.mapLon = x2lon(T.mx0 - dx, z);
-        A.mapLat = y2lat(T.my0 - dy, z);
+        A.mapLon = x2lonf(T.mx0 - dx, gZoomShown);
+        A.mapLat = y2latf(T.my0 - dy, gZoomShown);
         A.mapFollow = false;
         return;
     }
@@ -2878,7 +3009,7 @@ void ui_press(int x, int y) {
             T.scroll = i;
             T.area = a;
             T.top0 = a.list == L_NETS ? netTop : a.list == V_TARGETS ? A.sel[V_TARGETS] / 9 : a.list == L_MAP ? 0 : A.top[a.list];
-            if (a.list == L_MAP) T.mx0 = lon2x(A.mapLon, A.mapZoom), T.my0 = lat2y(A.mapLat, A.mapZoom);
+            if (a.list == L_MAP) T.mx0 = lon2xf(A.mapLon, gZoomShown), T.my0 = lat2yf(A.mapLat, gZoomShown);
         }
     }
     if (A.help || A.settings) T.scroll = T.scroll >= 0 && T.area.list == L_NETS && A.settings ? T.scroll : -1;
@@ -2972,7 +3103,7 @@ void ui_frame() {
     }
     bool anim = (T.down && T.dragging) || millis() < flashUntil || (mapAnimating && A.view == V_MAP);
     bool pulse = live_drones() && (A.view == V_MAP || A.view == V_DRONES);
-    uint32_t period = anim ? 16 : A.otaActive ? 250 : alertShown ? 120 : pulse ? 150
+    uint32_t period = anim ? 16 : A.otaActive ? 180 : alertShown ? 120 : pulse ? 150
                     : (A.searching || A.settings || A.editAlias || A.newGroup) ? 500 : 1000;
     if (A.settings && A.autoSetup && M->usbLive) {   // a node got plugged in: no setup needed
         A.settings = false;
@@ -3058,18 +3189,18 @@ void ui_pinch(int phase, int x, int y, int dist) {
     T = {};   // whatever the first finger started is cancelled
     if (phase == 0) {
         pinching = true;
-        z0 = A.mapZoomF;
+        z0 = gZoomShown;
         d0 = max(dist, 30);
         ZA.on = true, ZA.x = x, ZA.y = y;
-        screen_to_ll(x, y, A.mapZoomF, ZA.lat, ZA.lon);
+        screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
         A.mapFollow = false;
     } else if (phase == 1 && pinching) {
-        float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)ZMAX);
+        float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)zmax_layer());
         A.mapZoomF = z;
         ZA.x = x, ZA.y = y;   // two-finger drag pans as it zooms
     } else if (phase == 2) {
         pinching = false;
-        A.mapZoom = constrain((int)lroundf(A.mapZoomF), ZMIN, ZMAX);
+        A.mapZoom = constrain((int)lroundf(A.mapZoomF), ZMIN, zmax_layer());
         maptiles_clear_requests();
     }
     dirty = true;

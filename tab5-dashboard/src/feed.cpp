@@ -31,7 +31,11 @@ struct LNode {
 };
 LNode nodes[MAXN];
 int nn = 0;
-char homeId[7] = "";
+char homeId[7] = "";    // the mesh's home node (role "home"), wherever it is
+char localId[7] = "";   // the node on our USB port: its TLM is our link view. On a
+                        // remote, the whole mesh still shows: every node prints the
+                        // status every other node floods, and relayed detections.
+char localRole[8] = "";
 String tlm;          // last TLM body (JSON)
 double tlmTs = 0;
 volatile uint32_t lastLineMs = 0;
@@ -107,14 +111,14 @@ void publish_fleet() {
             for (JsonPair kv : t.as<JsonObject>())
                 if (strcmp(kv.key().c_str(), "nodes") && strcmp(kv.key().c_str(), "strays")) home[kv.key()] = kv.value();
     }
-    home["id"] = homeId;
+    home["id"] = localId;   // link counters are the local node's own
     home["alive"] = tlmTs && now - tlmTs < HOME_TIMEOUT;
     home["age"] = tlmTs ? now - tlmTs : -1;
     home["source"] = "usb";
     // The home's filter CRC is the reference: a remote holding the same list is in sync.
     String homeCrc;
     for (int i = 0; i < nn; i++)
-        if (!strcmp(nodes[i].id, homeId) && nodes[i].cfg.length()) {
+        if (homeId[0] && !strcmp(nodes[i].id, homeId) && nodes[i].cfg.length()) {
             JsonDocument c(&psram);
             if (!deserializeJson(c, nodes[i].cfg)) homeCrc = (const char *)(c["fcrc"] | "");
         }
@@ -123,7 +127,7 @@ void publish_fleet() {
     int order[MAXN];
     for (int i = 0; i < nn; i++) order[i] = i;
     std::sort(order, order + nn, [](int a, int b) {
-        bool ha = !strcmp(nodes[a].id, homeId), hb = !strcmp(nodes[b].id, homeId);
+        bool ha = homeId[0] && !strcmp(nodes[a].id, homeId), hb = homeId[0] && !strcmp(nodes[b].id, homeId);
         if (ha != hb) return ha;
         if (nodes[a].online != nodes[b].online) return nodes[a].online;
         return strcmp(nodes[a].id, nodes[b].id) < 0;
@@ -131,10 +135,11 @@ void publish_fleet() {
     for (int k = 0; k < nn; k++) {
         LNode &n = nodes[order[k]];
         JsonObject o = arr.add<JsonObject>();
-        bool isHome = !strcmp(n.id, homeId);
+        bool isHome = homeId[0] && !strcmp(n.id, homeId);
+        bool isLocal = !strcmp(n.id, localId);
         o["id"] = n.id;
         o["role"] = isHome ? "home" : n.role;
-        o["online"] = isHome ? (bool)home["alive"] : n.online;
+        o["online"] = isLocal ? (bool)home["alive"] : n.online;
         o["is_home"] = isHome;
         if (n.rssi) o["rssi"] = n.rssi;
         o["age"] = n.lastSeen ? now - n.lastSeen : -1;
@@ -158,15 +163,20 @@ void on_tlm(const char *body) {
     if (deserializeJson(t, body)) return;
     double now = now_s();
     const char *id = t["id"] | "";
-    if (*id) strlcpy(homeId, id, sizeof homeId);
+    const char *role = t["role"] | "";
+    if (*id) strlcpy(localId, id, sizeof localId);
+    strlcpy(localRole, role, sizeof localRole);
+    if (!strcmp(role, "home")) strlcpy(homeId, localId, sizeof homeId);
     tlm = body;
     tlmTs = now;
-    node_seen(homeId, t["role"] | "home", now);
+    node_seen(localId, *role ? role : "remote", now);
     bool inRoster[MAXN] = {};
     for (JsonObjectConst r : t["nodes"].as<JsonArrayConst>()) {
         const char *nid = r["id"] | "";
         if (strlen(nid) != 6) continue;
-        node_seen(nid, r["role"] | "", now - (r["last"] | 0));
+        const char *rr = r["role"] | "";
+        if (!strcmp(rr, "home")) strlcpy(homeId, nid, sizeof homeId);   // plugged into a remote: the roster names the home
+        node_seen(nid, rr, now - (r["last"] | 0));
         LNode *n = node_get(nid, false);
         if (!n) continue;
         n->pkts = r["pkts"] | 0;
@@ -176,7 +186,7 @@ void on_tlm(const char *body) {
     }
     // TLM is authoritative: anyone not in the roster has dropped.
     for (int i = 0; i < nn; i++)
-        if (!inRoster[i] && strcmp(nodes[i].id, homeId)) nodes[i].online = false;
+        if (!inRoster[i] && strcmp(nodes[i].id, localId)) nodes[i].online = false;
     publish_fleet();
 }
 
@@ -189,8 +199,8 @@ void on_rst(const char *body) {
     if (!n) return;
     n->cfg = body;
     const char *role = c["role"] | "";
-    if (!strcmp(role, "home") && !homeId[0]) strlcpy(homeId, nid, sizeof homeId);
-    if (strcmp(nid, homeId)) node_seen(nid, role, now_s());
+    if (!strcmp(role, "home")) strlcpy(homeId, nid, sizeof homeId);
+    if (strcmp(nid, localId)) node_seen(nid, role, now_s());
     publish_fleet();
 }
 
@@ -249,7 +259,7 @@ void on_detection(const char *body) {
         descr = descr.substring(0, tag);
     }
     descr.trim();
-    if (!node.length()) node = homeId[0] ? homeId : "HOME";
+    if (!node.length()) node = localId[0] ? localId : "HOME";   // no tag: our own node heard it
     node.toUpperCase();
     const char *type = d["type"] | "";
     String dom = (const char *)(d["dom"] | "");
@@ -304,7 +314,7 @@ void on_line(char *line) {
     else if (!strncmp(line, "RID ", 4)) {   // a drone's Remote ID, from this node or relayed
         if (local()) {
             JsonDocument d(&psram);
-            if (!deserializeJson(d, line + 4)) ingest_rid(d.as<JsonObjectConst>(), homeId);
+            if (!deserializeJson(d, line + 4)) ingest_rid(d.as<JsonObjectConst>(), localId);
         }
     }
     else if (!strncmp(line, "DET ", 4) && strstr(line, "\"mac\"")) on_detection(line + 4);
@@ -358,9 +368,7 @@ void feed_task(void *) {
             lastStatus = ms;
             usb_send("status");
         }
-        bool isHome = homeId[0] && nn && !strcmp(nodes[0].role, "home");
-        for (int i = 0; i < nn; i++)
-            if (!strcmp(nodes[i].id, homeId)) isHome = !strcmp(nodes[i].role, "home");
+        bool isHome = !strcmp(localRole, "home");   // only a home can ask the others for status
         if (isHome && (nn > knownNodes ? ms - lastRstatus > 20000 : ms - lastRstatus > 300000)) {
             lastRstatus = ms;
             knownNodes = nn;
