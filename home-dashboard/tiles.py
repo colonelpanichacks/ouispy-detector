@@ -5,6 +5,9 @@ from then on, so areas you have looked at stay available offline."""
 import os
 import threading
 import urllib.request
+from io import BytesIO
+
+from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, "tilecache")
@@ -27,8 +30,11 @@ def tile(layer, z, x, y):
     L = LAYERS[layer]
     if not (0 <= z <= L["max"] and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
         raise KeyError("tile out of range")
-    path = os.path.join(CACHE, layer, str(z), str(x), f"{y}.{L['ext']}")
-    mime = "image/jpeg" if L["ext"] == "jpg" else "image/png"
+    # PNG layers are cached and served as JPEG: the Tab5's on-device PNG decoder
+    # (lgfx, palette PNGs) hard-crashes its loader task; JPEG decode is proven.
+    ext = "jpg" if L["ext"] == "png" else L["ext"]
+    path = os.path.join(CACHE, layer, str(z), str(x), f"{y}.{ext}")
+    mime = "image/jpeg" if ext == "jpg" else "image/png"
     if os.path.exists(path):
         with open(path, "rb") as f:
             return f.read(), mime
@@ -40,6 +46,17 @@ def tile(layer, z, x, y):
             req = urllib.request.Request(url, headers={"User-Agent": UA})
             with urllib.request.urlopen(req, timeout=15) as r:
                 data = r.read()
+            if L["ext"] == "jpg" and len(data) < 10_000:
+                # Esri answers gap/over-zoom requests with a 200 "Map data not yet
+                # available" placeholder; caching it would poison this area forever.
+                with _glock:
+                    _locks.pop(path, None)
+                return data, mime
+            if L["ext"] == "png":
+                im = Image.open(BytesIO(data)).convert("RGB")
+                out = BytesIO()
+                im.save(out, "JPEG", quality=88)
+                data = out.getvalue()
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
             with open(tmp, "wb") as f:
@@ -78,7 +95,8 @@ def prewarm(points, layer="esri-sat", radius_m=700, zmin=12, zmax=19, pause=0.05
         xb, yb = _deg2tile(lat0 - dlat, lon1 + dlon, z)
         for x in range(xa, xb + 1):
             for y in range(ya, yb + 1):
-                path = os.path.join(CACHE, layer, str(z), str(x), f"{y}.{LAYERS[layer]['ext']}")
+                ext = "jpg" if LAYERS[layer]["ext"] == "png" else LAYERS[layer]["ext"]
+                path = os.path.join(CACHE, layer, str(z), str(x), f"{y}.{ext}")
                 if os.path.exists(path):
                     continue
                 try:

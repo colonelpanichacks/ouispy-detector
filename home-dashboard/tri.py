@@ -71,8 +71,11 @@ class Tri:
                 continue
             xs = [x - (m["offsets"] or {}).get(nid, 0) for x in xs]
             mean = sum(xs) / len(xs)
-            nodes.append({"id": nid, "lat": pos[0], "lon": pos[1], "rssi": mean, "k": min(TRI_K_MAX, len(xs))})
-        base = {"mac": mac, "ok": False, "cal": dm["cal"], "n": len(nodes)}
+            nodes.append({"id": nid, "lat": pos[0], "lon": pos[1], "rssi": mean, "k": min(TRI_K_MAX, len(xs)),
+                          "d": 10 ** ((dm["p0"] - mean) / (10 * dm["n"]))})
+        base = {"mac": mac, "ok": False, "cal": dm["cal"], "n": len(nodes),
+                # each node's distance estimate (m): the range circles of the device being inspected
+                "nodes": [{"id": n["id"], "d": round(n["d"], 1)} for n in nodes]}
         if len(nodes) < 3:
             return {**base, "why": f"heard by {len(nodes)} of the 3 nodes needed"}
         lat0, lon0 = nodes[0]["lat"], nodes[0]["lon"]

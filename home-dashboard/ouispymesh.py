@@ -249,7 +249,10 @@ def _node_pos(nid):
 
 fleet.tri = tri_mod.Tri(lambda: store.all_settings(), _node_pos)
 sources = {}
-src_lock = threading.Lock()
+# Re-entrant: a source reports its status while being registered (set_state ->
+# on_source_status -> sources_status), and a plain Lock held by that same thread
+# deadlocked the whole app (every /api/state then queued behind it).
+src_lock = threading.RLock()
 
 
 def command_sender():
@@ -1086,9 +1089,10 @@ def on_bridge_hello(data):
     if _bridge():
         return
     dev = str((data or {}).get("dev", ""))[:16]
+    src = BridgeSource(fleet, on_source_status, request.sid, dev)   # built outside the lock
     with src_lock:
         old = sources.pop("bridge", None)
-        src = sources["bridge"] = BridgeSource(fleet, on_source_status, request.sid, dev)
+        sources["bridge"] = src
     if old:
         old.stop()
     src.start()
@@ -1204,6 +1208,10 @@ def _prewarm_tiles():
 
 
 if __name__ == "__main__":
+    # kill -USR1 <pid> writes every thread's stack to the log: how to see a hang.
+    import faulthandler
+    import signal as _signal
+    faulthandler.register(_signal.SIGUSR1, all_threads=True)
     refresh_access()
     start_sources()
     commander.start()

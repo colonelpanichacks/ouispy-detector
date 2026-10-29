@@ -3286,7 +3286,7 @@ function onDrone(d) {
 }
 function fillDroneLive(d) {
     $("drTitle").textContent = droneName(d);
-    $("drSub").textContent = [d.mac, d.ua_type, d.live ? (d.status || "live") : `last seen ${ago(d.last)}`].filter(Boolean).join(" | ");
+    $("drSub").textContent = [d.mac, d.vendor, d.ua_type, d.live ? (d.status || "live") : `last seen ${ago(d.last)}`].filter(Boolean).join(" | ");
     const cells = [
         ["Height AGL", fmtM(d.hagl)], ["Altitude MSL", fmtM(d.alt)], ["Baro alt", fmtM(d.altb)],
         ["Speed", d.spd != null ? `${d.spd.toFixed(1)} m/s` : "-"], ["Climb", d.vspd != null ? `${d.vspd.toFixed(1)} m/s` : "-"],
@@ -3300,6 +3300,8 @@ function fillDroneLive(d) {
     row("Serial / UAS ID", d.id ? `<code>${esc(d.id)}</code>` : "", "hl");
     row("ID type", esc(d.id_type || ""));
     row("Aircraft", esc(d.ua_type || ""));
+    row("Vendor (MAC OUI)", esc(d.vendor || ""));
+    row("FAA DOC", d.faa ? (() => { const it = ((d.faa.data || {}).items || d.faa.items || [])[0]; return it ? esc([it.makeName, it.modelName].filter(Boolean).join(" ")) + (it.status ? ` (${esc(it.status)})` : "") : ""; })() : "");
     row("Status", esc(d.status || ""), d.status === "Emergency" ? "bad" : "");
     row("Operator ID", d.op ? `<code>${esc(d.op)}</code>` : "");
     row("Self description", d.desc ? `"${esc(d.desc)}"` : "");

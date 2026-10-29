@@ -9,8 +9,11 @@ Per drone: the latest merged fields, the flight track, the pilot track, which
 nodes heard it, plus dashboard-side alias / tag / FAA record (SQLite).
 """
 import json
+import queue
 import threading
 import time
+
+from lookups import oui_vendor
 
 UA_TYPES = ["None", "Aeroplane", "Multirotor / helicopter", "Gyroplane", "Hybrid lift (VTOL)",
             "Ornithopter", "Glider", "Kite", "Free balloon", "Captive balloon", "Airship",
@@ -49,6 +52,8 @@ CREATE TABLE IF NOT EXISTS drone_meta (
 LIVE_S = 90          # "in the air now"
 TRACK_KEEP = 600     # points kept per drone in memory
 STORE_EVERY_S = 2.0  # one stored report per drone per this many seconds
+FAA_ID_TYPES = {1, 2}   # CTA-2063 serial / CAA registration: what the FAA indexes
+FAA_RETRY_S = 3600      # a failed lookup (network) tries again in an hour
 
 
 def _num(v, bad=None, lo=None, hi=None):
@@ -114,6 +119,10 @@ class Drones:
         self.emit = emit
         self.lock = threading.Lock()
         self.live = {}       # mac -> state
+        self._faa_q = queue.Queue()
+        self._faa_seen = {}  # mac -> ts of the last lookup attempt (failures retry)
+        self._faa_air = set()  # macs with a lookup in flight
+        threading.Thread(target=self._faa_worker, name="faa-lookup", daemon=True).start()
         with store.lock:
             store.db.executescript(SCHEMA)
             store.db.commit()
@@ -129,7 +138,8 @@ class Drones:
             s = self.live.get(d["mac"])
             if not s:
                 s = self.live[d["mac"]] = {"mac": d["mac"], "first": now, "track": [], "ptrack": [],
-                                           "nodes": {}, "stored": 0, "reports": 0}
+                                           "nodes": {}, "stored": 0, "reports": 0,
+                                           "vendor": oui_vendor(d["mac"]) or None}
                 meta = self._meta(d["mac"])
                 s.update({"alias": meta.get("alias") or "", "tag": meta.get("tag") or "unknown",
                           "notes": meta.get("notes") or "", "faa": meta.get("faa"),
@@ -162,7 +172,34 @@ class Drones:
             is_new = s["reports"] == 1
         if store_now:
             self._save(d, node, now, is_new)
+        if d.get("id") and d.get("idt") in FAA_ID_TYPES:
+            self._maybe_faa(d["mac"], d["id"])
         self.emit("drone", out)
+
+    # ---------------- FAA UAS DOC lookup ----------------
+    # A drone with a CTA-2063 serial or CAA registration gets looked up in the
+    # FAA's public UAS DOC registry once, in the background; the record rides the
+    # drone payload (faa / faa_ts) to every display. Failures retry in an hour.
+    def _maybe_faa(self, mac, serial):
+        now = time.time()
+        if mac in self._faa_air or now - self._faa_seen.get(mac, 0) < FAA_RETRY_S:
+            return
+        with self.lock:
+            if self.live.get(mac, {}).get("faa"):
+                return
+        self._faa_seen[mac] = now
+        self._faa_air.add(mac)
+        self._faa_q.put((mac, serial))
+
+    def _faa_worker(self):
+        while True:
+            mac, serial = self._faa_q.get()
+            try:
+                self.set_meta(mac, faa=faa_lookup(serial) or {"records": []})
+            except Exception:
+                pass   # the attempt timestamp stays: _maybe_faa retries after FAA_RETRY_S
+            finally:
+                self._faa_air.discard(mac)
 
     def _save(self, d, node, now, is_new):
         st = self.store
@@ -286,7 +323,7 @@ class Drones:
 
 def faa_lookup(serial):
     """FAA UAS DOC serial-number lookup (the same public endpoint mesh-mapper
-    uses). Online and on demand only: never called automatically."""
+    uses). Called automatically for drones with a serial-type Remote ID."""
     import urllib.parse
     import urllib.request
     import http.cookiejar
