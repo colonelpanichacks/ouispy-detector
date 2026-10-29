@@ -76,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -501,6 +501,8 @@ double y2lat(double y, int z) {
 
 constexpr int MX = 0, MY = TOP, MW = W, MH = H - TOP - BOT;
 constexpr int L_MAP = 11;    // scroll id: dragging the map pans it
+constexpr int L_OVF = 12, L_OVL = 13;   // Overview's fleet column and live feed scroll
+int ovFleetTop = 0, ovLiveTop = 0;
 constexpr int ZMIN = 3, ZMAX = 19;   // ZMAX: map_fit's limit
 constexpr int OVERZOOM = 2;          // zoom this far past a layer's last real tiles (scaled up)
 int zmax_layer() { return LAYER_MAX[A.mapLayer] + OVERZOOM; }
@@ -1801,6 +1803,14 @@ void drone_set_tag(int t) {
 // ------------------------------------------------------------------ chrome
 
 const char *TABS[V_COUNT] = {"OVERVIEW", "FLEET", "LIVE", "TARGETS", "MAP", "DRONES", "METRICS"};
+// The tabs on the bar, in order (Targets is gone: Live and the map cover it).
+const View SHOWN[] = {V_OVERVIEW, V_FLEET, V_LIVE, V_MAP, V_DRONES, V_METRICS};
+constexpr int NSHOWN = sizeof(SHOWN) / sizeof(SHOWN[0]);
+View next_tab(int dir) {   // the tab beside the current one, on the bar
+    int k = 0;
+    for (int i = 0; i < NSHOWN; i++) if (SHOWN[i] == A.view) k = i;
+    return SHOWN[(k + dir + NSHOWN) % NSHOWN];
+}
 
 // ------------------------------------------------------------------ cached bands
 // The top and bottom bars change at most once a second but cost ~19 ms a frame to draw
@@ -1912,15 +1922,16 @@ void draw_top() {
     int tabsR = x - C.textWidth("00:00:00") - 18;
 
     // Tabs share what's left evenly; labels shrink to fit if they ever have to.
-    int tw = (tabsR - tabsL) / V_COUNT;
-    // One font for all five, so they always match.
+    int tw = (tabsR - tabsL) / NSHOWN;
+    // One font for all of them, so they always match.
     const lgfx::IFont *tf = F_MD;
     font(F_MD);
-    for (int i = 0; i < V_COUNT; i++) {
-        if (C.textWidth(TABS[i]) > tw - 6) tf = F_SM;
+    for (int k = 0; k < NSHOWN; k++) {
+        if (C.textWidth(TABS[SHOWN[k]]) > tw - 6) tf = F_SM;
     }
-    for (int i = 0; i < V_COUNT; i++) {
-        int tx = tabsL + i * tw;
+    for (int k = 0; k < NSHOWN; k++) {
+        int i = SHOWN[k];
+        int tx = tabsL + k * tw;
         bool on = A.view == i;
         hit(tx, 0, tw, TOP, H_TAB, i);
         const char *label = TABS[i];
@@ -2111,32 +2122,47 @@ void draw_overview() {
     // Fleet column.
     int fy = y + th + 12, fw = 500, fh = CB - fy;
     panel(PAD, fy, fw, fh, "FLEET");
-    int rh = 74, ry = fy + 34;
-    for (int i = 0; i < M->nnodes && ry + rh <= fy + fh; i++, ry += rh) {
+    // Three lines a node: name | status; type + id | link; filters + firmware. Drag to scroll.
+    int rh = 86, ry = fy + 34, vis = max(1, (fh - 40) / rh);
+    ovFleetTop = constrain(ovFleetTop, 0, max(0, M->nnodes - vis));
+    scroll_area(PAD, ry, fw, vis * rh, L_OVF, rh, vis);
+    for (int k = 0; k < vis; k++, ry += rh) {
+        int i = ovFleetTop + k;
+        if (i >= M->nnodes) break;
         const Node &n = M->nodes[i];
         uint16_t nc = node_color565(n.id);
         hit(PAD + 8, ry, fw - 16, rh - 2, H_NODEROW, i);   // tap: to Fleet; hold: its settings
-        C.fillRoundRect(PAD + 12, ry + 6, 5, rh - 14, 2, n.online ? nc : dim(nc, 0.35f));
-        font(F_LG);
-        text(PAD + 30, ry + 6, fit_name(n.alias[0] ? n.alias : n.id, 220), n.online ? TEXT : MUTED);
-        font(F_SM);
-        char l2[64];
-        int kw = kind_label(PAD + 30, ry + 46, n);
-        snprintf(l2, sizeof l2, "%s   fw %s", n.id, n.fw[0] ? n.fw : "?");
-        text(PAD + 30 + kw + 12, ry + 46, l2, FAINT, middle_left);
-        // Status + RSSI on the right.
+        C.fillRoundRect(PAD + 12, ry + 8, 5, rh - 18, 2, n.online ? nc : dim(nc, 0.35f));
         int rx = PAD + fw - 16;
+        // 1: name, status
         const char *st = n.online ? "ONLINE" : "OFFLINE";
         font(F_SM);
-        text(rx, ry + 14, st, n.online ? ACCENT : RED, middle_right);
-        dot(rx - C.textWidth(st) - 12, ry + 14, 4, n.online ? ACCENT : RED);
+        int sw = C.textWidth(st);
+        text(rx, ry + 18, st, n.online ? ACCENT : RED, middle_right);
+        dot(rx - sw - 12, ry + 18, 4, n.online ? ACCENT : RED);
+        font(F_LG);
+        text(PAD + 30, ry + 18, fit_name(n.alias[0] ? n.alias : n.id, fw - 90 - sw - 40), n.online ? TEXT : MUTED, middle_left);
+        // 2: firmware type + id, link signal
+        font(F_SM);
+        int kw = kind_label(PAD + 30, ry + 46, n);
+        text(PAD + 30 + kw + 14, ry + 46, n.id, FAINT, middle_left);
         int rssi = n.isHome ? n.lrssi : n.rssi;
         char rs[16];
         snprintf(rs, sizeof rs, rssi ? "%d" : "--", rssi);
-        rssi_bar(rx - 150, ry + 34, 100, 8, rssi, rssi_color(rssi));
-        text(rx, ry + 38, rs, rssi_color(rssi), middle_right);
-        filters_cell(PAD + 30, ry + 62, n, true);
-        if (i + 1 < M->nnodes) C.drawFastHLine(PAD + 12, ry + rh - 1, fw - 24, LINE);
+        font(F_SM);
+        text(rx, ry + 46, rs, rssi_color(rssi), middle_right);
+        rssi_bar(rx - 140, ry + 42, 96, 8, rssi, rssi_color(rssi));
+        // 3: filters, firmware build
+        filters_cell(PAD + 30, ry + 70, n, true);
+        font(F_SM);
+        char fwb[32];
+        snprintf(fwb, sizeof fwb, "fw %s", n.fw[0] ? n.fw : "?");
+        text(rx, ry + 70, fwb, FAINT, middle_right);
+        if (k + 1 < vis && i + 1 < M->nnodes) C.drawFastHLine(PAD + 12, ry + rh - 1, fw - 24, LINE);
+    }
+    if (M->nnodes > vis) {   // more than fit: a slim scroll bar
+        int th = fh - 40, bh = max(24, th * vis / M->nnodes), by = fy + 34 + (th - bh) * ovFleetTop / max(1, M->nnodes - vis);
+        C.fillRoundRect(PAD + fw - 6, by, 3, bh, 1, dim(ACCENT, 0.6f));
     }
     if (!M->nnodes) {
         font(F_MD);
@@ -2154,11 +2180,18 @@ void draw_overview() {
     text(cMac, hy, "MAC", FAINT);
     text(cRssi, hy, "RSSI", FAINT);
     text(cNode, hy, "NODE / CLOSEST", FAINT);
-    int row = 30, yy = hy + 20;
-    for (int i = 0; i < M->ndets && yy + row <= fy + lh - 4; i++, yy += row) {
+    int row = 30, yy = hy + 20, lvis = max(1, (fy + lh - 4 - yy) / row);
+    ovLiveTop = constrain(ovLiveTop, 0, max(0, M->ndets - lvis));
+    scroll_area(lx, yy, lw, lvis * row, L_OVL, row, lvis);
+    if (M->ndets > lvis) {
+        int th = lvis * row, bh = max(20, th * lvis / M->ndets), by = yy + (th - bh) * ovLiveTop / max(1, M->ndets - lvis);
+        C.fillRoundRect(lx + lw - 6, by, 3, bh, 1, dim(ACCENT, 0.6f));
+    }
+    for (int i = ovLiveTop; i < M->ndets && yy + row <= fy + lh - 4; i++, yy += row) {
         const Det *d = det_at(i);
         bool muted = mac_muted(d->mac);
         if (i == 0 && server_now() - d->ts < 10) C.fillRect(lx + 4, yy, lw - 8, row - 2, dim(PINK, 0.08f));
+        hit(lx + 4, yy, lw - 12, row, H_OVDET, i);   // tap: the device's details
         font(F_MD);
         text(cAge, yy + row / 2, age_str(d->ts), MUTED, middle_left);
         text(cVen, yy + row / 2, fit_name(vendor_of(d), 206), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
@@ -2210,8 +2243,9 @@ void draw_fleet() {
     int y = CY, rows = 6, rh = 62, th = 36 + rows * rh;
     panel(PAD, y, W - 2 * PAD, th + 8, "FLEET");
     clamp_sel(V_FLEET, rows);
-    const int cx[] = {PAD + 24, PAD + 262, PAD + 372, PAD + 522, PAD + 716, PAD + 796, PAD + 980, PAD + 1140};
-    const char *hd[] = {"NODE", "ROLE", "STATUS", "LINK RSSI", "NBR", "FIRMWARE", "FILTERS / CRC", ""};
+    // Columns sized to what they hold: TYPE fits "[home] WARDRIVER", FIRMWARE a full build stamp.
+    const int cx[] = {PAD + 24, PAD + 252, PAD + 432, PAD + 566, PAD + 718, PAD + 778, PAD + 968, PAD + 1140};
+    const char *hd[] = {"NODE", "TYPE", "STATUS", "LINK RSSI", "NBR", "FIRMWARE", "FILTERS / CRC", ""};
     font(F_SM);
     for (int i = 0; i < 7; i++) text(cx[i], y + 34, hd[i], FAINT);
     text(W - PAD - 24, y + 34, "UPTIME", FAINT, top_right);
@@ -2231,7 +2265,7 @@ void draw_fleet() {
         int my = ry + (rh - 6) / 2;
         C.fillRoundRect(PAD + 12, ry + 8, 5, rh - 22, 2, n.online ? nc : dim(nc, 0.35f));
         font(F_LG);
-        text(cx[0], my - 10, fit_name(n.alias[0] ? n.alias : n.id, 240), n.online ? TEXT : MUTED, middle_left);
+        text(cx[0], my - 10, fit_name(n.alias[0] ? n.alias : n.id, cx[1] - cx[0] - 16), n.online ? TEXT : MUTED, middle_left);
         font(F_SM);
         text(cx[0], my + 14, n.id, FAINT, middle_left);
         font(F_MD);
@@ -2246,11 +2280,11 @@ void draw_fleet() {
         snprintf(seen, sizeof seen, "seen %s ago", n.age >= 0 ? age_str(server_now() - n.age) : "-");
         text(cx[2] + 20, my + 12, seen, FAINT, middle_left);
         int rssi = n.isHome ? n.lrssi : n.rssi;
-        rssi_bar(cx[3], my - 4, 120, 10, rssi, rssi_color(rssi));
+        rssi_bar(cx[3], my - 4, 90, 10, rssi, rssi_color(rssi));
         char rs[12];
         snprintf(rs, sizeof rs, rssi ? "%d" : "--", rssi);
         font(F_MD);
-        text(cx[3] + 132, my, rs, rssi_color(rssi), middle_left);
+        text(cx[3] + 100, my, rs, rssi_color(rssi), middle_left);
         snprintf(rs, sizeof rs, n.lrssi ? "%d" : "--", n.lrssi);
         text(cx[4], my, rs, rssi_color(n.lrssi), middle_left);
         text(cx[5], my, n.fw[0] ? n.fw : "?", n.fw[0] ? TEXT : FAINT, middle_left);
@@ -2349,7 +2383,8 @@ void draw_filter_row(int y, int shown, int total) {
     static const char *KF[] = {"ALL TYPES", "DETECTORS", "SKY-SPY", "WARDRIVERS"};
     chip(x, y + 4, KF[A.kindFilter % 4], A.kindFilter ? kind_color(A.kindFilter - 1) : ACCENT, A.kindFilter != 0, &w, H_KIND);
     x += w + 16;
-    if (A.search[0] || A.dom || A.node[0] || A.kindFilter) chip(x, y + 4, "CLEAR", AMBER, false, &w, H_CLEAR);
+    if (A.search[0] || A.dom || A.node[0] || A.kindFilter) chip(x, y + 4, "CLEAR", AMBER, false, &w, H_CLEAR), x += w + 8;
+    if (A.view == V_LIVE) chip(x, y + 4, A.liveZoomLock ? "ZOOM LOCKED" : "ZOOM: PINCH", SKY, A.liveZoomLock, &w, H_ZLOCK);
     char c[32];
     snprintf(c, sizeof c, "%d of %d", shown, total);
     font(F_MD);
@@ -2406,16 +2441,15 @@ void draw_live_wardrive() {
     };
     std::sort(wdIdx, wdIdx + wdN, [&](int a, int b) { int c = key(a, b); return A.liveSortRev ? c > 0 : c < 0; });
     draw_filter_row(CY, wdN, wd_count());
-    int ty = CY + 50, rh = 34, rows = (CB - ty - 40) / rh, th = 34 + rows * rh + 6;
-    panel(PAD, ty, W - 2 * PAD, th, nullptr);
-    clamp_sel(V_LIVE, rows);
-    const int cAge = PAD + 18, cName = PAD + 90, cMac = PAD + 430, cType = PAD + 670, cSec = PAD + 790,
-              cCh = PAD + 920, cRssi = PAD + 980, cPos = PAD + 1130;
-    font(F_SM);
+    int ty = CY + 50, rh = (int)A.liveRh, rows = max(1, (CB - ty - 62) / rh), th = 56 + rows * rh + 6;
     char hdr[64];
     snprintf(hdr, sizeof hdr, "WARDRIVE THIS SESSION   %lu APs   %lu BLE", (unsigned long)wd_session_count(1),
              (unsigned long)wd_session_count(2));
-    text(PAD + W - 2 * PAD - 18, ty + 12, hdr, PINK, top_right);
+    panel(PAD, ty, W - 2 * PAD, th, hdr);   // the counts are the panel's title: nothing sits on the headers
+    ty += 22;
+    clamp_sel(V_LIVE, rows);
+    const int cAge = PAD + 18, cName = PAD + 90, cMac = PAD + 430, cType = PAD + 670, cSec = PAD + 790,
+              cCh = PAD + 920, cRssi = PAD + 980, cPos = PAD + 1130;
     sort_head(cAge, ty + 12, "AGE", 0);
     sort_head(cName, ty + 12, "NAME / SSID", 1);
     sort_head(cMac, ty + 12, "MAC", 2);
@@ -2441,7 +2475,8 @@ void draw_live_wardrive() {
         } else if (k & 1) C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
         int my = ry + rh / 2;
         uint16_t c = d.kind == 2 ? rgb(0xff2bd6) : rgb(d.sec < 6 ? SECC[d.sec] : 0x7dd3fc);
-        font(F_MD);
+        const lgfx::IFont *rf = rh < 30 ? F_SM : rh < 48 ? F_MD : F_LG;
+        font(rf);
         text(cAge, my, age_str(d.last ? d.last : now), MUTED, middle_left);
         const char *nm = d.name[0] ? d.name : d.kind == 1 ? "(hidden network)" : "BLE device";
         text(cName, my, fit_name(nm, 320), d.name[0] ? TEXT : FAINT, middle_left);
@@ -2486,7 +2521,8 @@ void draw_live() {
         std::reverse(liveIdx, liveIdx + nLive);
     }
     draw_filter_row(CY, nLive, M->ndets);
-    int ty = CY + 50, rows = 10, rh = 34, th = 34 + rows * rh + 6;
+    // Rows follow the pinch zoom; the detail of the selected row keeps what is left (if any).
+    int ty = CY + 50, rh = (int)A.liveRh, rows = max(3, min(30, (int)(340 / A.liveRh))), th = 34 + rows * rh + 6;
     panel(PAD, ty, W - 2 * PAD, th, nullptr);
     clamp_sel(V_LIVE, rows);
     const int cAge = PAD + 18, cVen = PAD + 90, cMac = PAD + 400, cType = PAD + 640, cDom = PAD + 740,
@@ -2516,7 +2552,8 @@ void draw_live() {
             C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
         }
         int my = ry + rh / 2;
-        font(F_MD);
+        const lgfx::IFont *rf = rh < 30 ? F_SM : rh < 48 ? F_MD : F_LG;
+        font(rf);
         text(cAge, my, age_str(d->ts), MUTED, middle_left);
         text(cVen, my, fit_name(vendor_of(d), 290), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
         if (muted) {
@@ -2894,6 +2931,7 @@ constexpr int WM_CW = 6, WM_CH = 9;                       // fine cells (Font0, 
 constexpr int WM_COLS = W / WM_CW, WM_ROWS = 34;          // the wordmark band: 34 rows
 constexpr int WM_Y0 = 150;                                // its top on screen
 uint8_t *wmMask = nullptr;                                // WM_ROWS x WM_COLS: 1 inside a letter
+float wmSize = 1;                                         // the name's text size (wm_build)
 
 void wm_build() {
     if (wmMask) return;
@@ -2913,6 +2951,7 @@ void wm_build() {
         if (mk.textWidth(name) <= W - 60 && mk.fontHeight() <= WM_ROWS * WM_CH - 6) { sz = z; break; }
     }
     mk.setTextSize(sz);
+    wmSize = sz;
     mk.setTextDatum(middle_center);
     mk.drawString(name, W / 2, WM_ROWS * WM_CH / 2);
     for (int r = 0; r < WM_ROWS; r++)
@@ -2995,6 +3034,22 @@ void wm_draw(float t, float show) {
             C.setTextColor(wm_loop(hp, gain, white ? 0.85f : 0));
             C.drawString(one, x * WM_CW + dx, WM_Y0 + y * WM_CH);
         }
+    }
+    // Once it has formed: the name itself, crisp, over the moving field (a dark outline
+    // keeps the edges clean against the glyphs), so it always reads.
+    if (show > 0.75f) {
+        float a = smoothf((show - 0.75f) / 0.25f);
+        C.setFont(&fonts::Orbitron_Light_32);
+        C.setTextSize(wmSize);
+        C.setTextDatum(middle_center);
+        int cx = W / 2, cy = WM_Y0 + WM_ROWS * WM_CH / 2;
+        C.setTextColor(dim(BG, 1.0f));
+        for (int ox = -2; ox <= 2; ox += 2)
+            for (int oy = -2; oy <= 2; oy += 2)
+                if (ox || oy) C.drawString("COLONELPANIC.TECH", cx + ox, cy + oy);
+        C.setTextColor(dim(wm_loop(t * 0.05f, 1.0f, 0.35f), a));
+        C.drawString("COLONELPANIC.TECH", cx, cy);
+        C.setTextSize(1);
     }
 }
 
@@ -3574,9 +3629,9 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         }
     }
     switch (kc) {
-    case 0x2B: A.view = (View)((A.view + (shift ? V_COUNT - 1 : 1)) % V_COUNT); return;   // Tab
-    case 0x4F: A.view = (View)((A.view + 1) % V_COUNT); return;                            // Right
-    case 0x50: A.view = (View)((A.view + V_COUNT - 1) % V_COUNT); return;                  // Left
+    case 0x2B: A.view = next_tab(shift ? -1 : 1); return;   // Tab
+    case 0x4F: A.view = next_tab(1); return;                   // Right
+    case 0x50: A.view = next_tab(-1); return;                  // Left
     case 0x52: A.sel[A.view] -= ctrl ? page : 1; return;                                    // Up
     case 0x51: A.sel[A.view] += ctrl ? page : 1; return;                                    // Down
     case 0x4A: A.sel[A.view] = 0; return;                                                   // Home
@@ -3585,8 +3640,8 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         A.metricsGen++;
         return;
     }
-    if (ch >= '1' && ch <= '7') {
-        A.view = (View)(ch - '1');
+    if (ch >= '1' && ch < '1' + NSHOWN) {
+        A.view = SHOWN[ch - '1'];
         return;
     }
     switch (tolower(ch)) {
@@ -3875,6 +3930,10 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
+    case H_ZLOCK: A.liveZoomLock = !A.liveZoomLock; toast(A.liveZoomLock ? "list zoom locked" : "pinch the list to zoom it"); break;
+    case H_OVDET:
+        if (h.arg >= 0 && h.arg < M->ndets) open_detail(det_at(h.arg)->mac);
+        break;
     case H_SORT:
         if (A.liveSort == h.arg) A.liveSortRev = !A.liveSortRev;
         else A.liveSort = h.arg, A.liveSortRev = false;
@@ -3923,6 +3982,11 @@ static void apply_drag(int dx, int dy) {
         netTop = T.top0 - (dy + (dy > 0 ? a.rowH / 2 : -a.rowH / 2)) / a.rowH;
         return;
     }
+    if (a.list == L_OVF || a.list == L_OVL) {
+        int t = T.top0 - (dy + (dy > 0 ? a.rowH / 2 : -a.rowH / 2)) / a.rowH;
+        (a.list == L_OVF ? ovFleetTop : ovLiveTop) = max(0, t);   // the draw clamps the end
+        return;
+    }
     View v = (View)a.list;
     if (v == V_TARGETS) {   // whole pages: a firm swipe turns one
         int per = 9, pages = max(1, (nTgt + per - 1) / per);
@@ -3955,7 +4019,8 @@ void ui_press(int x, int y) {
         if (x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h) {
             T.scroll = i;
             T.area = a;
-            T.top0 = a.list == L_NETS ? netTop : a.list == V_TARGETS ? A.sel[V_TARGETS] / 9 : a.list == L_MAP ? 0 : A.top[a.list];
+            T.top0 = a.list == L_NETS ? netTop : a.list == L_OVF ? ovFleetTop : a.list == L_OVL ? ovLiveTop
+                   : a.list == V_TARGETS ? A.sel[V_TARGETS] / 9 : a.list == L_MAP ? 0 : A.top[a.list];
             if (a.list == L_MAP) T.mx0 = lon2xf(A.mapLon, gZoomShown), T.my0 = lat2yf(A.mapLat, gZoomShown);
         }
     }
@@ -4163,6 +4228,18 @@ void ui_frame() {
 void ui_pinch(int phase, int x, int y, int dist, uint32_t ms) {
     if (phase <= 1) to_canvas(x, y);
     model_lock();
+    if (A.view == V_LIVE && !A.detail && !A.wdOpen[0] && !A.nodeEdit[0] && !A.settings && !A.help) {
+        static float rh0 = 34;
+        static int ld0 = 100;
+        T = {};
+        if (!A.liveZoomLock) {
+            if (phase == 0) rh0 = A.liveRh, ld0 = max(dist, 30);
+            else if (phase == 1) A.liveRh = constrain(rh0 * (float)max(dist, 10) / ld0, 24.0f, 72.0f);
+        }
+        dirty = true;
+        model_unlock();
+        return;
+    }
     if (A.view != V_MAP || A.detail || A.settings || A.help) {
         pinching = false;
         model_unlock();

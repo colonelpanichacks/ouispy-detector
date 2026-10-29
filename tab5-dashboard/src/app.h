@@ -34,6 +34,8 @@ struct App {
     uint8_t kindFilter = 0;     // Live: 0 all, 1 detectors, 2 Sky-Spy, 3 wardrivers
     uint8_t liveSort = 0;       // Live: 0 last seen, 1 name, 2 MAC, 3 type, 4 security / radio, 5 closeness
     bool liveSortRev = false;
+    float liveRh = 34;          // Live row height: pinch to zoom the list (24..72)
+    bool liveZoomLock = false;  // ...unless locked
     char wdOpen[18] = "";       // wardriven device info open (MAC)
     uint8_t wdOpenKind = 0;     // 1 WiFi, 2 BLE
     bool gpsFollow = false;     // map: keep our own GPS position centred

@@ -2345,12 +2345,20 @@ async function loadDevices() {
     $("vBody").innerHTML = r.rows.map((d) => {
         const al = devAlias(d.mac);
         const nm = devName(d.mac, d.name);
+        if (d.wd) {   // a wardriven network / device
+            const c = wdColor({ kind: d.wd, sec: d.sec });
+            return `<tr data-mac="${esc(d.mac)}" data-wd="${esc(d.wd)}"><td class="v"><span class="ntag wd">WD</span> <span style="color:${c}">${esc(d.descr || "")}</span></td>
+            <td>${esc(d.mac)}</td><td>${d.wd === "wifi" ? `WiFi AP ${esc(d.sec || "")}${d.ch ? " ch " + d.ch : ""}` : "BLE"}</td><td>${d.hits}</td>
+            <td>${fullTime(d.first)}</td><td>${ago(d.last)}</td><td>${d.best ?? ""}</td>
+            <td class="nodes">${d.nodes.map((n) => esc(nodeName(n))).join(", ")}</td></tr>`;
+        }
         return `<tr data-mac="${esc(d.mac)}"><td class="v">${al ? `<span class="mal">${esc(al)}</span> ` : ""}${nm ? `<span class="dname">"${esc(nm)}"</span> ` : ""}${groupTag(d.mac)}${esc(d.descr || "")}</td>
             <td>${esc(d.mac)}</td><td>${d.dom === "wifi" ? "WiFi" : "BLE"} ${esc(d.type || "")}</td><td>${d.hits}</td>
             <td>${fullTime(d.first)}</td><td>${ago(d.last)}</td><td>${d.best ?? ""}</td>
             <td class="nodes">${d.nodes.map((n) => esc(nodeName(n))).join(", ")}</td></tr>`;
     }).join("") || `<tr><td colspan="8" style="text-align:center;padding:20px">No devices</td></tr>`;
-    $("vBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () => openDevice(tr.dataset.mac));
+    $("vBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () =>
+        tr.dataset.wd ? openWdDevice(tr.dataset.mac, tr.dataset.wd) : openDevice(tr.dataset.mac));
 }
 let devTimer = null;
 $("vQ").addEventListener("input", () => { clearTimeout(devTimer); devTimer = setTimeout(loadDevices, 250); });
@@ -3559,66 +3567,21 @@ $("dWdSession").onclick = async () => {
 syncWdBtn();
 loadWd();
 
-// The Live tab's Wardrive table (shown once a wardriver is on the fleet or reporting).
-S.wdTab = [];
-S.wdTabScope = lsGet("ouispy.wdTabScope", "session");
-$("wdTabScope").value = S.wdTabScope;
-$("wdTabScope").onchange = () => {
-    S.wdTabScope = $("wdTabScope").value;
-    lsSet("ouispy.wdTabScope", S.wdTabScope);
-    $("wdTabCsv").href = `/api/wardrive/wigle.csv?scope=${S.wdTabScope}`;
-    loadWdTab();
-};
-$("wdTabCsv").href = `/api/wardrive/wigle.csv?scope=${S.wdTabScope}`;
-$("wdNewSess").onclick = () => $("dWdSession").onclick();
-function wdTabWanted() {
-    return Object.keys(S.wd).length > 0 || (S.fleet && S.fleet.nodes || []).some(isWardriver) || !!S.wdReporting;
-}
-// "Seen by" set to a wardriver: the Live tab is that wardriver's networks and devices.
-function wdNodeFilter() {
-    const id = $("vNode").value;
-    if (id === "kind:wardrive") return "*";   // every wardriver
-    return id && isWardriver(nodeById(id)) ? id : "";
-}
-async function loadWdTab() {
-    const only = wdNodeFilter();
-    $("wdSec").hidden = !wdTabWanted() && !only;
-    document.querySelector("#tab-devices .fa-table:not(.wd-sec)").hidden = !!only;
-    if ($("wdSec").hidden || !$("tab-devices").classList.contains("active")) return;
-    const q = new URLSearchParams({ scope: S.wdTabScope, limit: 3000 });
-    if (only && only !== "*") q.set("node", only);
-    const r = await fetch(`/api/wardrive?${q}`).then((x) => x.json()).catch(() => null);
-    if (!r) return;
-    S.wdTab = r.devices;
-    renderWdTab(r);
-}
-function renderWdTab(r) {
-    const h = r && r.history || {}, t = r && r.this_session || {};
-    $("wdTotal").textContent = S.wdTabScope === "session"
-        ? `${(t.wifi || 0)} APs, ${(t.ble || 0)} BLE this session`
-        : `${(h.wifi || {}).n || 0} APs, ${(h.ble || {}).n || 0} BLE`;
-    $("wdBody").innerHTML = S.wdTab.slice(0, 1500).map((d) => `<tr class="wd-tr" data-k="${esc(wdKey(d))}">
-        <td class="v" style="color:${wdColor(d)}">${esc(wdName(d))}</td><td>${esc(d.mac)}${d.rnd ? " <small>(random)</small>" : ""}</td>
-        <td>${d.kind === "wifi" ? "WiFi AP" : "BLE"}</td><td>${esc(d.sec || (d.kind === "ble" ? "-" : "?"))}</td><td>${d.ch || "-"}</td>
-        <td>${esc(d.vendor || (d.mfr != null ? "CID 0x" + Number(d.mfr).toString(16).padStart(4, "0") : "-"))}</td>
-        <td>${d.rssi != null ? d.rssi + " dBm" : "-"}</td><td>${d.seen}</td><td>${ago(d.last)}</td>
-        <td>${d.lat != null ? "yes" : "-"}</td></tr>`).join("") ||
-        `<tr><td colspan="10" style="text-align:center;padding:20px">Nothing wardriven ${S.wdTabScope === "session" ? "this session" : "yet"}</td></tr>`;
-    $("wdBody").querySelectorAll("tr.wd-tr").forEach((tr) => tr.onclick = () => {
-        const d = S.wdTab.find((x) => wdKey(x) === tr.dataset.k);
-        if (d) openWdDevice(d.mac, d.kind);
-    });
+// Wardriven devices are rows of the Live tab's one device list (loadDevices merges them):
+// refresh it as they come in while the tab is open.
+function loadWdTab() {
+    if ($("tab-devices").classList.contains("active")) loadDevices();
 }
 let wdTabTimer = null;
 const _onWdPrev = onWd;
 onWd = function (ev) {
     _onWdPrev(ev);
-    if (!$("tab-devices").classList.contains("active")) { $("wdSec").hidden = !wdTabWanted(); return; }
+    if (!$("tab-devices").classList.contains("active")) return;
     clearTimeout(wdTabTimer);
     wdTabTimer = setTimeout(loadWdTab, 1500);   // live, at most every 1.5 s
 };
 document.querySelectorAll('.tab[data-tab="devices"]').forEach((b) => b.addEventListener("click", () => setTimeout(loadWdTab, 50)));
-$("vNode").addEventListener("change", loadWdTab);
+
 setInterval(() => { if ($("tab-devices").classList.contains("active")) loadWdTab(); }, 15000);
 
 // Node drawer: find it by ear, and put any of the three firmwares on it.
@@ -3714,4 +3677,62 @@ $("wdShowMap").onclick = () => {
 };
 const _showWardriverPrev = showWardriver;
 showWardriver = function (n) { _showWardriverPrev(n); showFw(n); };
+
+// ------------------------------------------------------------------
+// Overview tab: the Tab5's overview on the web (KPIs, fleet, live feed, 24 h activity)
+// ------------------------------------------------------------------
+const OV_KIND = { detector: ["DETECTOR", "#7dd3fc"], skyspy: ["SKY-SPY", "#ff7ad9"], wardrive: ["WARDRIVER", "#ff2bd6"] };
+const HOUSE_SVG = `<svg class="ov-house" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8v10h-6v-6H9v6H3z"/></svg>`;
+function rssiTone(r) { return r == null ? "var(--muted)" : r >= -60 ? "#39ff88" : r >= -75 ? "#22d3ee" : r >= -85 ? "#ffb020" : "#ff4d6d"; }
+function renderOverview() {
+    if (!$("tab-overview").classList.contains("active") || !S.fleet) return;
+    const nodes = S.fleet.nodes || [];
+    const on = nodes.filter((n) => n.online).length;
+    const st = S.statsBase || {};
+    const nowS = Date.now() / 1000;
+    const inRange = Object.values(S.targets || {}).filter((t) => t && nowS - (t.last || t.ts || 0) < 60).length;
+    const liveDr = Object.values(S.drones || {}).filter((d) => droneLive(d)).length;
+    const kpi = (k, v, sub, c) => `<div class="ov-kpi" style="--c:${c}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || ""}</div></div>`;
+    $("ovKpis").innerHTML = kpi("Nodes online", `${on}/${nodes.length}`, nodes.some((n) => n.is_home && n.online) ? "home up" : "home down", on === nodes.length ? "#2dd4bf" : "#ffb020") +
+        kpi("Detections 24 h", st.day ?? "-", `${st.total ?? 0} all time`, "#7dd3fc") +
+        kpi("Unique devices", st.macs ?? "-", "MACs seen", "#c4b5fd") +
+        kpi("In range now", inRange, "heard in the last minute", "#ffb020") +
+        kpi("Drones live", liveDr, liveDr ? "Remote ID" : "none in the air", liveDr ? "#ff2bd6" : "#64748b");
+    $("ovFleetN").textContent = `${nodes.length} nodes`;
+    $("ovFleet").innerHTML = nodes.map((n) => {
+        const [kn, kc] = OV_KIND[nodeKind(n)] || OV_KIND.detector;
+        const rssi = n.is_home ? (n.cfg && n.cfg.lrssi) : n.rssi;
+        const pct = rssi == null ? 0 : Math.max(4, Math.min(100, (rssi + 100) * 1.6));
+        const cfg = n.cfg || {};
+        const sync = n.filters_fresh === true ? `<span class="ok">in sync</span>` : n.filters_fresh === false ? `<span class="warn">drift</span>` : "";
+        return `<div class="ov-node" data-id="${esc(n.id)}" style="--nc:${nodeColor(n) || "#2dd4bf"}">
+            <div class="ov-l1"><span class="ov-name">${esc(n.alias || n.id)}</span>
+                <span class="ov-st ${n.online ? "on" : "off"}"><i></i>${n.online ? "ONLINE" : "OFFLINE"}</span></div>
+            <div class="ov-l2"><span class="ov-kind" style="color:${n.is_home ? "#2dd4bf" : kc}">${n.is_home ? HOUSE_SVG : ""}${kn}</span>
+                <span class="ov-id">${esc(n.id)}</span>
+                <span class="ov-sig"><b style="width:${pct}%;background:${rssiTone(rssi)}"></b></span>
+                <span class="ov-rssi" style="color:${rssiTone(rssi)}">${rssi ?? "--"}</span></div>
+            <div class="ov-l3"><span>${cfg.filters ?? "-"} filters ${esc(cfg.fcrc || "")} ${sync}</span><span>fw ${esc(cfg.fw || "?")}</span></div>
+        </div>`;
+    }).join("");
+    $("ovFleet").querySelectorAll(".ov-node").forEach((el) => el.onclick = () => selectNode(el.dataset.id, true));
+    const dets = (S.dets || []).slice(0, 80);
+    $("ovFeedN").textContent = dets.length ? `${dets.length} latest` : "";
+    $("ovFeed").innerHTML = dets.map((d) => `<div class="ov-det" data-mac="${esc(d.mac)}">
+        <span class="ov-age">${ago(d.ts).replace(" ago", "")}</span>
+        <span class="ov-dev ${d.is_new ? "new" : ""}">${esc(d.alias || d.descr || d.match || "unknown")}</span>
+        <span class="ov-mac">${esc(d.mac)}</span>
+        <span class="ov-r" style="color:${rssiTone(d.rssi)}">${d.rssi ?? ""}</span>
+        <span class="ov-nd">${esc(nodeName(d.node))}${d.closest && d.closest !== d.node ? " > " + esc(nodeName(d.closest)) : ""}</span></div>`).join("") ||
+        `<div class="empty">No detections yet.</div>`;
+    $("ovFeed").querySelectorAll(".ov-det").forEach((el) => el.onclick = () => openDevice(el.dataset.mac));
+    const hrs = S.hourly || [];
+    const mx = Math.max(1, ...hrs.map((x) => x.c));
+    $("ovActPeak").textContent = hrs.length ? `peak ${mx}/h` : "";
+    $("ovAct").innerHTML = hrs.map((x, i) => `<i class="${i === hrs.length - 1 ? "now" : ""}" style="height:${Math.max(3, x.c / mx * 100)}%"
+        title="${new Date(x.h * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}  ${x.c}"></i>`).join("");
+}
+document.querySelector('.tab[data-tab="overview"]').addEventListener("click", () => setTimeout(renderOverview, 0));
+setInterval(renderOverview, 1500);
+renderOverview();
 })();

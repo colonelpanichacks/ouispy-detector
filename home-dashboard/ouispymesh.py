@@ -20,7 +20,7 @@ import threading
 import time
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room
 
 import filters as flt
 import firmware as fw
@@ -232,8 +232,13 @@ socketio = SocketIO(app, async_mode="threading")  # same-origin only
 store = Store(db_path)
 
 
+# Events only browsers draw: a Tab5 would receive each (one per serial line for the
+# console) whole into its internal RAM just to drop it.
+WEB_ONLY = {"console"}
+
+
 def emit(event, payload):
-    socketio.emit(event, payload)
+    socketio.emit(event, payload, to="web" if event in WEB_ONLY else None)
 
 
 fleet = Fleet(store, emit)
@@ -522,8 +527,33 @@ def api_devices():
     if isinstance(node, str) and node.lower().startswith("kind:"):   # every node running one firmware
         kind = node[5:].lower()
         node = [n["id"] for n in fleet.snapshot()["nodes"] if fw.node_kind((n.get("cfg") or {}).get("fw")) == kind]
-    total, rows = store.devices(q=f["q"], node=node, dom=f["dom"],
-                                limit=min(int(request.args.get("limit", 300)), 2000))
+        if kind == "wardrive":
+            node = sorted(set(node) | set(wardrive.node_ids()))
+    limit = min(int(request.args.get("limit", 300)), 2000)
+    total, rows = store.devices(q=f["q"], node=node, dom=f["dom"], limit=limit)
+    # Wardriven networks / devices are devices too: one list, the node picker decides
+    # whose (any node, a firmware type, one node).
+    wd_ids = {n["id"] for n in fleet.snapshot()["nodes"] if fw.node_kind((n.get("cfg") or {}).get("fw")) == "wardrive"}
+    wd_ids |= set(wardrive.node_ids())   # right after a restart, before their status is in
+    want = wd_ids if node is None else [x for x in ([node] if isinstance(node, str) else node) if x in wd_ids]
+    if want:
+        q = (f["q"] or "").lower()
+        for d in wardrive.devices("history", limit=limit):
+            if d.get("node") not in want and not (node is None and d.get("node") is None):
+                continue
+            dom = "wifi" if d["kind"] == "wifi" else "ble"
+            if f["dom"] in ("ble", "wifi") and dom != f["dom"]:
+                continue
+            descr = d["name"] or d.get("vendor") or ("(hidden network)" if dom == "wifi" else "BLE device")
+            if q and q not in f"{d['mac']} {descr} {d.get('vendor') or ''}".lower():
+                continue
+            total += 1
+            rows.append({"mac": d["mac"], "descr": descr, "type": "AP" if dom == "wifi" else "LE", "dom": dom,
+                         "hits": d["seen"], "first": d["first"], "last": d["last"], "best": d["rssi"],
+                         "nodes": [d["node"]] if d.get("node") else [], "name": "", "wd": d["kind"],
+                         "sec": d.get("sec"), "ch": d.get("ch")})
+        rows.sort(key=lambda r: -(r["last"] or 0))
+        rows = rows[:limit]
     return jsonify({"total": total, "rows": rows})
 
 
@@ -1122,6 +1152,8 @@ def api_console():
 def on_connect():
     if not _authorized():
         return False   # refuse the websocket
+    if "arduino-WebSocket-Client" not in (request.headers.get("User-Agent") or ""):
+        join_room("web")   # a browser (a Tab5 identifies itself with the Arduino client)
     socketio.emit("sources", sources_status(), to=request.sid)
 
 

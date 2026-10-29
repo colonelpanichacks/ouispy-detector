@@ -115,7 +115,7 @@
     <!-- Bottom tabs -->
     <section class="panel tabs-panel">
         <div class="tabs">
-            <button class="tab active" data-tab="history">History</button>
+            <button class="tab active" data-tab="overview">Overview</button>
             <button class="tab" data-tab="devices">Live</button>
             <button class="tab" data-tab="drones">Drones <span class="tab-badge" id="droneBadge" hidden>0</span></button>
             <button class="tab" data-tab="fleetctl">Fleet Control</button>
@@ -127,7 +127,18 @@
         <div class="dock-grip" id="dockGrip" title="Drag to resize"></div>
         <div class="dock-body">
 
-        <div class="tab-body active" id="tab-history">
+        <div class="tab-body active" id="tab-overview">
+            <div class="ov-kpis" id="ovKpis"></div>
+            <div class="ov-grid">
+                <div class="fa ov-fleet"><h4><span>Fleet</span><span class="fa-count" id="ovFleetN"></span></h4><div class="ov-scroll" id="ovFleet"></div></div>
+                <div class="ov-right">
+                    <div class="fa ov-feed"><h4><span>Live feed</span><span class="fa-count" id="ovFeedN"></span></h4><div class="ov-scroll" id="ovFeed"></div></div>
+                    <div class="fa ov-act"><h4><span>Activity, last 24 h</span><span class="fa-count" id="ovActPeak"></span></h4><div class="ov-bars" id="ovAct"></div></div>
+                </div>
+            </div>
+        </div>
+        <!-- History (folded into Live): kept hidden, its loaders still run harmlessly. -->
+        <div class="tab-body" id="tab-history" hidden>
             <div class="fleet-actions tab-cards">
                 <div class="fa">
                     <h4>Search</h4>
@@ -189,20 +200,6 @@
                     <table class="htable">
                         <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
                         <tbody id="vBody"></tbody>
-                    </table>
-                </div>
-            </div>
-            <div class="fa fa-table wd-sec" id="wdSec" hidden>
-                <h4><span>Wardrive</span>
-                    <select id="wdTabScope" class="field mini"><option value="session">This session</option><option value="history">All history</option></select>
-                    <span class="fa-count" id="wdTotal"></span>
-                    <button class="btn ghost mini" id="wdNewSess">New session</button>
-                    <a class="btn ghost mini" id="wdTabCsv" href="/api/wardrive/wigle.csv?scope=session" download>WiGLE CSV</a>
-                </h4>
-                <div class="table-wrap">
-                    <table class="htable">
-                        <thead><tr><th>Name / SSID</th><th>MAC</th><th>Type</th><th>Security</th><th>Ch</th><th>Maker</th><th>Best</th><th>Seen</th><th>Last seen</th><th>Placed</th></tr></thead>
-                        <tbody id="wdBody"></tbody>
                     </table>
                 </div>
             </div>

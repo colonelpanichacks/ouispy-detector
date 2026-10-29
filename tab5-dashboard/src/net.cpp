@@ -17,6 +17,7 @@
 #include "wd.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <esp_core_dump.h>
 #include <HTTPClient.h>
 #include <SocketIOclient.h>
 #include <WiFi.h>
@@ -426,6 +427,32 @@ void debug_poll() {
                  (unsigned long)ui_prof[9], (unsigned long)ui_prof[10], (unsigned long)ui_prof[11]);
         c.print("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
         c.print(b);
+    } else if (req.startsWith("GET /crash")) {
+        // The last panic, from the core dump the framework saved to flash: task, PC, cause,
+        // return address and the code addresses found on its stack (decode them with the
+        // ELF whose sha256 starts with "elf").
+        esp_core_dump_summary_t *cs = (esp_core_dump_summary_t *)heap_caps_malloc(sizeof(*cs), MALLOC_CAP_SPIRAM);
+        c.print("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+        if (!cs || esp_core_dump_get_summary(cs) != ESP_OK) {
+            c.print("{\"dump\":false}\n");
+        } else {
+            char b[160];
+            snprintf(b, sizeof b, "{\"dump\":true,\"task\":\"%s\",\"pc\":\"0x%08lx\",\"ra\":\"0x%08lx\",\"mcause\":%lu,\"mtval\":\"0x%08lx\",\"elf\":\"",
+                     cs->exc_task, (unsigned long)cs->exc_pc, (unsigned long)cs->ex_info.ra,
+                     (unsigned long)cs->ex_info.mcause, (unsigned long)cs->ex_info.mtval);
+            c.print(b);
+            for (int i = 0; i < 8; i++) c.printf("%02x", cs->app_elf_sha256[i]);
+            c.print("\",\"stack\":[");
+            int n = 0;
+            for (uint32_t i = 0; i + 4 <= cs->exc_bt_info.dump_size && n < 40; i += 4) {
+                uint32_t v;
+                memcpy(&v, cs->exc_bt_info.stackdump + i, 4);
+                if ((v >= 0x40000000 && v < 0x44000000) || (v >= 0x4ff00000 && v < 0x4ffc0000))
+                    c.printf("%s\"0x%08lx\"", n++ ? "," : "", (unsigned long)v);
+            }
+            c.print("]}\n");
+        }
+        free(cs);
     } else if (req.startsWith("GET /key")) {
         int i = req.indexOf("c=");
         uint8_t kc = i >= 0 ? (uint8_t)strtol(req.c_str() + i + 2, nullptr, 16) : 0;

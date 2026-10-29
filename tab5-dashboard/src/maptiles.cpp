@@ -31,7 +31,7 @@ uint32_t tick = 0;
 struct Want { uint8_t layer; int8_t z; int32_t x, y; };
 Want want[WANT_N];
 int nwant = 0;
-constexpr int LOADERS = 2;   // tiles download in parallel (each TCP connection costs internal RAM)
+constexpr int LOADERS = 1;   // one download at a time: each TCP burst lands in internal RAM (64 KB window), and two plus the socket starved the Wi-Fi driver (sdio_read assert)
 constexpr size_t HEAP_FLOOR = 48 * 1024;   // internal RAM a download leaves for Wi-Fi and the rest
 TaskHandle_t loaderTask[LOADERS] = {};
 

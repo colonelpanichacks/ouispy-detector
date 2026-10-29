@@ -188,6 +188,11 @@ class Wardrive:
         d["vendor"] = None if d["rnd"] else (oui_vendor(r["mac"]) or None)
         return d
 
+    def node_ids(self):
+        """Every node that has wardriven anything (known before its status arrives)."""
+        with self.store.lock:
+            return [r[0] for r in self.store.db.execute("SELECT DISTINCT node FROM wd_devices WHERE node IS NOT NULL")]
+
     def detail(self, mac, kind):
         """Everything known about one wardriven device, decoded (names for company IDs,
         service UUIDs, vendor IEs, appearance, AD flags), plus where it was heard."""
