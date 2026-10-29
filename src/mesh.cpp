@@ -1,4 +1,5 @@
 #include "mesh.h"
+#include "rid.h"
 #include <LittleFS.h>
 #include "mesh_ota.h"
 #include <esp_now.h>
@@ -68,6 +69,7 @@ extern bool isSerialConnected();
 #define MESH_T_STATUS   8
 #define MESH_T_OTA      9    // firmware update session (mesh_ota.cpp)
 #define MESH_T_NACK     10   // chunks a command transfer is missing (receiver -> sender)
+#define MESH_T_DRONE    11   // Remote ID drone report (rid.cpp wire body), best effort
 #define MESH_SEAL_NONCE 12
 #define MESH_SEAL_TAG   8
 #define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
@@ -135,7 +137,11 @@ MeshConfig meshCfg = { false, false, 6, "" };
 #define MESH_DET_SEEN      32
 #define MESH_DET_SEEN_TTL_MS 120000UL
 static const uint16_t kDetRetryMs[] = { 90, 90, 100, 110, 130, 160, 200, 300, 500, 800, 1200, 2000, 3000 };
+// Device intel (devinfo.h TLV) rides after detId; nodes from before it ignore
+// bytes past MESH_DETECT_ID_LEN. 98 + 120 still fits the largest sealed frame.
+#define MESH_DET_INFO_MAX 120
 struct MeshPendDet { bool used; uint16_t detId; uint8_t body[MESH_DETECT_ID_LEN - MESH_HDR_LEN];
+                     uint8_t info[MESH_DET_INFO_MAX]; uint8_t infoLen;
                      uint32_t firstAt, nextAt; uint8_t tries; };
 static MeshPendDet pendDet[MESH_DET_PENDING];
 static uint16_t detCounter = 0;
@@ -949,7 +955,8 @@ static bool meshHomeKnown(uint32_t now) {
 }
 
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
-                        int rssi, uint8_t dtype, bool wifiDomain, bool update) {
+                        int rssi, uint8_t dtype, bool wifiDomain, bool update,
+                        const uint8_t* info, uint8_t infoLen) {
     if (!meshStarted) return;
     uint32_t now = millis();
     // Claim a pending slot; when every slot is busy, evict the entry that
@@ -975,6 +982,8 @@ void meshQueueDetection(const char* mac, const char* ident, const char* desc,
     memcpy(b + 6,  mac,   min(strlen(mac) + 1, (size_t)18));
     memcpy(b + 24, ident, min(strlen(ident) + 1, (size_t)18));
     memcpy(b + 42, desc,  min(strlen(desc) + 1, (size_t)40));
+    d.infoLen = (info && infoLen) ? min((int)infoLen, MESH_DET_INFO_MAX) : 0;
+    if (d.infoLen) memcpy(d.info, info, d.infoLen);
     d.detId = ++detCounter;
     if (d.detId == 0) d.detId = ++detCounter;
     b[82] = (uint8_t)(d.detId & 0xFF);
@@ -1007,6 +1016,8 @@ static void meshPumpDetections(uint32_t now) {
         uint8_t n = meshBuildHeader(pkt, MESH_T_DETECT, MESH_TTL);
         memcpy(pkt + n, d.body, sizeof(d.body));
         n += sizeof(d.body);
+        memcpy(pkt + n, d.info, d.infoLen);
+        n += d.infoLen;
         meshTxPush(pkt, n);
         if (d.tries == 0) detSent++; else detRetries++;
         uint8_t k = d.tries < (sizeof(kDetRetryMs) / sizeof(kDetRetryMs[0]))
@@ -1214,6 +1225,19 @@ void meshSendStatus(const uint8_t* data, uint8_t len) {
     }
 }
 
+void meshSelfId(uint8_t out[3]) { memcpy(out, selfId, 3); }
+
+// Drone reports are frequent position updates: best effort, no ack, and only
+// when a TX slot is free (detections and commands keep their reserve).
+void meshSendDrone(const uint8_t* body, uint8_t len) {
+    if (!meshStarted || len > MESH_PKT_MAX - MESH_HDR_LEN) return;
+    if (txCount >= MESH_TXQ_SIZE - MESH_TXQ_RESERVE) return;
+    uint8_t pkt[MESH_PKT_MAX];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_DRONE, MESH_TTL);
+    memcpy(pkt + n, body, len);
+    meshTxPush(pkt, n + len);
+}
+
 uint8_t meshCmdAckCount(uint16_t cmdId) {
     for (int i = 0; i < 4; i++) {
         if (acks[i].cmdId == cmdId) return acks[i].count;
@@ -1406,6 +1430,7 @@ static bool meshLenOk(uint8_t type, int len) {
         case MESH_T_STATUS:   return len >= MESH_MIN_LEN + 1;
         case MESH_T_NACK:     return len >= MESH_NACK_LEN;
         case MESH_T_OTA:      return len >= MESH_MIN_LEN + 6;
+        case MESH_T_DRONE:    return len >= MESH_HDR_LEN + RID_BODY_LEN;
         default:              return len >= MESH_MIN_LEN;
     }
 }
@@ -1897,7 +1922,9 @@ void meshTick() {
                 // Reliable path: alert once per (origin, detId); a home
                 // acks every copy (an earlier ack may have been lost).
                 uint16_t detId = body[82] | (body[83] << 8);
-                if (detSeenFirst(nodeId, detId, now)) meshReport(mac, ident, full, rssi, dtype, wifiDom, upd);
+                const uint8_t* info = pkt + MESH_DETECT_ID_LEN;
+                uint8_t infoLen = len > MESH_DETECT_ID_LEN ? (uint8_t)min(len - MESH_DETECT_ID_LEN, MESH_DET_INFO_MAX) : 0;
+                if (detSeenFirst(nodeId, detId, now)) meshReport(mac, ident, full, rssi, dtype, wifiDom, upd, info, infoLen);
                 if (meshCfg.home) meshSendDetAck(nodeId, detId);
             } else {
                 meshReport(mac, ident, full, rssi, dtype, wifiDom, false);   // legacy sender
@@ -1936,6 +1963,10 @@ void meshTick() {
         }
         case MESH_T_STATUS:
             meshOnStatus(nodeId, pkt + MESH_HDR_LEN + 3, len - (MESH_HDR_LEN + 3));
+            meshRelay(pkt, len, rxHop);
+            break;
+        case MESH_T_DRONE:
+            ridFromMesh(pkt + MESH_HDR_LEN, len - MESH_HDR_LEN);
             meshRelay(pkt, len, rxHop);
             break;
         case MESH_T_BYE:

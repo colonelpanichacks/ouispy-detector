@@ -47,7 +47,8 @@ bool meshIsRemoteUplink();
 // arrived over the mesh). Retried until a home acks it. loop() only.
 // update = a signal update for a device still in view (flags bit1): no alert.
 void meshQueueDetection(const char* mac, const char* ident, const char* desc,
-                        int rssi, uint8_t dtype, bool wifiDomain, bool update = false);
+                        int rssi, uint8_t dtype, bool wifiDomain, bool update = false,
+                        const uint8_t* info = nullptr, uint8_t infoLen = 0);
 
 // Called when the radio is parked on the mesh channel (mesh RX possible).
 void meshParkChannel();
@@ -150,6 +151,7 @@ void meshSetHealAllowed(bool allowed);
                                    // applied or acked; the home prints it.
 #define MESH_CMD_FILTER_ADD 11     // payload: filter records merged into the list (live)
 #define MESH_CMD_FILTER_DEL 12     // payload: filter records removed by (type, id) (live)
+#define MESH_CMD_ALIAS 14          // payload: the node's new alias (0-32 plain ASCII, empty clears)
 // Filter edits ack with count = filters installed afterwards; status 1 when
 // refused (invalid records, or the node would be left with no filters).
 // Ack body (remote -> home): u8 cmd, u16 cmdId, u8 status, u8 count
@@ -174,6 +176,8 @@ uint8_t meshTxPending();
 // This node's stable ID (factory eFuse MAC tail) as 6 hex chars + NUL.
 // Valid whether or not the mesh is running.
 void meshSelfIdHex(char out[7]);
+void meshSelfId(uint8_t out[3]);
+void meshSendDrone(const uint8_t* body, uint8_t len);
 // Push everything pending in the TX queue immediately (used right before a
 // command-triggered reboot so the ack actually leaves the radio). No-op
 // unless the radio is parked on the mesh channel — see meshFlushTxNow.
@@ -202,4 +206,5 @@ void meshOnAck(const uint8_t* nodeId, uint8_t cmd, uint16_t cmdId, uint8_t statu
 // Implemented in main.cpp — bridge into the shared detection ring buffer so a
 // mesh-originated detection gets the same alert/MQTT treatment as a local one.
 void meshReport(const char* mac, const char* ident, const char* desc,
-                int rssi, uint8_t dtype, bool wifi, bool update);
+                int rssi, uint8_t dtype, bool wifi, bool update,
+                const uint8_t* info = nullptr, uint8_t infoLen = 0);

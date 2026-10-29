@@ -22,6 +22,8 @@
 #include "mqtt.h"
 #include "mesh.h"
 #include "mesh_ota.h"
+#include "devinfo.h"
+#include "rid.h"
 #include <rom/crc.h>
 #include <mbedtls/sha256.h>
 
@@ -140,7 +142,19 @@ struct DetectionEntry {
     FilterType matchedType;
     bool wifiDomain;      // true = 802.11 MGMT frame match, false = BLE advert
     bool update;          // mesh-relayed signal update ("still here, this loud"): no alert
+    uint8_t infoLen;      // device intel TLV (devinfo.h): name, services, SSID...
+    uint8_t info[DEVINFO_MAX];
 };
+
+#define ALIAS_MAX 32   // node alias: plain ASCII, no quotes or backslashes
+static bool aliasValid(const String& a) {
+    if (a.length() > ALIAS_MAX) return false;
+    for (size_t i = 0; i < a.length(); i++) {
+        char c = a[i];
+        if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') return false;
+    }
+    return true;
+}
 
 static const int DET_QUEUE_SIZE = 16;
 
@@ -173,6 +187,26 @@ struct DeviceInfo {
 // Helper: does this filter type belong to the WiFi domain? The domain is
 // derived from the type — no separate field is stored on TargetFilter.
 static inline bool isWifiDomain(FilterType t) { return t >= FT_WIFI_PROBE; }
+
+// Two builds of this firmware (platformio.ini envs):
+//   detector  the OUI-SPY Mesh node: filter matching; drone Remote ID off
+//             unless turned on (console: rid on|off).
+//   skyspy    a dedicated Sky-Spy drone node on the same mesh: Remote ID always
+//             on, both radios always scanning, no filters needed.
+// The kind is stamped into the image (the dashboard reads it before an update)
+// and onto the build stamp every node reports ("Oct28 20:37:51S" = Sky-Spy).
+#ifdef SKYSPY_NODE
+#define FW_KIND_NAME "skyspy"
+bool ridEnabled = true;
+#else
+#define FW_KIND_NAME "detector"
+bool ridEnabled = false;
+#endif
+extern "C" const char FW_KIND[] = "OUISPY-KIND=" FW_KIND_NAME;
+
+// Which radio domains the scan loop runs: what the filters need, plus both
+// while Remote ID is on.
+static void scanDomains(bool& wifi, bool& ble);
 
 // Short code shown on the dashboard match-type badge and persisted in
 // the session JSON. Kept stable across firmware versions — the UI's
@@ -215,10 +249,8 @@ void startConfigMode();
 void startDetectionFlash();
 void saveConfiguration();
 class MyAdvertisedDeviceCallbacks;
-void enqueueDetection(const String& mac, const String& ident, const String& desc,
-                      int rssi, FilterType type, bool wifi);
 void enqueueDetection(const char* mac, const char* ident, const char* desc,
-                      int rssi, FilterType type, bool wifi);
+                      int rssi, FilterType type, bool wifi, const DevInfo* info);
 
 // WiFi promiscuous mode forward declarations
 static bool wifiOuiInTargets(const uint8_t oui[3]);
@@ -1096,6 +1128,9 @@ void loadConfiguration() {
     preferences.begin("ouispy", true);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
+#ifndef SKYSPY_NODE
+    ridEnabled = preferences.getBool("rid", false);
+#endif
     targetFilters.clear();
 
     auto loadRecords = [](const uint8_t* buf, size_t len) {
@@ -1226,64 +1261,13 @@ static String normalizeHexId(const String& in) {
     return out;
 }
 
-// Enqueue a detection report from String objects. Used in the BLE callback
-// path. The slot copy and the head/count update happen inside one critical
-// section — two producers on different tasks (NimBLE host, WiFi driver)
-// enqueue concurrently with the loop() drain. Drops the entry if full.
-void enqueueDetection(const String& mac, const String& ident, const String& desc,
-                      int rssi, FilterType type, bool wifi) {
-    DetectionEntry e;
-    strncpy(e.mac, mac.c_str(), sizeof(e.mac) - 1);
-    e.mac[sizeof(e.mac) - 1] = '\0';
-    strncpy(e.identifier, ident.c_str(), sizeof(e.identifier) - 1);
-    e.identifier[sizeof(e.identifier) - 1] = '\0';
-    strncpy(e.description, desc.c_str(), sizeof(e.description) - 1);
-    e.description[sizeof(e.description) - 1] = '\0';
-    e.rssi = rssi;
-    e.matchedType = type;
-    e.wifiDomain = wifi;
-    e.update = false;
-
-    portENTER_CRITICAL(&detQueueMux);
-    if (detQueueCount < DET_QUEUE_SIZE) {
-        detQueue[detQueueHead] = e;
-        detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
-        detQueueCount++;
-    }
-    portEXIT_CRITICAL(&detQueueMux);
-}
-
-// Enqueue a detection report from stack buffers. Used in the WiFi promiscuous
-// callback — no heap, no String in driver context; the critical section is
-// equally short. Drops the entry if the queue is full.
-void enqueueDetection(const char* mac, const char* ident, const char* desc,
-                      int rssi, FilterType type, bool wifi) {
-    DetectionEntry e;
-    strncpy(e.mac, mac, sizeof(e.mac) - 1);
-    e.mac[sizeof(e.mac) - 1] = '\0';
-    strncpy(e.identifier, ident, sizeof(e.identifier) - 1);
-    e.identifier[sizeof(e.identifier) - 1] = '\0';
-    strncpy(e.description, desc, sizeof(e.description) - 1);
-    e.description[sizeof(e.description) - 1] = '\0';
-    e.rssi = rssi;
-    e.matchedType = type;
-    e.wifiDomain = wifi;
-    e.update = false;
-
-    portENTER_CRITICAL(&detQueueMux);
-    if (detQueueCount < DET_QUEUE_SIZE) {
-        detQueue[detQueueHead] = e;
-        detQueueHead = (detQueueHead + 1) % DET_QUEUE_SIZE;
-        detQueueCount++;
-    }
-    portEXIT_CRITICAL(&detQueueMux);
-}
-
-// Bridge for mesh.cpp: a detection that arrived over the node mesh lands in
-// the exact same ring as a local one, so alerts, device history, and (on the
-// home node) MQTT all treat it uniformly. `type` is the FilterType as uint8.
-void meshReport(const char* mac, const char* ident, const char* desc,
-                int rssi, uint8_t type, bool wifi, bool update) {
+// Enqueue a detection report. Producers: the BLE callback (NimBLE host
+// task), the WiFi promiscuous callback (driver context: fixed buffers only, no
+// heap) and the mesh RX drain. The slot copy and the head/count update happen
+// inside one critical section, concurrently with the loop() drain. Drops the
+// entry if the ring is full.
+static void detQueuePush(const char* mac, const char* ident, const char* desc, int rssi,
+                         uint8_t type, bool wifi, bool update, const uint8_t* info, uint8_t infoLen) {
     DetectionEntry e;
     strlcpy(e.mac, mac, sizeof(e.mac));
     strlcpy(e.identifier, ident, sizeof(e.identifier));
@@ -1292,6 +1276,8 @@ void meshReport(const char* mac, const char* ident, const char* desc,
     e.matchedType = (FilterType)type;
     e.wifiDomain = wifi;
     e.update = update;
+    e.infoLen = (info && infoLen) ? (infoLen > DEVINFO_MAX ? DEVINFO_MAX : infoLen) : 0;
+    if (e.infoLen) memcpy(e.info, info, e.infoLen);
     portENTER_CRITICAL(&detQueueMux);
     if (detQueueCount < DET_QUEUE_SIZE) {
         detQueue[detQueueHead] = e;
@@ -1299,6 +1285,21 @@ void meshReport(const char* mac, const char* ident, const char* desc,
         detQueueCount++;
     }
     portEXIT_CRITICAL(&detQueueMux);
+}
+
+void enqueueDetection(const char* mac, const char* ident, const char* desc,
+                      int rssi, FilterType type, bool wifi, const DevInfo* info) {
+    detQueuePush(mac, ident, desc, rssi, (uint8_t)type, wifi, false,
+                 info ? info->b : nullptr, info ? info->n : 0);
+}
+
+// Bridge for mesh.cpp: a detection that arrived over the node mesh lands in
+// the exact same ring as a local one, so alerts, device history, and (on the
+// home node) MQTT all treat it uniformly. `type` is the FilterType as uint8.
+void meshReport(const char* mac, const char* ident, const char* desc,
+                int rssi, uint8_t type, bool wifi, bool update,
+                const uint8_t* info, uint8_t infoLen) {
+    detQueuePush(mac, ident, desc, rssi, type, wifi, update, info, infoLen);
 }
 
 // ================================
@@ -1598,6 +1599,20 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         if (liveEditNeedsRestart()) restartAfterAck("first BLE filter installed");
         break;
     }
+    case MESH_CMD_ALIAS: {
+        // The dashboard named this node: keep it, so every view (its own
+        // web UI, a display on its USB, the status it floods) agrees.
+        String a;
+        for (uint16_t i = 0; i < len && i < ALIAS_MAX; i++) a += (char)payload[i];
+        if (!aliasValid(a)) { meshSendAck(cmd, cmdId, 1, 0); return; }
+        Preferences p;
+        p.begin("ouispy", false);
+        p.putString("alias", a);
+        p.end();
+        meshSendAck(cmd, cmdId, 0, 0);
+        if (isSerialConnected()) Serial.printf("[MESH] alias set by home: %s\n", a.length() ? a.c_str() : "(cleared)");
+        break;
+    }
     case MESH_CMD_GETFILTERS:
         meshHoldRadio(4000);
         filtersReportDueAt = millis() + random(200, 3000);
@@ -1638,7 +1653,6 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
 #define STATUS_FMT 1
 #define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
 #define STATUS_LEN 56        // + u8 keyFingerprint[4]
-#define ALIAS_MAX 32
 // + u8 count, up to 8 neighbors x 5 bytes, then u8 alias length + alias
 #define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX)
 static String nodeAlias();
@@ -1746,6 +1760,9 @@ static uint8_t buildStatus(uint8_t* d) {
         o[3] = b[4] == ' ' ? '0' : b[4]; o[4] = b[5];
         o[5] = ' ';
         memcpy(o + 6, b + 12, 8);
+#ifdef SKYSPY_NODE
+        o[14] = 'S';    // a Sky-Spy node
+#endif
     }
     n += 16;
     keyFingerprint(d + n);   // 0000 when no key: lets the dashboard check keys match
@@ -1774,14 +1791,6 @@ static String nodeAlias() {
     return a;
 }
 
-static bool aliasValid(const String& a) {
-    if (a.length() > ALIAS_MAX) return false;
-    for (size_t i = 0; i < a.length(); i++) {
-        char c = a[i];
-        if (c < 0x20 || c > 0x7e || c == '"' || c == '\\') return false;
-    }
-    return true;
-}
 
 static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
     if (!isSerialConnected()) return;
@@ -2043,6 +2052,25 @@ static bool remoteConsoleCommand(const String& line) {
         Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
         return true;
     }
+    if (verb == "rid") {            // rid on|off: drone Remote ID (keeps WiFi + BLE scanning)
+#ifdef SKYSPY_NODE
+        Serial.println("OK rid on (always on in a Sky-Spy node)");
+        return true;
+#endif
+        if (arg[0] == "on" || arg[0] == "off") {
+            ridEnabled = arg[0] == "on";
+            Preferences p;
+            p.begin("ouispy", false);
+            p.putBool("rid", ridEnabled);
+            p.end();
+            Serial.printf("OK rid %s (restarting to apply)\n", ridEnabled ? "on" : "off");
+            Serial.flush();
+            localReboot("rid");
+        } else {
+            Serial.printf("OK rid %s\n", ridEnabled ? "on" : "off");
+        }
+        return true;
+    }
     if (verb == "nodealias") {      // nodealias <name> | nodealias - (clear)
         String a = rest == "-" ? String("") : rest;
         if (!aliasValid(a)) { Serial.println("ERR nodealias: up to 32 plain ASCII characters, no quotes or backslashes"); return true; }
@@ -2065,7 +2093,7 @@ static bool remoteConsoleCommand(const String& line) {
     }
 
     bool remote = verb == "rstatus" || verb == "raudio" || verb == "rreboot" ||
-                  verb == "rident" || verb == "rpreset" || verb == "rfilters";
+                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias";
     if (remote) {
         if (!parseTarget(arg[0], t, all)) { Serial.printf("ERR %s: target must be a node ID or all\n", verb.c_str()); return true; }
         if (verb == "rstatus") {
@@ -2085,6 +2113,13 @@ static bool remoteConsoleCommand(const String& line) {
             int secs = arg[1].length() ? arg[1].toInt() : 10;
             uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
             sendMgmt("rident", t, all, MESH_CMD_IDENTIFY, p, 2);
+        } else if (verb == "ralias") {   // ralias <target> <name> | ralias <target> - (clear)
+            int sp = rest.indexOf(' ');
+            String a = sp < 0 ? String("") : rest.substring(sp + 1);
+            a.trim();
+            if (a == "-") a = "";
+            if (!aliasValid(a)) { Serial.println("ERR ralias: up to 32 plain ASCII characters, no quotes or backslashes"); return true; }
+            sendMgmt("ralias", t, all, MESH_CMD_ALIAS, (const uint8_t*)a.c_str(), (uint16_t)a.length());
         } else if (verb == "rpreset") {
             int idx = -1;
             String name = arg[1];
@@ -2288,8 +2323,8 @@ static bool matchesWifiFilter(const uint8_t mac[6], uint8_t subtype,
         if (!isWifiDomain(f.type)) continue;
 
         bool subtypeMatch = false;
-        if (f.type == FT_WIFI_PROBE && subtype == 0x04) subtypeMatch = true;
-        else if (f.type == FT_WIFI_BEACON && subtype == 0x08) subtypeMatch = true;
+        if (f.type == FT_WIFI_PROBE && (subtype == 0x04 || subtype == 0x00 || subtype == 0x02)) subtypeMatch = true;
+        else if (f.type == FT_WIFI_BEACON && (subtype == 0x08 || subtype == 0x05)) subtypeMatch = true;
         else continue;
 
         if (subtypeMatch) {
@@ -2670,7 +2705,8 @@ static void checkBootButtonLoop() {
 // Fast path: frame-control check + 3-byte OUI pre-check against
 // wifiOuiTable. Slow path: full filter match + enqueue — dedup and cooldown
 // happen when loop() drains the entry (registerDetection), same as BLE.
-static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi) {
+static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi,
+                            const uint8_t* frame, int frameLen, uint8_t rxChan) {
     // Format MAC as "aa:bb:cc:dd:ee:ff" (lowercase, matches NimBLE toString()
     // output) so a device seen by both radios dedups under one entry
     char macStr[18];
@@ -2688,7 +2724,9 @@ static void handleWifiMatch(const uint8_t mac[6], uint8_t subtype, int8_t rssi) 
     FilterType outType;
     if (!matchesWifiFilter(mac, subtype, desc, ident, outType)) return;
 
-    enqueueDetection(macStr, ident, desc, rssi, outType, true);
+    DevInfo di;
+    devinfoFromWifi(di, frame, frameLen, subtype, rxChan);
+    enqueueDetection(macStr, ident, desc, rssi, outType, true, &di);
 }
 
 // promiscuous API: the callback is `void (*)(void* buf, wifi_promiscuous_pkt_type_t type)`.
@@ -2719,9 +2757,19 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
         }
     }
 
-    // 802.11 mgmt subtypes: 0x00=Assoc Req, 0x04=Probe Req, 0x08=Beacon
+    // Drone Remote ID rides in beacons (vendor IE) and NAN action frames, from
+    // any vendor: checked before the target-OUI prefilter.
+    if (ridEnabled && ftype == 0 && (subtype == 0x08 || subtype == 0x0D)) {
+        ridWifiFrame(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, rssi);
+    }
+
+    // 802.11 mgmt subtypes: 0x00=Assoc Req, 0x02=Reassoc Req, 0x04=Probe Req,
+    // 0x05=Probe Resp, 0x08=Beacon. (Re)assoc requests are client frames like
+    // probes (they name the AP the device joins); probe responses are AP frames
+    // like beacons (they carry the SSID even when the beacon hides it).
     if (ftype != 0) return;  // management only
-    if (subtype != 0x04 && subtype != 0x08) return;  // probe-req(4) / beacon(8) only
+    if (subtype != 0x04 && subtype != 0x08 && subtype != 0x00 &&
+        subtype != 0x02 && subtype != 0x05) return;
 
     // Source MAC is always in addr2 for probe requests and beacons.
     // 3-byte OUI pre-check against target table.
@@ -2731,7 +2779,61 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (!wifiOuiInTargets(oui)) return;
 
     // Rare path: full match + enqueue (fixed stack buffers only)
-    handleWifiMatch(hdr->addr2, subtype, rssi);
+    int flen = (int)pkt->rx_ctrl.sig_len - 4;   // sig_len counts the FCS
+    handleWifiMatch(hdr->addr2, subtype, rssi, pkt->payload, flen, pkt->rx_ctrl.channel);
+}
+
+// Everything a BLE advert (plus scan response, active scan) says about the device.
+static void devinfoFromBle(DevInfo& di, NimBLEAdvertisedDevice* dev) {
+    if (dev->haveName()) {
+        std::string nm = dev->getName();
+        if (nm.length()) di.add(DI_NAME, nm.data(), nm.length() > 29 ? 29 : nm.length());
+    }
+    uint8_t fl = (dev->getAddressType() != BLE_ADDR_PUBLIC ? 1 : 0) | (dev->isConnectable() ? 2 : 0);
+    di.add8(DI_BLEFLAGS, fl);
+    di.add8(DI_ADVTYPE, dev->getAdvType());
+    if (dev->haveTXPower()) di.add8(DI_TXPWR, (uint8_t)dev->getTXPower());
+    if (dev->haveAppearance()) di.add16(DI_APPEAR, dev->getAppearance());
+    if (dev->haveManufacturerData()) {
+        std::string m = dev->getManufacturerData();
+        if (m.length() >= 2) di.add(DI_MFR, m.data(), m.length() > 22 ? 22 : m.length());
+    }
+    uint8_t u16[16]; uint8_t nu = 0;
+    bool full128 = false;
+    for (int i = 0; i < (int)dev->getServiceUUIDCount() && nu < 16; i++) {
+        NimBLEUUID u = dev->getServiceUUID(i);
+        uint8_t bl = u.bitSize();
+        if (bl == 16) {
+            uint16_t x = u.getNative()->u16.value;
+            u16[nu++] = x & 0xFF; u16[nu++] = x >> 8;
+        } else if (bl == 128 && !full128) {
+            // NimBLE stores 128-bit UUIDs little-endian; keep string order.
+            const uint8_t* v = u.getNative()->u128.value;
+            uint8_t be[16];
+            for (int k = 0; k < 16; k++) be[k] = v[15 - k];
+            if (!memcmp(be + 4, "\x00\x00\x10\x00\x80\x00\x00\x80\x5f\x9b\x34\xfb", 12)) {
+                u16[nu++] = be[3]; u16[nu++] = be[2];   // Bluetooth base UUID: it is really 16-bit
+            } else {
+                di.add(DI_UUID128, be, 16);
+                full128 = true;
+            }
+        } else if (bl == 32) {
+            uint32_t x = u.getNative()->u32.value;
+            u16[nu++] = x & 0xFF; u16[nu++] = (x >> 8) & 0xFF;
+        }
+    }
+    if (nu) di.add(DI_UUID16, u16, nu);
+    for (int i = 0; i < (int)dev->getServiceDataCount() && i < 2; i++) {
+        NimBLEUUID u = dev->getServiceDataUUID(i);
+        if (u.bitSize() != 16) continue;
+        std::string d = dev->getServiceData(i);
+        uint8_t t[14];
+        uint16_t x = u.getNative()->u16.value;
+        t[0] = x & 0xFF; t[1] = x >> 8;
+        uint8_t dl = d.length() > 12 ? 12 : d.length();
+        memcpy(t + 2, d.data(), dl);
+        di.add(DI_SVCDATA, t, 2 + dl);
+    }
 }
 
 // Forward declaration for callback class
@@ -2744,6 +2846,14 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 
         String mac = advertisedDevice->getAddress().toString().c_str();
         int rssi = advertisedDevice->getRSSI();
+
+        {
+            // Drone Remote ID (BLE legacy adverts, service data 0xFFFA).
+            const uint8_t* le = advertisedDevice->getAddress().getNative();
+            uint8_t be[6];
+            for (int k = 0; k < 6; k++) be[k] = le[5 - k];
+            if (ridEnabled) ridBleAdvert(advertisedDevice->getPayload(), (int)advertisedDevice->getPayloadLength(), be, rssi);
+        }
 
         String matchedDescription;
         String matchedIdent;
@@ -2765,8 +2875,10 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             // MQTT and the session file all happen in loop() when the entry
             // is drained (registerDetection) — this callback never touches
             // devices[], which the WiFi callback used to read concurrently.
-            enqueueDetection(mac, matchedIdent, matchedDescription, rssi,
-                             matchedTypeOut, false);
+            DevInfo di;
+            devinfoFromBle(di, advertisedDevice);
+            enqueueDetection(mac.c_str(), matchedIdent.c_str(), matchedDescription.c_str(), rssi,
+                             matchedTypeOut, false, &di);
         }
     }
 };
@@ -2801,6 +2913,24 @@ static bool g_meshVisit = false;
 // cheaply, so a 3-byte OUI table (wifiOuiTable) is rebuilt when WiFi filters change.
 // One-time scanning init (idempotent). Must run before any scan_to_* call.
 // Sequence: stop config services -> compute filter presence -> init BLE -> set up WiFi -> idle.
+static void scanDomains(bool& wifi, bool& ble) {
+    wifi = ble = false;
+    for (const TargetFilter& f : targetFilters) {
+        if (isWifiDomain(f.type)) wifi = true;
+        else ble = true;
+    }
+    if (ridEnabled) wifi = ble = true;
+}
+
+// rid.cpp: a drone was heard for the first time. A Sky-Spy node alerts the way
+// the standalone Sky-Spy firmware does; a detector stays quiet (the dashboard alerts).
+void ridOnNewDrone() {
+#ifdef SKYSPY_NODE
+    startDetectionFlash();
+    if (buzzerEnabled) threeBeeps();
+#endif
+}
+
 static bool scan_init() {
     if (g_scanInitialized) return true;
 
@@ -2810,12 +2940,8 @@ static bool scan_init() {
     WiFi.softAPdisconnect(true);
 
     // (b) Compute filter presence
-    bool hasWifiFilters = false;
-    bool hasBleFilters = false;
-    for (const TargetFilter& f : targetFilters) {
-        if (isWifiDomain(f.type)) hasWifiFilters = true;
-        else hasBleFilters = true;
-    }
+    bool hasWifiFilters, hasBleFilters;
+    scanDomains(hasWifiFilters, hasBleFilters);
 
     // (c) BLE init — MUST happen before WiFi mode is set to STA/promiscuous
     if (hasBleFilters) {
@@ -3044,10 +3170,8 @@ static void mqttReportTick(unsigned long now, bool canOpenWindow) {
             // Resume scanning immediately rather than letting the BLE phase
             // clock run out on its own. Nodes without WiFi filters go back
             // to the BLE phase (which is also the mesh window).
-            bool hasWifiFilters = false;
-            for (const TargetFilter& f : targetFilters) {
-                if (isWifiDomain(f.type)) hasWifiFilters = true;
-            }
+            bool hasWifiFilters, hasBleUnused;
+            scanDomains(hasWifiFilters, hasBleUnused);
             if (hasWifiFilters) {
                 scan_to_wifi_sweep();
             } else {
@@ -6145,12 +6269,8 @@ void startScanningMode() {
     scan_init();
 
     // Determine which domains are needed
-    bool hasWifiFilters = false;
-    bool hasBleFilters = false;
-    for (const TargetFilter& f : targetFilters) {
-        if (isWifiDomain(f.type)) hasWifiFilters = true;
-        else hasBleFilters = true;
-    }
+    bool hasWifiFilters, hasBleFilters;
+    scanDomains(hasWifiFilters, hasBleFilters);
 
     if (isSerialConnected()) {
         Serial.println("\n=== STARTING SCANNING MODE ===");
@@ -6435,7 +6555,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -6452,7 +6572,7 @@ static void emitTelemetry() {
                   (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend,
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
                   encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
-                  (unsigned long)eDropReplay, nvsFreeEntries(), stray.c_str(), nodes.c_str());
+                  (unsigned long)eDropReplay, nvsFreeEntries(), FW_KIND + 12, ridEnabled ? 1 : 0, (unsigned)ridActive(), stray.c_str(), nodes.c_str());
 }
 
 void loop() {
@@ -6562,12 +6682,8 @@ void loop() {
     // chance to run every iteration.
     if (currentMode == SCANNING_MODE) {
         unsigned long currentMillis = millis();
-        bool hasWifiFilters = false;
-        bool hasBleFilters = false;
-        for (const TargetFilter& f : targetFilters) {
-            if (isWifiDomain(f.type)) hasWifiFilters = true;
-            else hasBleFilters = true;
-        }
+        bool hasWifiFilters, hasBleFilters;
+        scanDomains(hasWifiFilters, hasBleFilters);
 
         if (!hasWifiFilters && !hasBleFilters) {
             // No detection work. With the mesh enabled this node is a pure
@@ -6725,6 +6841,8 @@ void loop() {
             }
         }
 
+        ridLoop();
+
         // Drain one ring entry per pass. Dedup, cooldown, device tracking,
         // alerts, MQTT and the session file all happen here in loop context
         // — never in the NimBLE/WiFi callbacks (see registerDetection).
@@ -6768,7 +6886,10 @@ void loop() {
                                  jsonEsc(ident) + "\",\"desc\":\"" + jsonEsc(desc) +
                                  "\",\"node\":\"" + nodeId + "\",\"dom\":\"" +
                                  (e.wifiDomain ? "wifi" : "ble") + "\"" +
-                                 (update ? ",\"upd\":1}" : "}");
+                                 (update ? ",\"upd\":1" : "");
+                String infoJson = devinfoJson(e.info, e.infoLen);
+                if (infoJson.length()) payload += ",\"info\":" + infoJson;
+                payload += "}";
                 if (isSerialConnected()) Serial.println(payload);
 
                 // Remote-role nodes never publish MQTT — the mesh is their
@@ -6795,7 +6916,8 @@ void loop() {
                 // them to this node and multiply traffic.
                 if (meshCfg.enabled && !fromMesh) {
                     meshQueueDetection(e.mac, e.identifier, e.description,
-                                       e.rssi, (uint8_t)e.matchedType, e.wifiDomain, update);
+                                       e.rssi, (uint8_t)e.matchedType, e.wifiDomain, update,
+                                       e.info, e.infoLen);
                 }
 
                 // Alert the user. Doing it here — not in the NimBLE host
