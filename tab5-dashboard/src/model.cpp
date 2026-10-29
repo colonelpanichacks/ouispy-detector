@@ -171,6 +171,8 @@ struct NodeMemo {
 static NodeMemo memo[MAX_NODES];
 static int nmemo = -1;
 static Preferences memoPrefs;
+static bool memoDirty = false;
+static uint32_t memoFlushMs = 0;
 
 static void memo_load() {
     nmemo = 0;
@@ -208,7 +210,20 @@ static void node_memo(Node &n) {
     if (n.hasPos && (!m->hasPos || fabs(m->lat - n.lat) > 1e-7 || fabs(m->lon - n.lon) > 1e-7))
         m->hasPos = true, m->lat = n.lat, m->lon = n.lon, changed = true;
     if (n.hue >= 0 && m->hue != n.hue) m->hue = n.hue, changed = true;
-    if (changed) memoPrefs.putBytes("all", memo, nmemo * sizeof(NodeMemo));
+    if (changed) memoDirty = true;   // written by node_memo_flush(): a flash write blinks the display
+}
+
+// Flash writes stall the display (blue flash), so the memo goes to NVS only when it is
+// about to be needed (the dashboard link dropped) or every 30 min. Link task context.
+void node_memo_flush(bool linkDown) {
+    if (!memoDirty) return;
+    if (!memoFlushMs) memoFlushMs = millis();   // the 30 min count starts at the first change
+    if (!linkDown && millis() - memoFlushMs < 30UL * 60 * 1000) return;
+    model_lock();
+    memoDirty = false;
+    memoFlushMs = millis();
+    memoPrefs.putBytes("all", memo, nmemo * sizeof(NodeMemo));
+    model_unlock();
 }
 
 static void parse_node(Node &n, JsonObjectConst o) {

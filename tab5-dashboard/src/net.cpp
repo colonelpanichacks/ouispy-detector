@@ -474,7 +474,7 @@ void link_task(void *) {
         }
         // Lost the dashboard for 30 s: look it up again (DHCP may have moved it).
         if (sockStarted && !M->sockUp && !A.otaActive) {
-            if (!downSince) downSince = millis();
+            if (!downSince) downSince = millis(), node_memo_flush(true);   // offline from here: keep what we know
             if (millis() - downSince > 30000) {
                 downSince = millis();
                 String oldAddr = addr;
@@ -559,6 +559,69 @@ void fetch_wardrive() {
     model_unlock();
 }
 
+// One wardriven network / device, decoded by the dashboard, for the Tab5's info page.
+void fetch_wd_info() {
+    char mac[18];
+    uint8_t kind;
+    model_lock();
+    strlcpy(mac, A.wdOpen, sizeof mac);
+    kind = A.wdOpenKind;
+    model_unlock();
+    if (!mac[0]) return;
+    String path = String("/api/wardrive/device/") + mac + (kind == 2 ? "?kind=ble" : "?kind=wifi");
+    JsonDocument doc(&psram);
+    bool ok = http_json(path, doc, nullptr);
+    model_lock();
+    WdInfo &w = M->wdInfo;
+    memset(&w, 0, sizeof w);
+    strlcpy(w.mac, mac, sizeof w.mac);
+    w.failed = !ok;
+    if (ok) {
+        auto add = [&](const char *k, const String &v) {
+            if (!v.length() || w.n >= 16) return;
+            strlcpy(w.k[w.n], k, sizeof w.k[0]);
+            strlcpy(w.v[w.n], v.c_str(), sizeof w.v[0]);
+            w.n++;
+        };
+        JsonObjectConst dec = doc["decoded"];
+        const char *name = doc["name"] | "";
+        strlcpy(w.title, *name ? name : kind == 1 ? "(hidden network)" : (doc["vendor"] | "BLE device"), sizeof w.title);
+        add("TYPE", kind == 1 ? "WiFi access point" : "Bluetooth LE");
+        add("ADDRESS", String(dec["address"] | ""));
+        add("MAKER (OUI)", String(doc["vendor"] | (doc["rnd"] | false ? "random address: no maker in it" : "not registered")));
+        if (kind == 1) {
+            String sec = doc["sec"] | "?";
+            add("SECURITY", sec + "   channel " + String((int)(doc["ch"] | 0)));
+            add("STANDARD", String(dec["standard"] | ""));
+            add("TOP RATE", String(dec["top legacy rate"] | ""));
+            add("COUNTRY", String(dec["country"] | ""));
+            if (dec["hidden"] | false) add("HIDDEN", "yes, the SSID is blanked in its beacons");
+            if (dec["WPS"] | false) add("WPS", "on");
+            String vt;
+            for (JsonObjectConst t : dec["vendor tags"].as<JsonArrayConst>()) vt += (vt.length() ? ", " : "") + String(t["name"] | "");
+            add("VENDOR TAGS", vt);
+        } else {
+            if (!dec["company"].isNull()) add("COMPANY", String(dec["company"]["name"] | "") + " (" + String(dec["company"]["id"] | "") + ")");
+            add("APPEARANCE", String(dec["appearance"] | ""));
+            String sv;
+            for (JsonObjectConst u : dec["services"].as<JsonArrayConst>())
+                sv += (sv.length() ? ", " : "") + String(u["name"] | "") + " (" + String(u["uuid"] | "") + ")";
+            add("SERVICES", sv);
+            add("TX POWER", String(dec["tx power"] | ""));
+            String fl;
+            for (JsonVariantConst f : dec["flags"].as<JsonArrayConst>()) fl += (fl.length() ? ", " : "") + String(f.as<const char *>());
+            add("FLAGS", fl);
+        }
+        add("BEST SIGNAL", String((int)(doc["rssi"] | -127)) + " dBm");
+        add("SEEN", String((int)(doc["seen"] | 0)) + "x in " + String((int)(doc["sessions"] | 1)) + " session(s)");
+        if (doc["lat"].is<double>()) add("PLACED AT", String((double)doc["lat"], 6) + ", " + String((double)doc["lon"], 6) + "  (where it was loudest)");
+        else add("PLACED AT", "not placed: no GPS fix when it was heard");
+        w.loaded = true;
+    }
+    M->version++;
+    model_unlock();
+}
+
 void fetch_stats() {
     JsonDocument doc(&psram);
     if (http_json("/api/stats", doc, nullptr)) ingest_stats(doc);
@@ -622,6 +685,12 @@ void poll_task(void *) {
             wantDetail = true;
             continue;
         }
+        static char lastWdOpen[18] = "";
+        if (strcmp(lastWdOpen, A.wdOpen)) {
+            strlcpy(lastWdOpen, A.wdOpen, sizeof lastWdOpen);
+            if (lastWdOpen[0]) fetch_wd_info();
+            continue;
+        }
         if (strcmp(lastDetail, M->detail.mac) || wantDetail) {
             wantDetail = false;
             strlcpy(lastDetail, M->detail.mac, sizeof lastDetail);
@@ -640,6 +709,7 @@ void poll_task(void *) {
             lastStats = now;
             fetch_stats();
         }
+        node_memo_flush(false);
         static uint32_t lastWd = 0;
         if (A.wdScope == 2 && M->sockUp && (!lastWd || now - lastWd > 300000)) {
             lastWd = now;

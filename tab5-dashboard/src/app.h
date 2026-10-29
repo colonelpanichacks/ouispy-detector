@@ -32,6 +32,10 @@ struct App {
     bool pilotOn = true;        // map: pilots, their track and the line to their drone
     uint8_t wdScope = 0;        // map: wardriven devices 0 off, 1 this session, 2 all history
     uint8_t kindFilter = 0;     // Live: 0 all, 1 detectors, 2 Sky-Spy, 3 wardrivers
+    uint8_t liveSort = 0;       // Live: 0 last seen, 1 name, 2 MAC, 3 type, 4 security / radio, 5 closeness
+    bool liveSortRev = false;
+    char wdOpen[18] = "";       // wardriven device info open (MAC)
+    uint8_t wdOpenKind = 0;     // 1 WiFi, 2 BLE
     bool gpsFollow = false;     // map: keep our own GPS position centred
     bool layerMenu = false;     // the map layer dropdown is open
     char nodeEdit[7] = "";      // node settings panel open for this node id (long press)

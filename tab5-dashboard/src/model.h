@@ -176,6 +176,17 @@ struct Stats {
     uint8_t nhourly;
 };
 
+// A wardriven network / device, decoded by the dashboard (/api/wardrive/device): ready
+// to print lines ("Company  Apple, Inc. (0x004C)").
+struct WdInfo {
+    char mac[18];
+    bool loaded, failed;
+    char title[40];
+    uint8_t n;
+    char k[16][20];
+    char v[16][110];
+};
+
 struct Model {
     // link
     bool wifiUp, sockUp, stateLoaded;
@@ -210,6 +221,7 @@ struct Model {
     uint32_t droneSeq;       // bumps when a drone first shows up
 
     DevDetail detail;
+    WdInfo wdInfo;
 
     // alerts
     uint32_t alertsUnacked;
@@ -227,6 +239,7 @@ extern Model *M;   // lives in PSRAM
 
 void model_init();
 void model_lock();
+void node_memo_flush(bool linkDown);   // save learned node names/positions (see model.cpp)
 void model_unlock();
 
 double server_now();                  // server epoch now, extrapolated

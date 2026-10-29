@@ -1090,3 +1090,18 @@ body.map-maxed .toasts { z-index: 1700; }
 .wd-tr { cursor: pointer; }
 .wd-tr:hover td { background: rgba(255, 43, 214, .06); }
 #wdDrawer .chip { margin: 0 4px 4px 0; display: inline-block; }
+
+/* Node drawer: map actions up top; detections and link events scroll in their own boxes. */
+.drawer-actions.top { margin-top: 8px; margin-bottom: 4px; }
+.dscroll { max-height: 280px; overflow-y: auto; padding-right: 4px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px; background: rgba(0, 0, 0, .18); }
+.devents .ev { display: grid; grid-template-columns: 12px 64px 1fr auto; gap: 8px; align-items: center;
+    padding: 4px 2px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px; }
+.devents .ev:last-child { border-bottom: 0; }
+.devents .ev-dot { width: 8px; height: 8px; border-radius: 50%; }
+.devents .ev-dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.devents .ev-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.devents b.on { color: var(--accent); } .devents b.off { color: var(--red); }
+.devents .ev-time { color: #dbe4ee; }
+.devents .ev-ago { color: var(--muted); text-align: right; }
+.devents .ev-span { grid-column: 2 / -1; color: var(--muted); font-size: 10px; margin-top: -2px; }

@@ -76,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -1530,6 +1530,70 @@ void node_set(const char *id, const char *json) {
     net_post(path, json);
 }
 
+// A wardriven network / device: everything the dashboard decoded (long-press its row).
+void draw_wd_info() {
+    int x = PAD + 120, y = CY + 10, w = W - 2 * PAD - 240, h = CB - CY - 20;
+    fast_fill(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
+    hit(0, TOP, W, H - TOP - BOT, H_WDCLOSE);   // a tap outside closes it
+    hit(x, y, w, h, H_NONE);
+    fast_round(x, y, w, h, 10, PANEL);
+    uint16_t c = A.wdOpenKind == 2 ? rgb(0xff2bd6) : SKY;
+    glow_rect(x, y, w, h, 10, c);
+    const WdInfo &wi = M->wdInfo;
+    bool here = wi.loaded && !strcmp(wi.mac, A.wdOpen);
+    const char *title = here ? wi.title : "";
+    if (!here) {
+        for (int i = 0, n = wd_count(); i < n; i++) {
+            const WdDev &d = wd_at(i);
+            char m[18];
+            snprintf(m, sizeof m, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+            if (d.kind == A.wdOpenKind && !strcmp(m, A.wdOpen)) { title = d.name[0] ? d.name : ""; break; }
+        }
+    }
+    font(F_BRAND);
+    glow(x + 24, y + 32, fit_name(title[0] ? title : A.wdOpen, w - 260), c, middle_left);
+    font(F_SM);
+    text(x + 24, y + 62, A.wdOpen, MUTED, middle_left);
+    int cw;
+    chip(x + w - 24 - (C.textWidth("CLOSE  ESC") + 28), y + 18, "CLOSE  ESC", ACCENT, false, &cw, H_WDCLOSE);
+    int yy = y + 96;
+    if (!here) {
+        font(F_MD);
+        text(x + w / 2, y + h / 2, wi.failed && !strcmp(wi.mac, A.wdOpen) ? "the dashboard doesn't know it yet"
+                                   : net_online() ? "loading..." : "full details come from the dashboard (Wi-Fi)",
+             FAINT, middle_center);
+        return;
+    }
+    for (int i = 0; i < wi.n && yy + 30 < y + h; i++) {
+        font(F_SM);
+        text(x + 24, yy + 10, wi.k[i], dim(ACCENT, 0.9f), middle_left);
+        font(F_MD);
+        const char *v = wi.v[i];
+        int vw = w - 260;
+        if (C.textWidth(v) <= vw) {
+            text(x + 210, yy + 10, v, TEXT, middle_left);
+            yy += 36;
+        } else {   // long values wrap onto a second line instead of being cut
+            String a(v);
+            int cut = a.length();
+            while (cut > 0 && (C.textWidth(a.substring(0, cut).c_str()) > vw || (a[cut] != ' ' && a[cut] != ',' && a[cut]))) cut--;
+            if (cut <= 0) cut = a.length() / 2;
+            String l2 = a.substring(cut);
+            l2.trim();
+            text(x + 210, yy + 10, a.substring(0, cut).c_str(), TEXT, middle_left);
+            text(x + 210, yy + 38, fit(l2.c_str(), vw), TEXT, middle_left);
+            yy += 64;
+        }
+    }
+}
+
+void open_wd_info(int li) {
+    if (!wdIdx || li < 0 || li >= wdN) return;
+    const WdDev &d = wd_at(wdIdx[li]);
+    snprintf(A.wdOpen, sizeof A.wdOpen, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+    A.wdOpenKind = d.kind;
+}
+
 void draw_node_editor() {
     const Node *n = edit_node();
     if (!n) { A.nodeEdit[0] = 0; return; }
@@ -2308,13 +2372,39 @@ void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows)
 
 // ------------------------------------------------------------------ LIVE
 
+// A sortable column head: tap to sort by it, again to reverse.
+void sort_head(int x, int y, const char *label, int key) {
+    font(F_SM);
+    bool on = A.liveSort == key;
+    text(x, y, label, on ? ACCENT : FAINT);
+    int w = C.textWidth(label);
+    if (on) {
+        int ax = x + w + 6, ay = y + 6;
+        if (A.liveSortRev) C.fillTriangle(ax, ay + 3, ax + 8, ay + 3, ax + 4, ay - 3, ACCENT);
+        else C.fillTriangle(ax, ay - 3, ax + 8, ay - 3, ax + 4, ay + 3, ACCENT);
+    }
+    hit(x - 6, y - 8, w + 26, 30, H_SORT, key);
+}
+
 void draw_live_wardrive() {
     if (!wdIdx) wdIdx = (int *)heap_caps_malloc(WD_MAX * sizeof(int), MALLOC_CAP_SPIRAM);
     if (!wdIdx) return;
     wdN = 0;
     for (int i = 0, n = wd_count(); i < n; i++)
         if (wd_at(i).session) wdIdx[wdN++] = i;
-    std::sort(wdIdx, wdIdx + wdN, [](int a, int b) { return wd_at(a).last > wd_at(b).last; });
+    // Sort: last seen (default), name, MAC, type, security, closeness (strongest first).
+    auto key = [](int a, int b) -> int {   // <0: a first
+        const WdDev &x = wd_at(a), &y = wd_at(b);
+        switch (A.liveSort) {
+        case 1: return strcasecmp(x.name[0] ? x.name : "~", y.name[0] ? y.name : "~");
+        case 2: return memcmp(x.mac, y.mac, 6);
+        case 3: return (int)x.kind - (int)y.kind;
+        case 4: return (int)x.sec - (int)y.sec;
+        case 5: return (int)y.rssi - (int)x.rssi;
+        default: return x.last > y.last ? -1 : x.last < y.last ? 1 : 0;
+        }
+    };
+    std::sort(wdIdx, wdIdx + wdN, [&](int a, int b) { int c = key(a, b); return A.liveSortRev ? c > 0 : c < 0; });
     draw_filter_row(CY, wdN, wd_count());
     int ty = CY + 50, rh = 34, rows = (CB - ty - 40) / rh, th = 34 + rows * rh + 6;
     panel(PAD, ty, W - 2 * PAD, th, nullptr);
@@ -2326,13 +2416,13 @@ void draw_live_wardrive() {
     snprintf(hdr, sizeof hdr, "WARDRIVE THIS SESSION   %lu APs   %lu BLE", (unsigned long)wd_session_count(1),
              (unsigned long)wd_session_count(2));
     text(PAD + W - 2 * PAD - 18, ty + 12, hdr, PINK, top_right);
-    text(cAge, ty + 12, "AGE", FAINT);
-    text(cName, ty + 12, "NAME / SSID", FAINT);
-    text(cMac, ty + 12, "MAC", FAINT);
-    text(cType, ty + 12, "TYPE", FAINT);
-    text(cSec, ty + 12, "SECURITY", FAINT);
+    sort_head(cAge, ty + 12, "AGE", 0);
+    sort_head(cName, ty + 12, "NAME / SSID", 1);
+    sort_head(cMac, ty + 12, "MAC", 2);
+    sort_head(cType, ty + 12, "TYPE", 3);
+    sort_head(cSec, ty + 12, "SECURITY", 4);
     text(cCh, ty + 12, "CH", FAINT);
-    text(cRssi, ty + 12, "BEST", FAINT);
+    sort_head(cRssi, ty + 12, "CLOSEST", 5);
     text(cPos, ty + 12, "MAP", FAINT);
     static const char *SEC[] = {"open", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
     static const uint32_t SECC[6] = {0x39ff88, 0xff4d6d, 0xffb020, 0x22d3ee, 0xa78bfa, 0xa78bfa};
@@ -2343,7 +2433,12 @@ void draw_live_wardrive() {
         int li = A.top[V_LIVE] + k;
         if (li >= wdN) break;
         const WdDev &d = wd_at(wdIdx[li]);
-        if (k & 1) C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
+        bool sel = li == A.sel[V_LIVE];
+        hit(PAD, ry, W - 2 * PAD, rh, H_ROW, li);
+        if (sel) {
+            C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, dim(PINK, 0.12f));
+            C.fillRect(PAD + 4, ry, 3, rh - 2, PINK);
+        } else if (k & 1) C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
         int my = ry + rh / 2;
         uint16_t c = d.kind == 2 ? rgb(0xff2bd6) : rgb(d.sec < 6 ? SECC[d.sec] : 0x7dd3fc);
         font(F_MD);
@@ -2374,6 +2469,22 @@ void draw_live_wardrive() {
 
 void draw_live() {
     if (live_is_wardrive()) { draw_live_wardrive(); return; }
+    if (A.liveSort) {   // newest first otherwise (the ring order)
+        auto key = [](int a, int b) -> int {
+            const Det *x = det_at(a), *y = det_at(b);
+            switch (A.liveSort) {
+            case 1: return strcasecmp(vendor_of(x), vendor_of(y));
+            case 2: return strcmp(x->mac, y->mac);
+            case 3: return strcmp(x->type, y->type);
+            case 4: return strcmp(x->dom, y->dom);
+            case 5: return (int)y->rssi - (int)x->rssi;
+            default: return 0;
+            }
+        };
+        std::stable_sort(liveIdx, liveIdx + nLive, [&](int a, int b) { int c = key(a, b); return A.liveSortRev ? c > 0 : c < 0; });
+    } else if (A.liveSortRev) {
+        std::reverse(liveIdx, liveIdx + nLive);
+    }
     draw_filter_row(CY, nLive, M->ndets);
     int ty = CY + 50, rows = 10, rh = 34, th = 34 + rows * rh + 6;
     panel(PAD, ty, W - 2 * PAD, th, nullptr);
@@ -2381,12 +2492,12 @@ void draw_live() {
     const int cAge = PAD + 18, cVen = PAD + 90, cMac = PAD + 400, cType = PAD + 640, cDom = PAD + 740,
               cRssi = PAD + 820, cNode = PAD + 980, cClose = PAD + 1110;
     font(F_SM);
-    text(cAge, ty + 12, "AGE", FAINT);
-    text(cVen, ty + 12, "DEVICE", FAINT);
-    text(cMac, ty + 12, "MAC", FAINT);
-    text(cType, ty + 12, "TYPE", FAINT);
-    text(cDom, ty + 12, "DOM", FAINT);
-    text(cRssi, ty + 12, "RSSI", FAINT);
+    sort_head(cAge, ty + 12, "AGE", 0);
+    sort_head(cVen, ty + 12, "DEVICE", 1);
+    sort_head(cMac, ty + 12, "MAC", 2);
+    sort_head(cType, ty + 12, "TYPE", 3);
+    sort_head(cDom, ty + 12, "DOM", 4);
+    sort_head(cRssi, ty + 12, "CLOSEST", 5);
     text(cNode, ty + 12, "NODE", FAINT);
     text(cClose, ty + 12, "CLOSEST", FAINT);
     int ry = ty + 34;
@@ -2794,18 +2905,16 @@ void wm_build() {
     mk.fillSprite(0);
     mk.setFont(&fonts::Orbitron_Light_32);
     mk.setTextColor(1);
-    const char *lines[2] = {"COLONEL", "PANIC.TECH"};
+    // The whole name on one line, as large as the screen width allows.
+    const char *name = "COLONELPANIC.TECH";
     float sz = 1;
-    for (float z = 6; z >= 1; z -= 0.1f) {   // largest size where both lines fit
+    for (float z = 6; z >= 1; z -= 0.05f) {
         mk.setTextSize(z);
-        if (mk.textWidth(lines[1]) <= W - 120 && mk.fontHeight() * 2 <= WM_ROWS * WM_CH - 6) { sz = z; break; }
+        if (mk.textWidth(name) <= W - 60 && mk.fontHeight() <= WM_ROWS * WM_CH - 6) { sz = z; break; }
     }
     mk.setTextSize(sz);
     mk.setTextDatum(middle_center);
-    int lh = mk.fontHeight();
-    int band = WM_ROWS * WM_CH;
-    mk.drawString(lines[0], W / 2, band / 2 - lh / 2 - 2);
-    mk.drawString(lines[1], W / 2, band / 2 + lh / 2 + 2);
+    mk.drawString(name, W / 2, WM_ROWS * WM_CH / 2);
     for (int r = 0; r < WM_ROWS; r++)
         for (int c = 0; c < WM_COLS; c++) {
             int hitN = 0;   // a cell counts when most of its samples are ink
@@ -2928,9 +3037,12 @@ void boards_draw(float t, float gain0) {
     static const char RAMPB[] = " .:-=+*#%@";
     const int R = sizeof(RAMPB) - 1;
     const int TW = BOARDS_COLS + 14;                       // tile width with a gap
-    int ox = (int)(t * 2.0f) % TW, oy = (int)(t * 3.0f) % BOARDS_ROWS;
-    const int cols = W / WM_CW + 1, rows = H / WM_CH + 1;
+    // Zoomed in 2x: big glyphs (12 x 18 cells), the art reads as a picture behind the mark.
+    const int ZW = WM_CW * 2, ZH = WM_CH * 2;
+    int ox = (int)(t * 1.2f) % TW, oy = (int)(t * 1.8f) % BOARDS_ROWS;
+    const int cols = W / ZW + 1, rows = H / ZH + 1;
     C.setFont(&fonts::Font0);
+    C.setTextSize(2);
     C.setTextDatum(top_left);
     char one[2] = {0, 0};
     for (int y = 0; y < rows; y++) {
@@ -2945,9 +3057,10 @@ void boards_draw(float t, float gain0) {
             float hp = (x / (float)cols) * 0.9f + (y / (float)rows) * 0.3f + t * 0.03f;
             one[0] = RAMPB[glyph];
             C.setTextColor(wm_loop(hp, gain0 * (0.45f + 0.55f * v), 0));
-            C.drawString(one, x * WM_CW, y * WM_CH);
+            C.drawString(one, x * ZW, y * ZH);
         }
     }
+    C.setTextSize(1);
 }
 
 void draw_ota() {
@@ -3357,6 +3470,10 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         A.help = false;
         return;
     }
+    if (A.wdOpen[0]) {
+        if (kc == 0x29 || kc == 0x28) A.wdOpen[0] = 0;   // ESC / Enter closes it
+        return;
+    }
     if (A.nodeEdit[0]) {
         if (A.editNode) {
             size_t n = strlen(A.editBuf);
@@ -3555,6 +3672,10 @@ static void dispatch(const Hit &h) {
         }
         return;
     }
+    if (A.wdOpen[0]) {   // a wardriven device's info page is up: only closing it
+        if (h.act == H_WDCLOSE) A.wdOpen[0] = 0;
+        return;
+    }
     if (A.nodeEdit[0]) {
         const Node *n = edit_node();
         char id[7];
@@ -3676,7 +3797,10 @@ static void dispatch(const Hit &h) {
     case H_TAB: A.view = (View)h.arg; A.searching = false; A.layerMenu = false; A.editDrone = false; break;
     case H_ROW:
         // Tap a row to select it, tap it again for everything about it.
-        if (A.view == V_LIVE && A.sel[V_LIVE] == h.arg && nLive) open_detail(det_at(liveIdx[h.arg])->mac);
+        if (A.view == V_LIVE && A.sel[V_LIVE] == h.arg) {
+            if (live_is_wardrive()) open_wd_info(h.arg);
+            else if (nLive) open_detail(det_at(liveIdx[h.arg])->mac);
+        }
         A.sel[A.view] = h.arg;
         break;
     case H_TARGET:
@@ -3751,6 +3875,10 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
+    case H_SORT:
+        if (A.liveSort == h.arg) A.liveSortRev = !A.liveSortRev;
+        else A.liveSort = h.arg, A.liveSortRev = false;
+        break;
     case H_KIND: A.kindFilter = (A.kindFilter + 1) % 4; A.metricsGen++; break;
     case H_SEARCH: A.searching = !A.searching; break;
     case H_CLEAR:
@@ -3833,7 +3961,10 @@ void ui_press(int x, int y) {
     }
     if (A.help || A.settings) T.scroll = T.scroll >= 0 && T.area.list == L_NETS && A.settings ? T.scroll : -1;
     if (A.detail || A.nodeEdit[0]) T.scroll = -1;
-    if (T.hasPressed) pressPaint = true;
+    // Instant pressed look only for real controls: tinting and pushing a screen-sized
+    // "nothing here" area (the dim backdrop around a panel) row by row straight into the
+    // panel's framebuffer starved its scan-out: a blue flash.
+    if (T.hasPressed && T.pressed.act != H_NONE && (int)T.pressed.w * T.pressed.h < 260000) pressPaint = true;
     model_unlock();
 }
 
@@ -3921,6 +4052,19 @@ void ui_frame() {
         return;
     }
     // Long press (~0.55 s, finger still) on a node row: its settings panel.
+    // Long press on a Live row: its full info (a device, or a wardriven network).
+    if (T.down && T.hasPressed && !T.dragging && millis() - T.downMs > 550 && !A.nodeEdit[0] && !A.detail &&
+        !A.wdOpen[0] && T.pressed.act == H_ROW && A.view == V_LIVE) {
+        model_lock();
+        int li = T.pressed.arg;
+        A.sel[V_LIVE] = li;
+        if (live_is_wardrive()) open_wd_info(li);
+        else if (li >= 0 && li < nLive) open_detail(det_at(liveIdx[li])->mac);
+        if (S.sound) M5.Speaker.tone(2400, 40);
+        T.hasPressed = false;
+        dirty = true;
+        model_unlock();
+    }
     if (T.down && T.hasPressed && !T.dragging && millis() - T.downMs > 550 && !A.nodeEdit[0] && !A.detail &&
         (T.pressed.act == H_NODEROW || (T.pressed.act == H_ROW && A.view == V_FLEET))) {
         model_lock();
@@ -3981,6 +4125,7 @@ void ui_frame() {
         default: break;
         }
         if (A.detail) draw_detail();
+        if (A.wdOpen[0]) draw_wd_info();
         if (A.nodeEdit[0]) draw_node_editor();
         uint32_t p2 = micros();
         cached_band(topBand, top_key(), draw_top);

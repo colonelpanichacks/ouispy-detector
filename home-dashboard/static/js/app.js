@@ -1631,13 +1631,24 @@ async function openDrawer(id) {
     $("dStats").innerHTML = cells.map(([k, v, c]) =>
         `<div class="hs"><div class="k">${k}</div><div class="v ${c || ""}">${esc(v)}</div></div>`).join("");
     $("dSpark").innerHTML = spark(samples);
+    $("dDetsN").textContent = data.detections.length ? `${data.detections.length}` : "";
     $("dDets").innerHTML = data.detections.length
         ? data.detections.map((d) => detHtml(d)).join("")
         : `<div class="empty">No detections from this node.</div>`;
-    const evs = data.sightings.filter((s) => s.event !== "sample").slice(-30).reverse();
+    // Link events, newest first: when it came and went, and for how long it was gone / up.
+    const all = data.sightings.filter((s) => s.event !== "sample");
+    const evs = all.slice(-60).map((e, i, a) => ({
+        ...e, span: i > 0 && a[i - 1].event !== e.event && e.ts - a[i - 1].ts >= 1 ? e.ts - a[i - 1].ts : null,
+    })).reverse();
+    $("dEventsN").textContent = evs.length ? `${evs.length} in 24 h` : "";
     $("dEvents").innerHTML = evs.length
-        ? evs.map((e) => `<div><span class="${e.event === "online" ? "on" : "off"}">${e.event.toUpperCase()}</span> ${fullTime(e.ts)}</div>`).join("")
-        : `<div>No link events in 24 h.</div>`;
+        ? evs.map((e) => {
+            const on = e.event === "online";
+            const span = e.span != null ? `<span class="ev-span">${on ? "down" : "up"} ${dur(e.span)} before</span>` : "";
+            return `<div class="ev"><span class="ev-dot ${on ? "on" : "off"}"></span><b class="${on ? "on" : "off"}">${on ? "ONLINE" : "OFFLINE"}</b>` +
+                `<span class="ev-time">${esc(fullTime(e.ts))}</span><span class="ev-ago">${ago(e.ts)}</span>${span}</div>`;
+        }).join("")
+        : `<div class="empty">No link events in 24 h.</div>`;
     renderGpsButton();
     if (S.editFor && S.editFor !== id) { S.editing = null; S.editFor = null; }
     if (S.audioDirty && S.audioDirty !== id) S.audioDirty = null;
@@ -1646,6 +1657,13 @@ async function openDrawer(id) {
     $("dPlace").textContent = n.lat != null ? "Move on map" : "Place on map";
     $("dUnplace").style.display = n.lat != null ? "" : "none";
     $("dForget").style.display = n.online ? "none" : "";
+}
+function dur(sec) {   // 95 -> "1m 35s", 7300 -> "2h 1m"
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+    if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor(sec % 3600 / 60)}m`;
+    return `${Math.floor(sec / 86400)}d ${Math.floor(sec % 86400 / 3600)}h`;
 }
 function spark(samples) {
     if (samples.length < 2) return `<div class="none">Not enough samples yet</div>`;

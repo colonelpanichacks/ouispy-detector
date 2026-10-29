@@ -421,6 +421,12 @@
             <input type="text" id="dAlias" class="field" maxlength="40" placeholder="Friendly name">
             <button class="btn" id="dSave">Save</button>
         </div>
+        <div class="drawer-actions top">
+            <button class="btn ghost" id="dPlace">Place on map</button>
+            <button class="btn ghost" id="dUnplace">Remove from map</button>
+            <button class="btn ghost danger" id="dForget">Forget node</button>
+            <button class="btn ghost danger" id="dClearDets" title="Deletes this node's detections from the history; the node itself is not touched">Clear detections</button>
+        </div>
         <label>Color</label>
         <div class="color-row">
             <input type="range" id="dColor" class="hue-slider" min="0" max="359" step="1" value="180" aria-label="Node color">
@@ -514,16 +520,10 @@
             <button class="btn ghost" id="dGps" title="Use this phone's GPS as the node's position while you carry it">Carry with this phone</button>
             <span class="cfg-age" id="dGpsInfo"></span>
         </div>
-        <div class="drawer-actions">
-            <button class="btn ghost" id="dPlace">Place on map</button>
-            <button class="btn ghost" id="dUnplace">Remove from map</button>
-            <button class="btn ghost danger" id="dForget">Forget node</button>
-            <button class="btn ghost danger" id="dClearDets" title="Deletes this node's detections from the history; the node itself is not touched">Clear detections</button>
-        </div>
-        <h4>Recent detections</h4>
-        <div class="dfeed" id="dDets"></div>
-        <h4>Link events</h4>
-        <div class="devents" id="dEvents"></div>
+        <h4>Recent detections <span class="fa-count" id="dDetsN"></span></h4>
+        <div class="dfeed dscroll" id="dDets"></div>
+        <h4>Link events <span class="fa-count" id="dEventsN"></span></h4>
+        <div class="devents dscroll" id="dEvents"></div>
     </div>
 </aside>
 
