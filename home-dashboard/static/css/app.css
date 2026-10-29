@@ -1077,3 +1077,13 @@ body.map-maxed .toasts { z-index: 1700; }
 .node-top .dot { margin-top: 4px; flex-shrink: 0; }
 .node-top .node-name { flex: 1 1 110px; line-height: 1.3; overflow-wrap: anywhere; }   /* badges drop to a second line before the name is squeezed */
 .node-top .node-id, .node-top .node-tags, .node-top .role { flex-shrink: 0; }
+
+/* Wardriving */
+.ntag.wd { color: #ff9ff3; border-color: rgba(255, 43, 214, .5); background: rgba(255, 43, 214, .1); box-shadow: 0 0 6px rgba(255, 43, 214, .35); }
+.map-wd-btn.on { color: #ff9ff3; border-color: rgba(255, 43, 214, .6); box-shadow: 0 0 8px rgba(255, 43, 214, .35); }
+.wd-live { margin-left: auto; margin-right: 10px; font-size: 11px; }
+.det.wd-row { border-left: 2px solid #ff2bd6; }
+.wd-pop b { display: block; margin-bottom: 4px; color: #fff; overflow-wrap: anywhere; }
+.wd-pop div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; }
+.wd-pop div span { color: var(--muted); }
+.wd-box select.field, .wd-box input.field { flex: 1 1 auto; min-width: 0; }

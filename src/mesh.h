@@ -152,6 +152,7 @@ void meshSetHealAllowed(bool allowed);
 #define MESH_CMD_FILTER_ADD 11     // payload: filter records merged into the list (live)
 #define MESH_CMD_FILTER_DEL 12     // payload: filter records removed by (type, id) (live)
 #define MESH_CMD_ALIAS 14          // payload: the node's new alias (0-32 plain ASCII, empty clears)
+#define MESH_CMD_WARDRIVE 15       // payload: u8 on (255 keep), u8 raw (255 keep), u16 le channel mask (0 keep); wardrive.h
 // Filter edits ack with count = filters installed afterwards; status 1 when
 // refused (invalid records, or the node would be left with no filters).
 // Ack body (remote -> home): u8 cmd, u16 cmdId, u8 status, u8 count

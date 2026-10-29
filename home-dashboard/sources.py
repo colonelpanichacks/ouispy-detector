@@ -240,6 +240,113 @@ class SerialSource(Source):
 # ----------------------------------------------------------------------
 # MQTT (the home node's detection publishes)
 # ----------------------------------------------------------------------
+class WardriveUsbSource(Source):
+    """Wardriver nodes plugged into this computer (besides the home on its own port).
+
+    Every Espressif board on USB that is not the home's port, not on the ignore list
+    and not already being read is opened plainly (never touching DTR/RTS, see
+    SerialSource) and kept only if its telemetry says kind "wardrive"; anything else
+    is released within 12 s and left alone for 10 min. Its WD lines go to the wardrive
+    store (stamped with this node's id), the rest to the fleet like any node's.
+    One reader thread per wardriver."""
+    kind = "wardrive-usb"
+
+    def __init__(self, fleet, on_status, busy, get_ignore, wardrive):
+        super().__init__(fleet, on_status)
+        self.busy = busy              # () -> USB serials other sources hold
+        self.get_ignore = get_ignore
+        self.wardrive = wardrive
+        self.readers = {}             # usb serial -> {"port", "id", "ser"}
+        self.not_wd = {}              # usb serial -> when it proved not to be a wardriver
+        self.rlock = threading.Lock()
+
+    def run(self):
+        if serial is None:
+            return
+        while not self.stop_evt.is_set():
+            ignore = set(self.get_ignore() or []) | set(self.busy() or [])
+            now = time.time()
+            for p in list_serial_ports():
+                sn = p["serial"]
+                if (not p["espressif"] or not sn or sn in ignore or sn in self.readers
+                        or now - self.not_wd.get(sn, 0) < 600):
+                    continue
+                with self.rlock:
+                    self.readers[sn] = {"port": p["device"], "id": None, "ser": None}
+                threading.Thread(target=self._read, args=(sn, p["device"]), daemon=True,
+                                 name=f"wd-usb-{sn[-5:]}").start()
+            n = sum(1 for r in self.readers.values() if r["id"])
+            self.set_state(connected=n > 0, detail=f"{n} wardriver(s) on USB" if n else "no wardriver on USB")
+            self.stop_evt.wait(3)
+
+    def _read(self, sn, port):
+        import json as _json
+        opened = time.time()
+        proven = False
+        try:
+            ser = serial.Serial(port, 115200, timeout=1)
+            self.readers[sn]["ser"] = ser
+            ser.write(b"\n")
+            buf = b""
+            last_rx = time.time()
+            while not self.stop_evt.is_set():
+                if not proven and time.time() - opened > 12:
+                    self.not_wd[sn] = time.time()
+                    break
+                if sn in set(self.busy() or []):   # the home source wants it (fallback)
+                    break
+                chunk = ser.read(ser.in_waiting or 1)
+                if not chunk:
+                    if time.time() - last_rx > 15:
+                        break
+                    continue
+                last_rx = time.time()
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    line = raw.decode("utf-8", "replace").rstrip("\r")
+                    if line.startswith("TLM "):
+                        try:
+                            t = _json.loads(line[4:])
+                        except ValueError:
+                            t = {}
+                        if t.get("kind") != "wardrive":
+                            self.not_wd[sn] = time.time()
+                            return
+                        proven = True
+                        self.readers[sn]["id"] = t.get("id")
+                    if line.startswith("WD "):
+                        try:
+                            self.wardrive.feed(_json.loads(line[3:]), self.readers[sn]["id"])
+                        except ValueError:
+                            pass
+                        continue
+                    if proven and line.startswith(("TLM ", "RST ", "RID ")):
+                        self.fleet.feed_line(line, "wardrive-usb")
+                if len(buf) > 65536:
+                    buf = b""
+        except (OSError, serial.SerialException):
+            pass
+        finally:
+            r = self.readers.pop(sn, None) or {}
+            try:
+                if r.get("ser"):
+                    r["ser"].close()
+            except Exception:
+                pass
+
+    def send_to(self, node_id, line):
+        """A console line straight to a USB wardriver (faster than the mesh)."""
+        for r in list(self.readers.values()):
+            if r["id"] == node_id and r["ser"]:
+                try:
+                    r["ser"].write((line.strip() + "\n").encode())
+                    return True
+                except Exception:
+                    return False
+        return False
+
+
 class MqttSource(Source):
     kind = "mqtt"
 

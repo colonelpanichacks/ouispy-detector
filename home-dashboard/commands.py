@@ -31,7 +31,7 @@ LABELS = {
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
     "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
     "rechan": "Re-channel fleet", "meshpush": "Push home filters",
-    "setkey": "Set fleet key",
+    "setkey": "Set fleet key", "wardrive": "Wardriver settings",
     "fw_stage": "Stage firmware on home", "fw_send": "Update firmware", "fw_self": "Update home firmware",
 }
 
@@ -42,7 +42,7 @@ LABELS = {
 KNOWN_VERBS = {"nodealias", "ralias", "status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
                "rreboot", "rident", "rpreset", "mfbegin", "mfadd", "mfdel", "mfdata", "mfend",
                "fadd", "fdel", "meshpush", "meshrechan", "fwbegin", "fwdata", "fwend", "fwsend",
-               "fwself", "fwabort", "preset", "meshkey"}
+               "fwself", "fwabort", "preset", "meshkey", "rwd", "wd"}
 ERR_VERBS = {"mfend": {"mfend", "filters", "fadd", "fdel"}}
 
 
@@ -81,6 +81,24 @@ def plan(op, target, args, home_id):
         label = f"Name node {a!r}" if a else "Clear node name"
         return ([(f"nodealias {a or '-'}", "OK")], "local", label) if local else \
                ([(f"ralias {tgt} {a or '-'}", "CMD")], "ack", label)
+    if op == "wardrive":
+        # A wardriver node's switches (src/wardrive.h): on / off, raw packets, channel plan.
+        words = []
+        if "on" in args:
+            words.append("on" if args["on"] else "off")
+        if "raw" in args:
+            words.append("raw on" if args["raw"] else "raw off")
+        if args.get("ch"):
+            ch = str(args["ch"]).strip().replace(" ", "")
+            if not re.fullmatch(r"all|(\d{1,2}(-\d{1,2})?)(,\d{1,2}(-\d{1,2})?)*", ch):
+                raise PlanError("channels: all, 6, 1-6, 1,6,11 or 1-3,11")
+            words.append("ch " + ch)
+        if not words:
+            raise PlanError("nothing to change")
+        label = "Wardriver: " + ", ".join(words)
+        if local:
+            return ([(f"wd {w}", "OK") for w in words], "local", label)
+        return ([(f"rwd {tgt} {w}", "CMD") for w in words], "ack", label)
     if op == "reboot":
         return ([("reboot", "OK")], "local", label) if local else \
                ([(f"rreboot {tgt}", "CMD")], "ack", label)

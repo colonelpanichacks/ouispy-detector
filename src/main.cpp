@@ -24,6 +24,7 @@
 #include "mesh_ota.h"
 #include "devinfo.h"
 #include "rid.h"
+#include "wardrive.h"
 #include <rom/crc.h>
 #include <mbedtls/sha256.h>
 
@@ -188,16 +189,23 @@ struct DeviceInfo {
 // derived from the type — no separate field is stored on TargetFilter.
 static inline bool isWifiDomain(FilterType t) { return t >= FT_WIFI_PROBE; }
 
-// Two builds of this firmware (platformio.ini envs):
+// Three builds of this firmware (platformio.ini envs):
 //   detector  the OUI-SPY Mesh node: filter matching; drone Remote ID off
 //             unless turned on (console: rid on|off).
 //   skyspy    a dedicated Sky-Spy drone node on the same mesh: Remote ID always
 //             on, both radios always scanning, no filters needed.
+//   wardrive  WiGLE-style: every access point and BLE device, printed for the
+//             Tab5 (wardrive.h); both radios always scanning, no filters, scans
+//             straight after a USB flash. Still a mesh node (names, OTA, settings).
 // The kind is stamped into the image (the dashboard reads it before an update)
-// and onto the build stamp every node reports ("Oct28 20:37:51S" = Sky-Spy).
+// and onto the build stamp every node reports ("Oct28 20:37:51S" = Sky-Spy,
+// "...W" = wardriver).
 #ifdef SKYSPY_NODE
 #define FW_KIND_NAME "skyspy"
 bool ridEnabled = true;
+#elif defined(WARDRIVE_NODE)
+#define FW_KIND_NAME "wardrive"
+bool ridEnabled = true;   // drones are part of what's in the air
 #else
 #define FW_KIND_NAME "detector"
 bool ridEnabled = false;
@@ -712,7 +720,7 @@ static void serialConsoleTick() {
         // A mesh node may start with no filters (the web flasher sets them
         // up that way): it joins the mesh and gets its list from the
         // dashboard. Without the mesh it would have nothing to do.
-        if (targetFilters.size() == 0 && !meshCfg.enabled) {
+        if (targetFilters.size() == 0 && !meshCfg.enabled && !wdOn()) {
             Serial.println("ERR no filters installed");
             return;
         }
@@ -730,7 +738,7 @@ static void serialConsoleTick() {
         // Same end state as the portal's Burn In button: everything staged
         // gets persisted, the lock is set, and the node boots straight into
         // scanning from here on (BOOT-hold at power-on to unlock).
-        if (targetFilters.size() == 0 && !meshCfg.enabled) {
+        if (targetFilters.size() == 0 && !meshCfg.enabled && !wdOn()) {
             Serial.println("ERR no filters installed");
             return;
         }
@@ -1128,7 +1136,7 @@ void loadConfiguration() {
     preferences.begin("ouispy", true);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
-#ifndef SKYSPY_NODE
+#if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE)
     ridEnabled = preferences.getBool("rid", false);
 #endif
     targetFilters.clear();
@@ -1613,6 +1621,12 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         if (isSerialConnected()) Serial.printf("[MESH] alias set by home: %s\n", a.length() ? a.c_str() : "(cleared)");
         break;
     }
+    case MESH_CMD_WARDRIVE: {
+        if (!wdApplyMesh(payload, len)) { meshSendAck(cmd, cmdId, 1, 0); return; }   // not a wardriver
+        meshSendAck(cmd, cmdId, 0, 0);
+        if (isSerialConnected()) Serial.println("[MESH] wardrive settings from the dashboard");
+        break;
+    }
     case MESH_CMD_GETFILTERS:
         meshHoldRadio(4000);
         filtersReportDueAt = millis() + random(200, 3000);
@@ -1762,6 +1776,8 @@ static uint8_t buildStatus(uint8_t* d) {
         memcpy(o + 6, b + 12, 8);
 #ifdef SKYSPY_NODE
         o[14] = 'S';    // a Sky-Spy node
+#elif defined(WARDRIVE_NODE)
+        o[14] = 'W';    // a wardriver
 #endif
     }
     n += 16;
@@ -2052,6 +2068,7 @@ static bool remoteConsoleCommand(const String& line) {
         Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
         return true;
     }
+    if (wdConsole(verb, rest)) return true;   // wd, wd on|off, wd raw on|off, wd ch ...
     if (verb == "rid") {            // rid on|off: drone Remote ID (keeps WiFi + BLE scanning)
 #ifdef SKYSPY_NODE
         Serial.println("OK rid on (always on in a Sky-Spy node)");
@@ -2093,7 +2110,7 @@ static bool remoteConsoleCommand(const String& line) {
     }
 
     bool remote = verb == "rstatus" || verb == "raudio" || verb == "rreboot" ||
-                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias";
+                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias" || verb == "rwd";
     if (remote) {
         if (!parseTarget(arg[0], t, all)) { Serial.printf("ERR %s: target must be a node ID or all\n", verb.c_str()); return true; }
         if (verb == "rstatus") {
@@ -2113,6 +2130,14 @@ static bool remoteConsoleCommand(const String& line) {
             int secs = arg[1].length() ? arg[1].toInt() : 10;
             uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
             sendMgmt("rident", t, all, MESH_CMD_IDENTIFY, p, 2);
+        } else if (verb == "rwd") {   // rwd <target> on|off | raw on|off | ch <plan> (wardrive nodes)
+            int sp = rest.indexOf(' ');
+            uint8_t p[4];
+            if (sp < 0 || !wdMeshPayload(rest.substring(sp + 1), p)) {
+                Serial.println("ERR usage: rwd <node|all> on|off | raw on|off | ch all|6|1-6|1,6,11");
+                return true;
+            }
+            sendMgmt("rwd", t, all, MESH_CMD_WARDRIVE, p, 4);
         } else if (verb == "ralias") {   // ralias <target> <name> | ralias <target> - (clear)
             int sp = rest.indexOf(' ');
             String a = sp < 0 ? String("") : rest.substring(sp + 1);
@@ -2763,6 +2788,7 @@ void promiscuousCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
         ridWifiFrame(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, rssi);
     }
 
+    if (ftype == 0 && wdOn()) wdWifiFrame(pkt->payload, (int)pkt->rx_ctrl.sig_len - 4, subtype, rssi, pkt->rx_ctrl.channel);
     // 802.11 mgmt subtypes: 0x00=Assoc Req, 0x02=Reassoc Req, 0x04=Probe Req,
     // 0x05=Probe Resp, 0x08=Beacon. (Re)assoc requests are client frames like
     // probes (they name the AP the device joins); probe responses are AP frames
@@ -2849,10 +2875,22 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 
         {
             // Drone Remote ID (BLE legacy adverts, service data 0xFFFA).
-            const uint8_t* le = advertisedDevice->getAddress().getNative();
+            // Keep the address object alive: getAddress() returns a temporary, and a pointer
+            // into it dangled (the bytes then came back mirrored: D4:2A:E7:E7:2A:D4).
+            NimBLEAddress addr = advertisedDevice->getAddress();
+            const uint8_t* le = addr.getNative();
             uint8_t be[6];
             for (int k = 0; k < 6; k++) be[k] = le[5 - k];
             if (ridEnabled) ridBleAdvert(advertisedDevice->getPayload(), (int)advertisedDevice->getPayloadLength(), be, rssi);
+            if (wdOn()) {
+                std::string nm = advertisedDevice->haveName() ? advertisedDevice->getName() : std::string();
+                std::string md = advertisedDevice->haveManufacturerData() ? advertisedDevice->getManufacturerData() : std::string();
+                bool hasMfr = md.length() >= 2;
+                uint16_t mfr = hasMfr ? (uint8_t)md[0] | ((uint8_t)md[1] << 8) : 0;
+                wdBleAdvert(be, advertisedDevice->getAddressType() != BLE_ADDR_PUBLIC, rssi, nm.c_str(), hasMfr, mfr,
+                            advertisedDevice->haveAppearance() ? advertisedDevice->getAppearance() : 0,
+                            advertisedDevice->getPayload(), (int)advertisedDevice->getPayloadLength());
+            }
         }
 
         String matchedDescription;
@@ -2919,7 +2957,7 @@ static void scanDomains(bool& wifi, bool& ble) {
         if (isWifiDomain(f.type)) wifi = true;
         else ble = true;
     }
-    if (ridEnabled) wifi = ble = true;
+    if (ridEnabled || wdOn()) wifi = ble = true;
 #ifdef SKYSPY_NODE
     // A Sky-Spy node does what Sky-Spy does: no channel sweep. It stays parked on the
     // mesh channel (put the fleet on channel 6, where Remote ID's WiFi NAN and most
@@ -3075,7 +3113,7 @@ static void scan_to_wifi_sweep() {
     meshSetBlePhase(false);
 
     g_radioPhase = PHASE_WIFI_SWEEP;
-    g_wifiChannel = 11;
+    g_wifiChannel = wdOn() ? wdFirstChannel() : 11;
     esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
     meshNoteRadioChannel(g_wifiChannel);
     // A stale "on a mesh visit" flag from the previous sweep made the urgent
@@ -3120,7 +3158,8 @@ static void scan_to_ble_scan() {
 // Hop to the next WiFi channel while sweeping (11 -> 10 -> ... -> 1 -> 11).
 static void scan_wifi_hop_channel() {
     if (g_radioPhase != PHASE_WIFI_SWEEP) return;
-    g_wifiChannel = (g_wifiChannel > 1) ? g_wifiChannel - 1 : 11;
+    if (wdOn()) g_wifiChannel = wdNextChannel(g_wifiChannel);   // the wardriver's plan (wd ch)
+    else g_wifiChannel = (g_wifiChannel > 1) ? g_wifiChannel - 1 : 11;
     esp_wifi_set_channel(g_wifiChannel, WIFI_SECOND_CHAN_NONE);
     meshNoteRadioChannel(g_wifiChannel);
     g_meshVisit = false;
@@ -6556,6 +6595,11 @@ void setup() {
         
         // Start scanning immediately
         startScanningMode();
+    } else if (wdOn()) {
+        // A wardriver needs no setup: it scans as soon as it is plugged in. (Its mesh
+        // settings and fleet key, when given over serial, still apply.)
+        Serial.println("WARDRIVER: scanning everything (no filters, no setup)");
+        startScanningMode();
     } else {
         // Start in configuration mode
         Serial.println("Starting configuration mode...");
@@ -6608,12 +6652,14 @@ static void emitTelemetry() {
     if (meshCfg.enabled) meshNodesJson(roster);
     // meshNodesJson emits {"nodes":[...]}; splice its body into ours.
     String nodes = roster.substring(1, roster.length() - 1);
+    char wdch[40] = "";
+    if (wdOn()) wdChannelsText(wdch, sizeof wdch);
     Serial.printf("TLM {\"v\":1,\"id\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"mesh\":%d,"
                   "\"ch\":%d,\"up\":%lu,\"heap\":%lu,\"dev\":%u,\"filters\":%u,\"n\":%d,"
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"wd\":[%lu,%lu],\"wdch\":\"%s\",\"wdon\":%d,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -6630,7 +6676,8 @@ static void emitTelemetry() {
                   (unsigned long)dAck, (unsigned long)dLost, (unsigned)dPend,
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
                   encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
-                  (unsigned long)eDropReplay, nvsFreeEntries(), FW_KIND + 12, ridEnabled ? 1 : 0, (unsigned)ridActive(), stray.c_str(), nodes.c_str());
+                  (unsigned long)eDropReplay, nvsFreeEntries(), FW_KIND + 12, ridEnabled ? 1 : 0, (unsigned)ridActive(),
+                  (unsigned long)wdWifiCount(), (unsigned long)wdBleCount(), wdch, wdActive() ? 1 : 0, stray.c_str(), nodes.c_str());
 }
 
 void loop() {
@@ -6900,6 +6947,7 @@ void loop() {
         }
 
         ridLoop();
+        if (wdOn()) wdLoop();
 #ifdef SKYSPY_NODE
         skyspyRadioTick();
 #endif

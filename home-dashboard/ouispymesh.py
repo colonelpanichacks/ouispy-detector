@@ -25,9 +25,10 @@ from flask_socketio import SocketIO
 import filters as flt
 import firmware as fw
 from commands import Commander, PlanError
+from commands import plan as plan_cmd
 from fleet import Fleet
 from sources import (DemoSource, MqttSource, ReplaySource, SerialSource, Source,
-                     list_serial_ports)
+                     WardriveUsbSource, list_serial_ports)
 from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -239,6 +240,9 @@ fleet = Fleet(store, emit)
 import drones as drones_mod
 drones = drones_mod.Drones(store, emit)
 fleet.drones = drones
+import wardrive as wardrive_mod
+wardrive = wardrive_mod.Wardrive(store, emit)
+fleet.wardrive = wardrive
 import tri as tri_mod
 
 
@@ -320,6 +324,12 @@ def start_sources():
                                          get_pref=lambda: store.get_setting("home_usb_serial"),
                                          set_pref=lambda sn: store.set_setting("home_usb_serial", sn),
                                          get_ignore=lambda: store.get_setting("usb_ignore", []))
+            # Wardrivers on this computer's USB, besides the home.
+            new["wardrive-usb"] = WardriveUsbSource(
+                fleet, on_source_status,
+                busy=lambda: [s.cur_sn for s in sources.values() if isinstance(s, SerialSource) and s.ser and s.cur_sn]
+                + [store.get_setting("home_usb_serial")],
+                get_ignore=lambda: store.get_setting("usb_ignore", []), wardrive=wardrive)
         m = s["mqtt"]
         if args.mqtt:
             host, _, p = args.mqtt.partition(":")
@@ -549,6 +559,26 @@ def api_device_detail(mac):
         "intel_reports": rec.get("reports", 0),
         "stats": agg, "history": hist, "companions": comps,
     })
+
+
+@app.route("/api/wardrive")
+def api_wardrive():
+    scope = "history" if request.args.get("scope") == "history" else "session"
+    return jsonify({"scope": scope, **wardrive.summary(),
+                    "devices": wardrive.devices(scope, limit=int(request.args.get("limit", 20000)))})
+
+
+@app.route("/api/wardrive/session", methods=["POST"])
+def api_wardrive_session():
+    return jsonify({"session": wardrive.new_session(str((request.get_json(silent=True) or {}).get("note") or ""))})
+
+
+@app.route("/api/wardrive/wigle.csv")
+def api_wardrive_csv():
+    scope = "history" if request.args.get("scope") == "history" else "session"
+    name = time.strftime("WigleWifi_%Y%m%d_%H%M%S.csv")
+    return Response(wardrive.wigle_csv(scope), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.route("/api/drones")
@@ -836,7 +866,29 @@ def _submit(op, target, args):
 @app.route("/api/nodes/<nid>/cmd", methods=["POST"])
 def api_node_cmd(nid):
     data = request.get_json(silent=True) or {}
-    return _submit(str(data.get("op", "")), nid.upper(), data.get("args") or {})
+    op, args = str(data.get("op", "")), data.get("args") or {}
+    if op == "wardrive":
+        # A wardriver on this computer's USB: straight to its console (instant, and needs
+        # nothing from the home's firmware); otherwise over the mesh through the home.
+        with src_lock:
+            wsrc = sources.get("wardrive-usb")
+            bsrc = sources.get("bridge")
+        try:
+            lines, _, label = plan_cmd(op, nid.upper(), args, nid.upper())   # local form: "wd ..."
+        except PlanError as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        via = None
+        if wsrc and all(wsrc.send_to(nid.upper(), ln) for ln, _ in lines):
+            via = "USB"
+        elif bsrc and bsrc.node_id == nid.upper():   # on the Tab5's USB
+            for ln, _ in lines:
+                bsrc.send(ln)
+            via = "Tab5"
+        if via:
+            return jsonify({"ok": True, "job": {"id": 0, "label": f"{label} (via {via})", "state": "done", "op": op,
+                                                "target": nid.upper(), "created": time.time(),
+                                                "finished": time.time(), "error": "", "replies": {}}})
+    return _submit(op, nid.upper(), args)
 
 
 @app.route("/api/fleet/cmd", methods=["POST"])
@@ -1066,6 +1118,7 @@ class BridgeSource(Source):
     def __init__(self, fleet, on_status, sid, dev):
         super().__init__(fleet, on_status)
         self.sid = sid
+        self.node_id = None   # the node on the Tab5's USB, from its telemetry
         self.set_state(connected=True, detail=f"node on a Tab5 display (USB {dev})")
 
     def run(self):
@@ -1104,8 +1157,13 @@ def on_bridge_hello(data):
 def on_bridge_lines(data):
     if not _bridge():
         return
+    b = _bridge()
     for line in (data or {}).get("lines", [])[:256]:
         if isinstance(line, str) and line:
+            if line.startswith("TLM "):
+                m = re.search(r'"id":"([0-9A-F]{6})"', line)
+                if m:
+                    b.node_id = m.group(1)
             fleet.feed_line(line[:4096], "bridge")
 
 

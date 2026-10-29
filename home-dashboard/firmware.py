@@ -87,8 +87,10 @@ def _kind(img):
 
 
 def node_kind(fw):
-    """A node's kind from the build stamp it reports ("Oct28 20:37:51S" = Sky-Spy)."""
-    return "skyspy" if (fw or "").rstrip().endswith("S") else "detector"
+    """A node's kind from the build stamp it reports ("Oct28 20:37:51S" = Sky-Spy,
+    "...W" = wardriver)."""
+    end = (fw or "").rstrip()[-1:]
+    return {"S": "skyspy", "W": "wardrive"}.get(end, "detector")
 
 
 def save(img, filename=""):

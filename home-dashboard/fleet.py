@@ -67,6 +67,7 @@ class Fleet:
         self.store = store
         self.emit = emit                 # emit(event_name, payload)
         self.drones = None               # drones.Drones, set by the app
+        self.wardrive = None             # wardrive.Wardrive, set by the app
         self.tri = None                  # tri.Tri, set by the app: fixes for every display
         self.tri_fixes = {}              # mac -> last fix (sent with /api/state)
         self._tri_q = set()
@@ -140,6 +141,15 @@ class Fleet:
             else:
                 self._node_filters(obj)
             return
+        if line.startswith("WD "):
+            # A wardriver's sighting (bridged by a Tab5, which stamps its GPS fix).
+            if self.wardrive:
+                try:
+                    obj = json.loads(line[3:])
+                    self.wardrive.feed(obj, obj.get("node"))
+                except ValueError:
+                    pass
+            return
         if line.startswith("RID "):
             # Drone Remote ID from a mesh node (rid.cpp).
             if self.drones:
@@ -204,6 +214,9 @@ class Fleet:
                         if n.get("id") and n.get("id") != self.home_id:
                             self._node_seen(n["id"], n.get("role"), n.get("last", 0), None, None, now)
                     self._node_seen(nid, "remote", 0, None, None, now)
+                    if t.get("kind") == "wardrive" and nid in self.nodes:
+                        # A wardriver on USB: what it has heard and its switches, for its drawer.
+                        self.nodes[nid]["tlm"] = {k: t.get(k) for k in ("wd", "wdch", "wdon", "kind", "up")}
                 self._broadcast()
             return
         with self.lock:
