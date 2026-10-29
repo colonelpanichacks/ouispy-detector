@@ -126,7 +126,7 @@ S.sockUp = true;   // the page itself just loaded from the dashboard
 function serialPillState(s) {
     if (!S.sockUp) return ["", "DASHBOARD OFFLINE"];
     if (!s.connected) return ["", "DISCONNECTED"];
-    if (now() - S.serialLast > 7) return ["", "NO DATA"];
+    if (Date.now() / 1000 - S.serialLast > 7) return ["", "NO DATA"];
     return ["on usb", "LIVE"];
 }
 function updateSerialPill() {
@@ -139,9 +139,11 @@ function updateSerialPill() {
     if (st.textContent !== word) st.textContent = word;
     el.classList.toggle("down", cls === "");
 }
+// The pill runs on this browser's own clock: the server-clock offset (S.skew) moves
+// with every fleet update, and a late one made a live feed read as NO DATA.
 function serialBlink() {
-    const was = now() - S.serialLast > 7;
-    S.serialLast = now();
+    const was = Date.now() / 1000 - S.serialLast > 7;
+    S.serialLast = Date.now() / 1000;
     if (was) updateSerialPill();   // data back: green at once
 }
 setInterval(updateSerialPill, 500);
@@ -2998,8 +3000,9 @@ async function boot() {
     const st = await api("/api/state");
     // The USB pill counts from the home's last line the server already has,
     // not from this page load (it showed NO DATA for the first seconds).
+    const serverNow = (st.fleet && st.fleet.ts) || Date.now() / 1000;
     for (let i = (st.console || []).length - 1; i >= 0; i--) {
-        if (st.console[i][1] === "serial") { S.serialLast = st.console[i][0]; break; }
+        if (st.console[i][1] === "serial") { S.serialLast = Date.now() / 1000 - (serverNow - st.console[i][0]); break; }
     }
     S.settings = st.settings;
     S.sources = st.sources;
@@ -3135,8 +3138,6 @@ setInterval(() => {
     });
 }, 1000);
 
-boot();
-})();
 
 // ------------------------------------------------------------------
 // drones: Remote ID from every mesh node (and Sky-Spy boards on USB)
@@ -3384,3 +3385,6 @@ setInterval(() => {
     }
     if (changed) renderDrones();
 }, 5000);
+
+boot();
+})();

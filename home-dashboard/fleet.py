@@ -191,6 +191,19 @@ class Fleet:
 
     def feed_tlm(self, t, source="serial"):
         now = time.time()
+        if t.get("role") == "remote":
+            # A remote's own telemetry (a node on a Tab5's USB, bridged up): it is that
+            # node's view, not the home's. Taking it as the home's made the home id flip
+            # between the two every 5 s and the home's own feed look stale.
+            nid = t.get("id")
+            if nid:
+                with self.lock:
+                    for n in t.get("nodes", []):
+                        if n.get("id") and n.get("id") != self.home_id:
+                            self._node_seen(n["id"], n.get("role"), n.get("last", 0), None, None, now)
+                    self._node_seen(nid, "remote", 0, None, None, now)
+                self._broadcast()
+            return
         with self.lock:
             if t.get("id"):
                 self.home_id = t["id"]
