@@ -137,18 +137,29 @@ def _library_path(kind):
     return os.path.join(REPO, ".pio", "build", LIBRARY[kind], "firmware.bin")
 
 
+_lib_cache = {}   # kind -> (mtime, meta): reading + hashing three images per request was slow
+
+
 def library():
-    """{kind: meta} for each firmware built in this checkout."""
+    """{kind: meta} for each firmware built in this checkout (re-read only when rebuilt)."""
     out = {}
     for kind in LIBRARY:
+        path = _library_path(kind)
         try:
-            with open(_library_path(kind), "rb") as f:
-                img = f.read()
-            meta = inspect(img)
-        except (OSError, FirmwareError):
+            mt = os.path.getmtime(path)
+        except OSError:
             continue
-        if meta.get("kind") == kind:
-            out[kind] = {k: meta[k] for k in ("size", "sha256", "build", "kind")}
+        hit = _lib_cache.get(kind)
+        if not hit or hit[0] != mt:
+            try:
+                with open(path, "rb") as f:
+                    meta = inspect(f.read())
+            except (OSError, FirmwareError):
+                continue
+            hit = _lib_cache[kind] = (mt, {k: meta[k] for k in ("size", "sha256", "build", "kind")}
+                                      if meta.get("kind") == kind else None)
+        if hit[1]:
+            out[kind] = hit[1]
     return out
 
 

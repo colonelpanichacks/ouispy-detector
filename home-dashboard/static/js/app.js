@@ -387,17 +387,6 @@ const TILES = {
                       labels: ESRI("Reference/World_Boundaries_and_Places") },
     "usgs-sat":     { name: "USGS imagery + topo (US only)", url: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}",
                       attr: 'Tiles courtesy of the <a href="https://usgs.gov/">U.S. Geological Survey</a>', max: 16 },
-    "osm":          { name: "OpenStreetMap", url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", attr: A_OSM, max: 19 },
-    "osm-hot":      { name: "OpenStreetMap Humanitarian", url: "https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
-                      attr: A_OSM + ', tiles by <a href="https://www.hotosm.org/">HOT</a>', max: 19 },
-    "carto-voyager":{ name: "CARTO Voyager", url: CARTO("rastertiles/voyager"), attr: A_CARTO, max: 20 },
-    "carto-light":  { name: "CARTO Positron (light)", url: CARTO("light_all"), attr: A_CARTO, max: 20 },
-    "esri-street":  { name: "Esri World Street", url: ESRI("World_Street_Map"), attr: A_ESRI, max: 19 },
-    "esri-topo":    { name: "Esri World Topo", url: ESRI("World_Topo_Map"), attr: A_ESRI, max: 19 },
-    "opentopo":     { name: "OpenTopoMap (terrain)", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-                      attr: A_OSM + ', <a href="http://viewfinderpanoramas.org">SRTM</a> | style &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)', max: 17 },
-    "cyclosm":      { name: "CyclOSM", url: "https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png",
-                      attr: A_OSM + ', style <a href="https://www.cyclosm.org">CyclOSM</a>', max: 20 },
 };
 const TILE_OTHER = { "custom-dark": "Custom / local tile server, dark", "custom": "Custom / local tile server", "none": "None - offline grid" };
 let labelLayer = null;
@@ -445,11 +434,10 @@ function tileOptions(sel) {
     const opt = (k, n) => `<option value="${k}">${esc(n)}</option>`;
     const dark = ["osm-dark", "carto-dark", "carto-dark-nl", "esri-dark"];
     const sat = ["esri-sat", "esri-hybrid", "usgs-sat"];
-    const light = Object.keys(TILES).filter((k) => !dark.includes(k) && !sat.includes(k));
+    // Dark and satellite only, every one keyless and checked to load (no light maps).
     sel.innerHTML =
         `<optgroup label="Dark">${dark.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
         `<optgroup label="Satellite">${sat.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
-        `<optgroup label="Street and terrain">${light.map((k) => opt(k, TILES[k].name)).join("")}</optgroup>` +
         `<optgroup label="Private / offline">${Object.entries(TILE_OTHER).map(([k, n]) => opt(k, n)).join("")}</optgroup>`;
 }
 let viewSet = false;

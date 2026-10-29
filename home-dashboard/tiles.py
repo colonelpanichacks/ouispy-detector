@@ -19,6 +19,7 @@ LAYERS = {
     "esri-street": {"url": ESRI.replace("{svc}", "World_Street_Map"), "ext": "jpg", "max": 19, "name": "Streets"},
     "esri-topo":   {"url": ESRI.replace("{svc}", "World_Topo_Map"), "ext": "jpg", "max": 19, "name": "Topo"},
     "carto-dark":  {"url": "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", "ext": "png", "max": 20, "name": "Dark"},
+    "esri-darkgray": {"url": ESRI.replace("{svc}", "Canvas/World_Dark_Gray_Base"), "ext": "jpg", "max": 16, "name": "Dark gray"},
     "osm":         {"url": "https://tile.openstreetmap.org/{z}/{x}/{y}.png", "ext": "png", "max": 19, "name": "OSM"},
 }
 _locks = {}

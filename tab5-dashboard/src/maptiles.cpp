@@ -6,9 +6,9 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 
-const char *LAYER_IDS[NLAYERS] = {"esri-sat", "carto-dark", "esri-street", "esri-topo"};
-const char *LAYER_NAMES[NLAYERS] = {"SATELLITE", "DARK", "STREETS", "TOPO"};
-const int8_t LAYER_MAX[NLAYERS] = {19, 20, 19, 19};   // the dashboard tile proxy's limits
+const char *LAYER_IDS[NLAYERS] = {"esri-sat", "carto-dark", "esri-darkgray"};
+const char *LAYER_NAMES[NLAYERS] = {"SATELLITE", "DARK", "DARK GRAY"};
+const int8_t LAYER_MAX[NLAYERS] = {19, 20, 16};   // the dashboard tile proxy's limits
 
 namespace {
 

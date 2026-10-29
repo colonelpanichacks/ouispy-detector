@@ -5,7 +5,7 @@
 #include <M5GFX.h>
 
 constexpr int TILE = 256;
-constexpr int NLAYERS = 4;
+constexpr int NLAYERS = 3;   // dark and satellite only (no light maps), all keyless
 extern const char *LAYER_IDS[NLAYERS];     // dashboard layer ids
 extern const char *LAYER_NAMES[NLAYERS];
 extern const int8_t LAYER_MAX[NLAYERS];    // each source's last real tile zoom
