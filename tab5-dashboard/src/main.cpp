@@ -11,6 +11,8 @@
 #include "model.h"
 #include "net.h"
 #include "maptiles.h"
+#include <Preferences.h>
+#include <esp_system.h>
 #include "settings.h"
 #include "ui.h"
 #include "feed.h"
@@ -179,7 +181,35 @@ void serial_poll() {
 
 }  // namespace
 
+// Health, read by the LAN debug port (/info): why it last restarted, memory, frame times.
+uint32_t diagBoots = 0, diagFrameWorst = 0, diagDrawWorst = 0, diagPushWorst = 0;
+int diagReset = 0;
+const char *reset_name(int r) {
+    switch (r) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_SW: return "restart (OTA / settings)";
+    case ESP_RST_PANIC: return "CRASH (panic)";
+    case ESP_RST_INT_WDT: return "CRASH (interrupt watchdog)";
+    case ESP_RST_TASK_WDT: return "CRASH (task watchdog)";
+    case ESP_RST_WDT: return "CRASH (watchdog)";
+    case ESP_RST_BROWNOUT: return "BROWNOUT (power)";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    default: return "other";
+    }
+}
+
 void setup() {
+    diagReset = esp_reset_reason();
+    {
+        Preferences p;
+        p.begin("tab5diag", false);
+        diagBoots = p.getUInt("boots", 0) + 1;
+        p.putUInt("boots", diagBoots);
+        if (diagReset == ESP_RST_PANIC || diagReset == ESP_RST_INT_WDT || diagReset == ESP_RST_TASK_WDT ||
+            diagReset == ESP_RST_WDT || diagReset == ESP_RST_BROWNOUT)
+            p.putUInt("crashes", p.getUInt("crashes", 0) + 1);
+        p.end();
+    }
     auto cfg = M5.config();
     cfg.serial_baudrate = 115200;
     M5.begin(cfg);
@@ -235,6 +265,7 @@ void loop() {
     if (millis() - lastLog > 10000) {
         lastLog = millis();
         Serial.printf("frame worst %u ms (draw %u, push %u)\n", (unsigned)worst, (unsigned)wDraw, (unsigned)wPush);
+        diagFrameWorst = worst, diagDrawWorst = wDraw, diagPushWorst = wPush;
         worst = 0;
     }
     delay(5);

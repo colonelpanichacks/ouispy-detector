@@ -239,6 +239,15 @@ fleet = Fleet(store, emit)
 import drones as drones_mod
 drones = drones_mod.Drones(store, emit)
 fleet.drones = drones
+import tri as tri_mod
+
+
+def _node_pos(nid):
+    m = store.nodes_meta().get(nid) or {}
+    return (m["lat"], m["lon"]) if m.get("lat") is not None and m.get("lon") is not None else None
+
+
+fleet.tri = tri_mod.Tri(lambda: store.all_settings(), _node_pos)
 sources = {}
 src_lock = threading.Lock()
 
@@ -431,6 +440,7 @@ def api_state():
                     "hourly": store.hourly(), "mac_aliases": store.mac_aliases(),
                     "device_names": store.device_names(), "groups": store.groups(),
                     "drones": drones.snapshot(), "drone_tags": drones_mod.TAGS,
+                    "tri": list(fleet.tri_fixes.values()),
                     "group_of": store.group_of(),
                     "jobs": _jobs(None), "can_command": command_sender() is not None,
                     "filter_meta": _filter_meta(),

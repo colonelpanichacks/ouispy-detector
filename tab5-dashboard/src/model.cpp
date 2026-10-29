@@ -552,6 +552,7 @@ void ingest_state(JsonDocument &doc) {
     }
     free(newer);
     for (JsonObjectConst dr : doc["drones"].as<JsonArrayConst>()) ingest_drone(dr);
+    for (JsonObjectConst fx : doc["tri"].as<JsonArrayConst>()) ingest_tri(fx);
     ingest_names(doc["mac_aliases"], doc["device_names"], doc["group_of"]);
     M->stateLoaded = true;
     M->version++;
@@ -823,5 +824,24 @@ void ingest_names(JsonObjectConst aliases, JsonObjectConst names, JsonObjectCons
             strlcpy(d.group, gn.is<const char *>() ? gn.as<const char *>() : "", sizeof d.group);
         }
     }
+    M->version++;
+}
+
+// A triangulated fix from the dashboard: where the device is, and how sure.
+void ingest_tri(JsonObjectConst f) {
+    Guard g;
+    const char *mac = f["mac"] | "";
+    if (!*mac) return;
+    char up[18];
+    strlcpy(up, mac, sizeof up);
+    for (char *p = up; *p; p++) *p = toupper(*p);
+    Target *t = target_for(up, false);
+    if (!t) return;
+    t->triOk = f["ok"] | false;
+    t->triRough = f["rough"] | false;
+    t->triLat = f["lat"] | 0.0;
+    t->triLon = f["lon"] | 0.0;
+    t->triErr = f["err"] | 0.0f;
+    t->triTs = f["ts"] | 0.0;
     M->version++;
 }

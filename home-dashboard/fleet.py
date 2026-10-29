@@ -67,6 +67,11 @@ class Fleet:
         self.store = store
         self.emit = emit                 # emit(event_name, payload)
         self.drones = None               # drones.Drones, set by the app
+        self.tri = None                  # tri.Tri, set by the app: fixes for every display
+        self.tri_fixes = {}              # mac -> last fix (sent with /api/state)
+        self._tri_q = set()
+        self._tri_ev = threading.Event()
+        threading.Thread(target=self._tri_worker, daemon=True, name="tri").start()
         self.lock = threading.RLock()
         self.home_id = None
         self.home = {}                   # latest home stats
@@ -245,6 +250,11 @@ class Fleet:
             dom = "wifi" if str(d.get("type", "")).upper() in ("PROBE", "BEACON") else "ble"
         key = (node, mac, d.get("type"))
         seen_by = self._sighting(mac, node, d.get("rssi"), now)
+        if self.tri:
+            self.tri.add(mac, node, d.get("rssi"), dom, now)
+            with self.lock:
+                self._tri_q.add(mac)
+            self._tri_ev.set()
         # Device intel (name, services, SSIDs...) is merged from EVERY report,
         # signal updates and dedup repeats included: each can carry something new.
         info = d.get("info") if isinstance(d.get("info"), dict) else None
@@ -294,6 +304,30 @@ class Fleet:
         self._node_seen(node, role, 0, None, None, now, from_det=True)
         self.emit("det", det)
         self._broadcast()
+
+    def _tri_worker(self):
+        """Triangulate devices with new readings, at most once a second each, off the
+        serial thread (a fix is a grid search: tens of ms)."""
+        while True:
+            self._tri_ev.wait(1.0)
+            self._tri_ev.clear()
+            with self.lock:
+                macs, self._tri_q = self._tri_q, set()
+            for mac in macs:
+                if not self.tri or not self.tri.due(mac):
+                    with self.lock:
+                        self._tri_q.add(mac)   # try again next round
+                    continue
+                try:
+                    fx = self.tri.fix(mac)
+                except Exception as e:
+                    print(f"[tri] {mac}: {e}")
+                    continue
+                fx["ts"] = time.time()
+                self.tri_fixes[mac] = fx
+                for m in [m for m, f in self.tri_fixes.items() if time.time() - f["ts"] > 600]:
+                    del self.tri_fixes[m]
+                self.emit("tri", fx)
 
     def _sighting(self, mac, node, rssi, now):
         """Record that `node` heard `mac` (repeats the dedup drops count too),

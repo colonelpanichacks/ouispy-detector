@@ -2,6 +2,7 @@
 #include "model.h"
 #include "app.h"
 #include "net.h"
+#include "gfx.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
 
@@ -14,9 +15,8 @@ constexpr int CACHE_N = 120;    // 120 x 128 KB = 15 MB of the 32 MB PSRAM
 constexpr int WANT_N = 96;
 constexpr size_t BUF_N = 160 * 1024;
 
-// A tile is kept transposed (column-major: px[u * 256 + v] is the pixel at column u, row
-// v), which is how the portrait panel's framebuffer lays out a landscape canvas: each tile
-// column is one contiguous run of panel pixels, so drawing a tile is a row of memcpys.
+// A tile is a row-major 256x256 rgb565 picture; the PPA rotates and scales it onto the
+// portrait framebuffer when it is drawn.
 struct Slot {
     uint16_t *img;
     uint8_t layer;
@@ -30,7 +30,9 @@ uint32_t tick = 0;
 struct Want { uint8_t layer; int8_t z; int32_t x, y; };
 Want want[WANT_N];
 int nwant = 0;
-constexpr int LOADERS = 3;   // tiles download in parallel
+constexpr int LOADERS = 2;   // tiles download in parallel (each TCP connection costs internal RAM)
+constexpr size_t HEAP_FLOOR = 48 * 1024;   // internal RAM a download leaves for Wi-Fi and the rest
+TaskHandle_t loaderTask[LOADERS] = {};
 
 int slot_of(uint8_t layer, int z, int x, int y) {
     for (int i = 0; i < CACHE_N; i++)
@@ -90,6 +92,9 @@ void loader(void *) {
             vTaskDelay(pdMS_TO_TICKS(nwant ? 1 : 40));
             continue;
         }
+        // Internal RAM is small (Wi-Fi, TCP and every task stack live there) and running
+        // it dry crashes the whole device: wait for room instead of downloading into it.
+        while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HEAP_FLOOR) vTaskDelay(pdMS_TO_TICKS(100));
         size_t n = download(w, buf);
         if (!n) {
             vTaskDelay(pdMS_TO_TICKS(150));
@@ -98,17 +103,15 @@ void loader(void *) {
         dec->fillSprite(0);
         bool png = n > 4 && buf[0] == 0x89 && buf[1] == 'P';
         if (!(png ? dec->drawPng(buf, n, 0, 0) : dec->drawJpg(buf, n, 0, 0))) continue;
-        uint16_t *t = (uint16_t *)heap_caps_malloc(TILE * TILE * 2, MALLOC_CAP_SPIRAM);
+        // Row-major, cache-line aligned, written out of the CPU cache: the PPA reads it by DMA.
+        uint16_t *t = (uint16_t *)heap_caps_aligned_alloc(128, TILE * TILE * 2, MALLOC_CAP_SPIRAM);
         if (!t) continue;
-        const uint16_t *src = (const uint16_t *)dec->getBuffer();   // row-major
-        for (int v = 0; v < TILE; v++) {
-            const uint16_t *row = src + v * TILE;
-            for (int u = 0; u < TILE; u++) t[u * TILE + v] = row[u];
-        }
+        memcpy(t, dec->getBuffer(), TILE * TILE * 2);
+        gfx_cpu_to_mem(t, TILE * TILE * 2);
         model_lock();
         if (slot_of(w.layer, w.z, w.x, w.y) >= 0) {   // another loader got it first
             model_unlock();
-            heap_caps_free(t);
+            free(t);
             continue;
         }
         int s = 0;
@@ -116,7 +119,7 @@ void loader(void *) {
             if (!cache[i].img) { s = i; break; }
             if (cache[i].used < cache[s].used) s = i;
         }
-        if (cache[s].img) heap_caps_free(cache[s].img);
+        if (cache[s].img) free(cache[s].img);
         cache[s] = {t, w.layer, w.z, w.x, w.y, ++tick};
         M->version++;   // redraw with the new tile
         model_unlock();
@@ -126,7 +129,10 @@ void loader(void *) {
 }  // namespace
 
 void maptiles_start() {
-    for (int i = 0; i < LOADERS; i++) xTaskCreatePinnedToCore(loader, "tiles", 8192, nullptr, 1, nullptr, 0);
+    // 16 KB each (PNG decoding plus HTTP), in PSRAM: these tasks never touch flash, and
+    // internal RAM is the scarce one.
+    for (int i = 0; i < LOADERS; i++)
+        xTaskCreatePinnedToCoreWithCaps(loader, "tiles", 16384, nullptr, 1, &loaderTask[i], 0, MALLOC_CAP_SPIRAM);
 }
 
 const uint16_t *maptile_peek(uint8_t layer, int z, int x, int y) {
@@ -151,6 +157,13 @@ const uint16_t *maptile(uint8_t layer, int z, int x, int y) {
 }
 
 void maptiles_clear_requests() { nwant = 0; }
+
+uint32_t maptiles_stack_min() {
+    uint32_t m = 0xFFFFFFFF;
+    for (auto t : loaderTask)
+        if (t) m = min(m, (uint32_t)uxTaskGetStackHighWaterMark(t));
+    return m;
+}
 
 uint32_t maptiles_cached() {
     uint32_t n = 0;

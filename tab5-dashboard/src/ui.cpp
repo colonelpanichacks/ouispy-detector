@@ -8,10 +8,13 @@
 #include "settings.h"
 #include "feed.h"
 #include "maptiles.h"
+#include "gfx.h"
+#include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
 #include <M5Unified.h>
 #include <M5UnitUnifiedKEYBOARD.h>
 
 App A;
+extern uint32_t ui_prof[12];
 
 void toast(const char *fmt, ...) {
     va_list ap;
@@ -118,10 +121,8 @@ void text(int x, int y, const char *s, uint16_t col, textdatum_t d = top_left) {
 void glow(int x, int y, const char *s, uint16_t col, textdatum_t d = top_left) {
     C.setTextDatum(d);
     C.setTextColor(dim(col, 0.28f));
-    C.drawString(s, x - 1, y);
-    C.drawString(s, x + 1, y);
-    C.drawString(s, x, y - 1);
-    C.drawString(s, x, y + 1);
+    C.drawString(s, x - 1, y - 1);   // two halo passes, not four: same glow, half the cost
+    C.drawString(s, x + 1, y + 1);
     C.setTextColor(col);
     C.drawString(s, x, y);
 }
@@ -144,8 +145,77 @@ const char *fit(const char *s, int w) {
     return "";
 }
 
+uint8_t canvasRot();
+uint16_t *fb = nullptr;   // the display's own framebuffer (DSI scans it out)
+
+// Logical (landscape canvas) rectangle -> panel (portrait buffer) rectangle.
+void to_panel(int x, int y, int w, int h, int &px, int &py, int &pw, int &ph) {
+    pw = h, ph = w;
+    if (canvasRot() == 3) px = y, py = 1280 - (x + w);
+    else px = 720 - (y + h), py = x;
+}
+
+bool ppa_canvas() { return gfx_ok() && (((uintptr_t)C.getBuffer()) & 127) == 0; }
+
+// Whole frame to the display: a DMA copy into its framebuffer (the CPU copy took ~30 ms).
+void push_frame() {
+    uint16_t *cb = (uint16_t *)C.getBuffer();
+    uint32_t t0 = micros();
+    // Write the CPU's drawing out and leave no canvas lines in the cache, so the next
+    // frame's PPA fills and tile blits (DMA) can't be overwritten by a stale line.
+    if (ppa_canvas()) gfx_cpu_to_mem(cb, (size_t)720 * 1280 * 2);
+    uint32_t t1 = micros();
+    C.pushSprite(0, 0);   // CPU copy into the framebuffer: ~30 ms (PPA SRM 42, GDMA crashed)
+    ui_prof[4] = t1 - t0, ui_prof[6] = micros() - t1;
+}
+
+// A PPA fill: only where the CPU has not drawn yet this frame (the frame clear, the map
+// before its overlays). Right after a push the cache holds nothing of the canvas, so the
+// DMA write cannot be overwritten by a stale cache line.
+void ppa_fill(int x, int y, int w, int h, uint16_t col) {
+    if (x < 0) w += x, x = 0;
+    if (y < 0) h += y, y = 0;
+    if (x + w > W) w = W - x;
+    if (y + h > H) h = H - y;
+    if (w <= 0 || h <= 0) return;
+    if (!ppa_canvas()) {
+        C.fillRect(x, y, w, h, col);
+        return;
+    }
+    int px, py, pw, ph;
+    to_panel(x, y, w, h, px, py, pw, ph);
+    gfx_fill((uint16_t *)C.getBuffer(), px, py, pw, ph, col);
+}
+
+// Solid rectangle, by the CPU straight into the buffer: one contiguous run per logical
+// column (LovyanGFX fills a rotated canvas pixel by pixel). Safe anywhere in a frame.
+void fast_fill(int x, int y, int w, int h, uint16_t col) {
+    if (x < 0) w += x, x = 0;
+    if (y < 0) h += y, y = 0;
+    if (x + w > W) w = W - x;
+    if (y + h > H) h = H - y;
+    if (w <= 0 || h <= 0) return;
+    uint16_t *buf = (uint16_t *)C.getBuffer();
+    bool r3 = canvasRot() == 3;
+    for (int X = x; X < x + w; X++) {
+        uint16_t *d = r3 ? buf + (size_t)(1279 - X) * 720 + y : buf + (size_t)X * 720 + (720 - y - h);
+        for (int i = 0; i < h; i++) d[i] = col;
+    }
+}
+
+// Rounded panel body: the flat parts through fast_fill, only the corners through LGFX.
+void fast_round(int x, int y, int w, int h, int r, uint16_t col) {
+    fast_fill(x, y + r, w, h - 2 * r, col);
+    fast_fill(x + r, y, w - 2 * r, r, col);
+    fast_fill(x + r, y + h - r, w - 2 * r, r, col);
+    C.fillCircle(x + r, y + r, r, col);
+    C.fillCircle(x + w - r - 1, y + r, r, col);
+    C.fillCircle(x + r, y + h - r - 1, r, col);
+    C.fillCircle(x + w - r - 1, y + h - r - 1, r, col);
+}
+
 void panel(int x, int y, int w, int h, const char *title, uint16_t accent = ACCENT) {
-    C.fillRoundRect(x, y, w, h, 8, PANEL);
+    fast_round(x, y, w, h, 8, PANEL);
     C.drawRoundRect(x, y, w, h, 8, LINE2);
     if (title) {
         C.drawFastHLine(x + 14, y, 40, accent);   // a short neon tick on the frame
@@ -374,9 +444,8 @@ const char *target_label(const Target &t) {
 void map_text(int x, int y, const char *s, uint16_t col, textdatum_t d = middle_left) {
     C.setTextDatum(d);
     C.setTextColor(BG);
-    for (int dx = -1; dx <= 1; dx++)
-        for (int dy = -1; dy <= 1; dy++)
-            if (dx || dy) C.drawString(s, x + dx, y + dy);
+    C.drawString(s, x - 1, y - 1), C.drawString(s, x + 1, y - 1);   // 4 outline passes: readable, half of 8
+    C.drawString(s, x - 1, y + 1), C.drawString(s, x + 1, y + 1);
     C.setTextColor(col);
     C.drawString(s, x, y);
 }
@@ -493,44 +562,26 @@ void map_zoom_at(int dz, int x, int y) {
     maptiles_clear_requests();
 }
 
-uint8_t canvasRot();
-constexpr int PNL_W = 720, PNL_H = 1280;   // the panel's native (portrait) framebuffer
-
-// Draw a tile so that tile (z, x, y) covers the given screen square, even when the image
-// is a coarser ancestor (k levels up): it is scaled up and clipped. Written straight into
-// the canvas buffer: the tile is stored column-major, which is the panel's row order, so a
-// 1:1 tile is one memcpy per column and a scaled one a tight nearest-pixel loop.
+// Draw a tile so that tile (z, x, y) covers the given screen square (logical top left
+// sx0, sy0; size ts, a whole number of pixels), even when the image is a coarser ancestor
+// k levels up (its matching part is scaled up). The PPA rotates it onto the portrait
+// framebuffer and scales it, by DMA; only what falls off the screen is cropped.
 void tile_blit(const uint16_t *t, int k, int tx, int ty, double ts, int sx0, int sy0) {
-    double big = ts * (1 << k);                       // the ancestor's size on screen
-    int ax = tx >> k, ay = ty >> k;
-    double ox = sx0 - (tx - (ax << k)) * ts, oy = sy0 - (ty - (ay << k)) * ts;   // its top left
-    int cx0 = max(sx0, MX), cy0 = max(sy0, MY);
-    int cx1 = min(sx0 + (int)ceil(ts), MX + MW), cy1 = min(sy0 + (int)ceil(ts), MY + MH);
-    if (cx1 <= cx0 || cy1 <= cy0) return;
-    uint16_t *buf = (uint16_t *)C.getBuffer();
-    bool r3 = canvasRot() == 3;
-    double scale = TILE / big;                        // source pixels per screen pixel
-    uint32_t step = (uint32_t)(scale * 65536.0 + 0.5);
-    bool one = k == 0 && fabs(big - TILE) < 0.01;
-    for (int X = cx0; X < cx1; X++) {
-        int u = (int)((X - ox) * scale);
-        u = u < 0 ? 0 : u > TILE - 1 ? TILE - 1 : u;
-        const uint16_t *col = t + u * TILE;
-        int n = cy1 - cy0;
-        if (r3) {
-            uint16_t *dst = buf + (size_t)(PNL_H - 1 - X) * PNL_W + cy0;
-            if (one) {
-                memcpy(dst, col + (int)lround(cy0 - oy), n * 2);
-                continue;
-            }
-            uint32_t v = (uint32_t)((cy0 - oy) * scale * 65536.0);
-            for (int i = 0; i < n; i++, v += step) dst[i] = col[min(v >> 16, (uint32_t)(TILE - 1))];
-        } else {
-            uint16_t *dst = buf + (size_t)X * PNL_W + (PNL_W - 1 - cy0);
-            uint32_t v = (uint32_t)((cy0 - oy) * scale * 65536.0);
-            for (int i = 0; i < n; i++, v += step) *(dst - i) = col[min(v >> 16, (uint32_t)(TILE - 1))];
-        }
-    }
+    if (!ppa_canvas()) return;
+    int sub = TILE >> k;
+    int su = (tx & ((1 << k) - 1)) * sub, sv = (ty & ((1 << k) - 1)) * sub;
+    float scale = (float)(ts / sub);   // a multiple of 1/16 (draw_map snaps it)
+    int cu0 = sx0 < 0 ? (int)ceilf(-sx0 / scale) : 0;
+    int cv0 = sy0 < 0 ? (int)ceilf(-sy0 / scale) : 0;
+    int X = sx0 + (int)lroundf(cu0 * scale), Y = sy0 + (int)lroundf(cv0 * scale);
+    int uw = min(sub - cu0, (int)floorf((W - X) / scale));
+    int vh = min(sub - cv0, (int)floorf((H - Y) / scale));
+    if (uw <= 0 || vh <= 0) return;
+    int w = (int)(uw * scale), h = (int)(vh * scale);
+    if (w <= 0 || h <= 0) return;
+    int px, py, pw, ph;
+    to_panel(X, Y, w, h, px, py, pw, ph);
+    gfx_tile((uint16_t *)C.getBuffer(), t, su + cu0, sv + cv0, uw, vh, px, py, canvasRot() == 3, scale);
 }
 
 void draw_map() {
@@ -571,7 +622,10 @@ void draw_map() {
     if (!mapAnimating) ZA.on = false;
     float zf = A.mapZoomF;
     int zb = constrain((int)floorf(zf + 0.0001f), ZMIN, ZMAX);
-    double sc = pow(2.0, zf - zb);                    // base-zoom pixels -> screen pixels
+    // Base-zoom pixels -> screen pixels, snapped to the PPA's 1/16 scale steps so every tile
+    // is a whole number of pixels and neighbours meet exactly while zooming.
+    double sc = round(pow(2.0, zf - zb) * 16.0) / 16.0;
+    if (sc < 1.0) sc = 1.0;
     double ts = TILE * sc;
     int z = zb;
     double cx = lon2x(A.mapLon, zb) * sc, cy = lat2y(A.mapLat, zb) * sc;
@@ -579,9 +633,9 @@ void draw_map() {
     auto sx = [&](double lon) { return (int)(MX + lon2x(lon, zb) * sc - left); };
     auto sy = [&](double lat) { return (int)(MY + lat2y(lat, zb) * sc - top); };
 
-    C.setClipRect(MX, MY, MW, MH);
-    C.fillRect(MX, MY, MW, MH, rgb(0x0a0d12));
+    uint32_t q0 = micros();
     scroll_area(MX, MY, MW, MH, L_MAP, 1, 1);
+    uint32_t q1 = micros();
     // Tiles: this zoom's tile if loaded; else an ancestor scaled up, else the previous
     // layer's, so a zoom or a layer switch never shows a blank map.
     int n = 1 << zb;
@@ -602,7 +656,7 @@ void draw_map() {
             }
             missing++;
             bool drawn = false;
-            for (int k = 1; k <= 4 && !drawn && zb - k >= 0; k++) {
+            for (int k = 1; k <= 3 && !drawn && zb - k >= 0; k++) {
                 const uint16_t *anc = maptile_peek(A.mapLayer, zb - k, wx >> k, ty >> k);
                 if (anc) tile_blit(anc, k, wx, ty, ts, x, y), drawn = true;
             }
@@ -612,12 +666,15 @@ void draw_map() {
             }
             if (!drawn) {
                 int is = (int)ceil(ts);
+                ppa_fill(x, y, is, is, rgb(0x0a0d12));
                 C.drawRect(x, y, is, is, rgb(0x141a22));
                 C.drawFastHLine(x, y + is / 2, is, rgb(0x10151c));
                 C.drawFastVLine(x + is / 2, y, is, rgb(0x10151c));
             }
         }
     }
+    C.setClipRect(MX, MY, MW, MH);
+    uint32_t q2 = micros();
     // Range rings round the home node: scale at a glance.
     for (int i = 0; i < M->nnodes; i++) {
         const Node &nd = M->nodes[i];
@@ -633,25 +690,62 @@ void draw_map() {
             map_text(sx(nd.lon), sy(nd.lat) - r - 9, b, dim(ACCENT, 0.85f), middle_center);   // top of the ring: clear of node labels
         }
     }
+    uint32_t q3 = micros();
     // Live targets.
     double now = server_now();
     for (int i = 0; i < M->ntargets; i++) {
         const Target &t = M->targets[i];
         if (now - t.last > TARGET_LIVE_S) continue;
         double la, lo;
-        if (!target_pos(t, la, lo)) continue;
+        // The dashboard's triangulated fix (same model as its web map), else a
+        // signal-weighted estimate between the nodes that hear it.
+        bool tri = t.triOk && now - t.triTs < 120;
+        if (tri) la = t.triLat, lo = t.triLon;
+        else if (!target_pos(t, la, lo)) continue;
         int x = sx(lo), y = sy(la);
         if (x < -40 || y < MY - 40 || x > W + 40 || y > H) continue;
         uint16_t c = mac_muted(t.mac) ? FAINT : PINK;
+        if (tri) {
+            double mpp = 156543.03392 * cos(la * M_PI / 180) / pow(2.0, zf);
+            int r = (int)(t.triErr / mpp);
+            uint16_t rc = t.triRough ? AMBER : rgb(0x39ff88);
+            if (r > 6 && r < 1400) {
+                C.drawCircle(x, y, r, dim(rc, 0.85f));
+                C.drawCircle(x, y, r + 1, dim(rc, 0.35f));
+            }
+        }
         C.fillTriangle(x, y - 9, x + 9, y, x, y + 9, dim(c, 0.6f));
         C.fillTriangle(x, y + 9, x - 9, y, x, y - 9, dim(c, 0.6f));
         C.drawLine(x, y - 9, x + 9, y, c), C.drawLine(x + 9, y, x, y + 9, c);
         C.drawLine(x, y + 9, x - 9, y, c), C.drawLine(x - 9, y, x, y - 9, c);
         font(F_SM);
-        map_text(x + 13, y, fit(target_label(t), 180), c);
+        char tl[64];
+        if (tri) snprintf(tl, sizeof tl, "%s  +/-%dm%s", fit(target_label(t), 150), (int)lroundf(t.triErr), t.triRough ? " rough" : "");
+        else snprintf(tl, sizeof tl, "%s", fit(target_label(t), 180));
+        map_text(x + 13, y, tl, c);
         int ti = -1;
         for (int k = 0; k < nTgt; k++) if (tgtIdx[k] == i) ti = k;
         if (ti >= 0) hit(x - 16, y - 16, 32, 32, H_TGTMAP, ti);
+    }
+    // Mesh links: each pair of nodes that hear each other directly, coloured by the
+    // signal, its dBm at the middle (drawn once per pair).
+    for (int i = 0; i < M->nnodes; i++) {
+        const Node &a = M->nodes[i];
+        if (!a.hasPos || !a.online) continue;
+        for (int k = 0; k < a.nnbr; k++) {
+            const Node *b = node_by_id(a.nbr[k].node);
+            if (!b || !b->hasPos || strcmp(a.id, b->id) >= 0) continue;
+            int x0 = sx(a.lon), y0 = sy(a.lat), x1 = sx(b->lon), y1 = sy(b->lat);
+            uint16_t lc = rssi_color(a.nbr[k].rssi);
+            C.drawLine(x0, y0, x1, y1, dim(lc, 0.9f));
+            C.drawLine(x0 + 1, y0, x1 + 1, y1, dim(lc, 0.45f));
+            if (abs(x1 - x0) + abs(y1 - y0) > 80) {
+                char db[8];
+                snprintf(db, sizeof db, "%d", a.nbr[k].rssi);
+                font(F_SM);
+                map_text((x0 + x1) / 2, (y0 + y1) / 2, db, lc, middle_center);
+            }
+        }
     }
     // Nodes: dots first, then labels placed so none overlap (nodes a few metres apart
     // sit in a cluster). Each label tries right, left, then a column stepping down and
@@ -702,6 +796,7 @@ void draw_map() {
         if (ly != y) C.drawLine(x, y, lx < x ? b.x1 - 2 : lx, ly, dim(c, 0.7f));
         map_text(lx, ly, nm, c);
     }
+    uint32_t q4 = micros();
     // Drones: track, pilot and the line between them, then the aircraft on top.
     for (int k = nDrone - 1; k >= 0; k--) {
         const Drone &d = M->drones[droneIdx[k]];
@@ -741,6 +836,7 @@ void draw_map() {
         }
     }
     C.clearClipRect();
+    uint32_t q5 = micros();
 
     // Info card, top left.
     int ix = PAD, iy = MY + 12, iw = 360, ih = 64;
@@ -771,6 +867,8 @@ void draw_map() {
         glow(bx + bw / 2, by + bh / 2, k.t, k.on ? PINK : ACCENT, middle_center);
         by += bh + 10;
     }
+    uint32_t q6 = micros();
+    (void)q0, (void)q1; ui_prof[7] = q2 - q1, ui_prof[8] = q3 - q2, ui_prof[9] = q4 - q3, ui_prof[10] = q5 - q4, ui_prof[11] = q6 - q5;
 }
 
 void map_zoom(int dz) { map_zoom_at(dz, MX + MW / 2, MY + MH / 2); }
@@ -984,7 +1082,7 @@ void draw_detail() {
     const DevDetail &dd = M->detail;
     const Target *t = target_by_mac(dd.mac);
     int x = PAD, y = CY, w = W - 2 * PAD, h = CB - CY;
-    C.fillRect(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
+    fast_fill(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
     hit(0, TOP, W, H - TOP - BOT, H_NONE);   // swallow taps under the page
     C.fillRoundRect(x, y, w, h, 10, PANEL);
     glow_rect(x, y, w, h, 10, dim(ACCENT, 0.8f));
@@ -1178,6 +1276,73 @@ void drone_set_tag(int t) {
 // ------------------------------------------------------------------ chrome
 
 const char *TABS[V_COUNT] = {"OVERVIEW", "FLEET", "LIVE", "TARGETS", "MAP", "DRONES", "METRICS"};
+
+// ------------------------------------------------------------------ cached bands
+// The top and bottom bars change at most once a second but cost ~19 ms a frame to draw
+// (glowing text). Each is drawn once into the canvas, saved, and pasted back (~1 ms) while
+// what it shows stays the same, together with the touch targets it registered.
+struct Band {
+    int y0, h;
+    uint16_t *px = nullptr;
+    uint32_t key = 0;
+    bool valid = false;
+    Hit hits[24];
+    int nh = 0;
+};
+Band topBand{0, TOP}, botBand{H - BOT, BOT};
+
+uint32_t fnv(const char *s, uint32_t h = 2166136261u) {
+    for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    return h;
+}
+
+// Panel buffer offset of logical row y0 inside each panel row (the band is h pixels wide there).
+int band_off(const Band &b) { return canvasRot() == 3 ? b.y0 : 720 - b.y0 - b.h; }
+
+void cached_band(Band &b, uint32_t key, void (*draw)()) {
+    uint16_t *buf = (uint16_t *)C.getBuffer();
+    if (!b.px) b.px = (uint16_t *)heap_caps_malloc((size_t)1280 * b.h * 2, MALLOC_CAP_SPIRAM);
+    int off = band_off(b);
+    key ^= canvasRot();
+    if (b.px && b.valid && b.key == key) {
+        for (int r = 0; r < 1280; r++) memcpy(buf + (size_t)r * 720 + off, b.px + (size_t)r * b.h, b.h * 2);
+        for (int i = 0; i < b.nh; i++) {
+            const Hit &h = b.hits[i];
+            hit(h.x, h.y, h.w, h.h, h.act, h.arg);
+        }
+        return;
+    }
+    int h0 = nhits;
+    draw();
+    if (!b.px) return;
+    for (int r = 0; r < 1280; r++) memcpy(b.px + (size_t)r * b.h, buf + (size_t)r * 720 + off, b.h * 2);
+    b.nh = 0;
+    for (int i = h0; i < nhits && b.nh < 24; i++) b.hits[b.nh++] = hits[i];
+    b.key = key;
+    b.valid = true;
+}
+
+void draw_top();
+void draw_bottom();
+
+uint32_t top_key() {
+    char k[160];
+    int ld = live_drones();
+    bool red = M->bridging ? false : M->usbLive ? false : (S.source == SRC_USB || !M->wifiUp || !M->sockUp);
+    snprintf(k, sizeof k, "%d|%s|%d|%d%d%d%d%d|%s|%d|%d|%s|%s|%lu", (int)A.view, clock_str(server_now(), true),
+             net_rssi(), M->bridging, M->usbLive, M->home.alive, M->wifiUp, M->sockUp, M->mode, (int)S.source, ld,
+             M->home.id, A.detail ? "d" : "", (red || ld) ? (unsigned long)(millis() / 120) : 0UL);   // pulses animate
+    return fnv(k);
+}
+
+uint32_t bottom_key() {
+    char k[300];
+    bool toastOn = millis() < A.toastUntil;
+    snprintf(k, sizeof k, "%d|%d%d%d%d%d|%s|%d%d%d%d%d|%s|%s|%s|%d", (int)A.view, A.detail, A.editAlias, A.newGroup,
+             A.searching, M->muteAll, toastOn ? A.toast : "", M->usbLive, M->bridging, M->sockUp, (int)S.source,
+             net_ota_enabled(), M->lastError, net_ip().c_str(), net_target().c_str(), (int)M->alertsUnacked);
+    return fnv(k);
+}
 
 void draw_top() {
     C.fillRect(0, 0, W, TOP, BG);
@@ -1457,7 +1622,7 @@ void draw_overview() {
     panel(lx, fy, lw, lh, "LIVE FEED");
     int hy = fy + 34;
     font(F_SM);
-    const int cAge = lx + 16, cVen = lx + 76, cMac = lx + 296, cRssi = lx + 500, cNode = lx + 566;
+    const int cAge = lx + 16, cVen = lx + 76, cMac = lx + 290, cRssi = lx + 508, cNode = lx + 566;
     text(cAge, hy, "AGE", FAINT);
     text(cVen, hy, "DEVICE", FAINT);
     text(cMac, hy, "MAC", FAINT);
@@ -1518,7 +1683,7 @@ void draw_fleet() {
     int y = CY, rows = 6, rh = 62, th = 36 + rows * rh;
     panel(PAD, y, W - 2 * PAD, th + 8, "FLEET");
     clamp_sel(V_FLEET, rows);
-    const int cx[] = {PAD + 24, PAD + 290, PAD + 400, PAD + 560, PAD + 760, PAD + 860, PAD + 1040, PAD + 1140};
+    const int cx[] = {PAD + 24, PAD + 262, PAD + 372, PAD + 522, PAD + 716, PAD + 796, PAD + 980, PAD + 1140};
     const char *hd[] = {"NODE", "ROLE", "STATUS", "LINK RSSI", "NBR", "FIRMWARE", "FILTERS / CRC", ""};
     font(F_SM);
     for (int i = 0; i < 7; i++) text(cx[i], y + 34, hd[i], FAINT);
@@ -1543,7 +1708,9 @@ void draw_fleet() {
         font(F_SM);
         text(cx[0], my + 14, n.id, FAINT, middle_left);
         font(F_MD);
-        text(cx[1], my, n.isHome ? "HOME" : "REMOTE", n.isHome ? ACCENT : SKY, middle_left);
+        size_t fl = strlen(n.fw);
+        bool sky = fl && n.fw[fl - 1] == 'S';   // a dedicated Sky-Spy drone node (build stamp suffix)
+        text(cx[1], my, n.isHome ? "HOME" : sky ? "SKY-SPY" : "REMOTE", n.isHome ? ACCENT : sky ? PINK : SKY, middle_left);
         dot(cx[2] + 6, my, 5, n.online ? ACCENT : RED);
         text(cx[2] + 20, my - 8, n.online ? "ONLINE" : "OFFLINE", n.online ? ACCENT : RED, middle_left);
         font(F_SM);
@@ -1777,7 +1944,7 @@ void draw_targets() {
         int x = PAD + (k % cols) * (cw + gap), y = gy + (k / cols) * (ch + gap);
         if (ti < nTgt) hit(x, y, cw, ch, H_TARGET, ti);
         if (ti >= nTgt) {
-            C.drawRoundRect(x, y, cw, ch, 8, LINE);
+            if (nTgt) C.drawRoundRect(x, y, cw, ch, 8, LINE);   // empty slots only beside real cards
             continue;
         }
         const Target &t = M->targets[tgtIdx[ti]];
@@ -1796,8 +1963,8 @@ void draw_targets() {
         font(F_MD);
         text(x + cw - 16, y + 14, age_str(t.last), live ? PINK : FAINT, top_right);
         if (live) dot(x + cw - 16 - C.textWidth(age_str(t.last)) - 14, y + 24, 4, PINK);
-        font(F_MONO);
-        text(x + 16, y + 46, t.mac, muted ? FAINT : SOFT);
+        font(F_MONO_S);
+        text(x + 16, y + 48, t.mac, muted ? FAINT : SOFT);
         font(F_SM);
         char l[48];
         snprintf(l, sizeof l, "%s  %s  %u hits%s", t.type, t.dom, (unsigned)t.hits, muted ? "  MUTED" : "");
@@ -2338,6 +2505,7 @@ void paint_pressed(const Hit &h) {
 // ------------------------------------------------------------------ public
 
 uint32_t ui_drawMs = 0, ui_pushMs = 0;
+uint32_t ui_prof[12] = {};   // last frame, us: clear, view, top, bottom, -, view id, map: -, tiles, rings, targets+nodes, drones, chrome
 
 void ui_dirty() { dirty = true; }
 
@@ -2369,8 +2537,17 @@ void ui_init() {
     tzset();
     // The DSI framebuffer's own pixel format: the push is then a plain copy, no conversion.
     C.setColorDepth(lgfx::color_depth_t::rgb565_nonswapped);
-    C.setPsram(true);
-    if (!C.createSprite(PW, PH)) Serial.println("canvas alloc failed");
+    // Our own buffer, cache-line aligned: the PPA (DMA) fills it, blits tiles into it and
+    // pushes it to the display's framebuffer.
+    void *cbuf = heap_caps_aligned_alloc(128, (size_t)PW * PH * 2, MALLOC_CAP_SPIRAM);
+    if (cbuf) C.setBuffer(cbuf, PW, PH);
+    else {
+        C.setPsram(true);
+        if (!C.createSprite(PW, PH)) Serial.println("canvas alloc failed");
+    }
+    fb = (uint16_t *)((lgfx::Panel_DSI *)M5.Display.getPanel())->config_detail().buffer;
+    bool ppaUp = gfx_init();
+    Serial.printf("ppa %s, framebuffer %p\n", ppaUp && fb && cbuf ? "on" : "OFF", fb);
     apply_rotation();   // now the canvas reads 1280 x 720
     if (!settings_ready()) {
         settings_open();
@@ -2816,9 +2993,12 @@ void ui_frame() {
     } else if (A.settings) {
         draw_settings();
     } else {
-        C.fillScreen(BG);
+        uint32_t p0 = micros();
+        if (A.view != V_MAP) ppa_fill(0, 0, W, H, BG);   // the map paints its own area
+        else ppa_fill(0, 0, W, TOP, BG), ppa_fill(0, H - BOT, W, BOT, BG);
         build_lists();
         build_drones();
+        uint32_t p1 = micros();
         switch (A.view) {
         case V_OVERVIEW: draw_overview(); break;
         case V_FLEET: draw_fleet(); break;
@@ -2830,9 +3010,14 @@ void ui_frame() {
         default: break;
         }
         if (A.detail) draw_detail();
-        draw_top();
-        draw_bottom();
+        uint32_t p2 = micros();
+        cached_band(topBand, top_key(), draw_top);
+        uint32_t p3 = micros();
+        if (M->alertsUnacked && M->hasAlert && !M->muteAll) draw_bottom();   // the alert bar pulses: always live
+        else cached_band(botBand, bottom_key(), draw_bottom);
+        uint32_t p4 = micros();
         if (A.help) draw_help();
+        ui_prof[0] = p1 - p0, ui_prof[1] = p2 - p1, ui_prof[2] = p3 - p2, ui_prof[3] = p4 - p3, ui_prof[5] = A.view;
     }
     // Touch feedback: the control under the finger fills while held, and flashes bright
     // as the tap fires (fading over ~180 ms).
@@ -2848,7 +3033,7 @@ void ui_frame() {
     }
     model_unlock();
     uint32_t t1 = millis();
-    C.pushSprite(0, 0);
+    push_frame();
     ui_drawMs = t1 - now;
     ui_pushMs = millis() - t1;
 }

@@ -11,11 +11,20 @@
 #include "feed.h"
 #include "usbhost.h"
 #include "ui.h"
+#include "gfx.h"
+#include <Preferences.h>
+#include "maptiles.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
 #include <SocketIOclient.h>
 #include <WiFi.h>
+
+// main.cpp: health counters for /info
+extern uint32_t diagBoots, diagFrameWorst, diagDrawWorst, diagPushWorst;
+extern int diagReset;
+const char *reset_name(int r);
+extern uint32_t ui_prof[12];
 
 namespace {
 
@@ -112,7 +121,7 @@ void set_error(const char *fmt, ...) {
 // before it is parsed: the console alone is one event per serial line.
 bool wanted(const char *name) {
     static const char *keep[] = {"fleet", "det", "sighting", "node_filters", "node_event", "dets_cleared", "bridge_tx",
-                                 "drone", "groups", "mac_aliases"};
+                                 "drone", "groups", "mac_aliases", "tri"};
     for (auto k : keep)
         if (!strcmp(name, k)) return true;
     return false;
@@ -153,6 +162,7 @@ void on_event(uint8_t *payload, size_t len) {
     else if (!strcmp(name, "sighting")) ingest_sighting(body);
     else if (!strcmp(name, "dets_cleared")) ingest_cleared(body);
     else if (!strcmp(name, "drone")) ingest_drone(body);
+    else if (!strcmp(name, "tri")) ingest_tri(body);
     else if (!strcmp(name, "mac_aliases")) { ingest_names(body, JsonObjectConst(), JsonObjectConst()); wantDetail = true; }
     else if (!strcmp(name, "groups")) { ingest_names(JsonObjectConst(), JsonObjectConst(), body["group_of"]); wantDetail = true; }
     else if (!strcmp(name, "node_event")) {
@@ -380,6 +390,32 @@ void debug_poll() {
     } else if (req.startsWith("GET /shot")) {
         c.print("HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n");
         ui_screenshot(c);
+    } else if (req.startsWith("GET /info")) {
+        Preferences p;
+        p.begin("tab5diag", true);
+        uint32_t crashes = p.getUInt("crashes", 0);
+        p.end();
+        char b[900];
+        snprintf(b, sizeof b,
+                 "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
+                 "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
+                 "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
+                 "\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
+                 "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
+                 "\"sync\":%lu,\"ppa_push\":%lu,\"m_unused\":%lu,\"m_tiles\":%lu,\"m_rings\":%lu,\"m_tgt_nodes\":%lu,\"m_drones\":%lu,\"m_chrome\":%lu}}\n",
+                 (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
+                 heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                 (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,
+                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(),
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0,
+                 (unsigned long)ui_prof[0], (unsigned long)ui_prof[1], (unsigned long)ui_prof[2], (unsigned long)ui_prof[3],
+                 (unsigned long)ui_prof[5], (unsigned long)ui_prof[4], (unsigned long)ui_prof[6], 0UL, (unsigned long)ui_prof[7], (unsigned long)ui_prof[8],
+                 (unsigned long)ui_prof[9], (unsigned long)ui_prof[10], (unsigned long)ui_prof[11]);
+        c.print("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+        c.print(b);
     } else if (req.startsWith("GET /key")) {
         int i = req.indexOf("c=");
         uint8_t kc = i >= 0 ? (uint8_t)strtol(req.c_str() + i + 2, nullptr, 16) : 0;
@@ -486,6 +522,7 @@ void fetch_state() {
     filter["hourly"] = true;
     filter["recent"] = true;
     filter["drones"] = true;
+    filter["tri"] = true;
     filter["mac_aliases"] = true;
     filter["device_names"] = true;
     filter["group_of"] = true;

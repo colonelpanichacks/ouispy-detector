@@ -85,6 +85,11 @@ struct Target {
     char alias[24];
     char group[24];
     char info[360];       // latest over-the-air intel JSON (USB mode detail)
+    // Triangulated position from the dashboard (tri.py, same model as its web map).
+    bool triOk, triRough;
+    double triLat, triLon;
+    float triErr;          // m, 68% radius
+    double triTs;          // server time of the fix
     char descr[36];
     char type[8];
     char dom[5];
@@ -231,6 +236,7 @@ void ingest_metrics(JsonDocument &doc, uint32_t range);
 void ingest_stats(JsonDocument &doc);
 void ingest_cleared(JsonObjectConst e);
 void ingest_drone(JsonObjectConst d);          // dashboard "drone" event shape
+void ingest_tri(JsonObjectConst f);            // dashboard "tri" event: a triangulated fix
 void ingest_rid(JsonObjectConst r, const char *homeId);   // a node's raw "RID {...}" line (USB mode)
 void ingest_detail(JsonDocument &doc);
 void ingest_names(JsonObjectConst aliases, JsonObjectConst names, JsonObjectConst groupOf);
