@@ -1,0 +1,2886 @@
+// Rendering and input for the Tab5: one 1280x720 PSRAM canvas, redrawn when the model or
+// the view changes (or once a second for ages and the clock), pushed in one go so nothing
+// flickers or shifts. Every panel has a fixed size: new data fills it, never moves it.
+#include "ui.h"
+#include "app.h"
+#include "model.h"
+#include "net.h"
+#include "settings.h"
+#include "feed.h"
+#include "maptiles.h"
+#include <M5Unified.h>
+#include <M5UnitUnifiedKEYBOARD.h>
+
+App A;
+
+void toast(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(A.toast, sizeof A.toast, fmt, ap);
+    va_end(ap);
+    A.toastUntil = millis() + 4000;
+}
+
+namespace {
+
+constexpr int W = 1280, H = 720;
+constexpr int TOP = 60, BOT = 44;
+constexpr int CY = TOP + 12;            // content top
+constexpr int CB = H - BOT - 12;        // content bottom
+constexpr int PAD = 20;
+
+// Palette: the web dashboard's tokens.
+constexpr uint16_t rgb(uint32_t c) { return ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x001F); }
+const uint16_t BG = rgb(0x06080b), PANEL = rgb(0x0c0f14), PANEL2 = rgb(0x10141b);
+const uint16_t LINE = rgb(0x1b222c), LINE2 = rgb(0x2b3542);
+const uint16_t TEXT = rgb(0xdbe4ee), SOFT = rgb(0x9ecfff), MUTED = rgb(0x8593a6), FAINT = rgb(0x5b6879);
+const uint16_t ACCENT = rgb(0x4ecdc4), AMBER = rgb(0xfbbf24), RED = rgb(0xf87171);
+const uint16_t PINK = rgb(0xf0abfc), PURPLE = rgb(0xc4b5fd), SKY = rgb(0x7dd3fc);
+
+const lgfx::IFont *F_SM = &fonts::DejaVu12;
+const lgfx::IFont *F_MD = &fonts::DejaVu18;
+const lgfx::IFont *F_LG = &fonts::DejaVu24;
+const lgfx::IFont *F_XL = &fonts::DejaVu40;
+const lgfx::IFont *F_MONO = &fonts::FreeMono12pt7b;
+const lgfx::IFont *F_MONO_S = &fonts::FreeMono9pt7b;   // MACs in narrow columns
+const lgfx::IFont *F_BRAND = &fonts::Orbitron_Light_24;
+const lgfx::IFont *F_BRAND_L = &fonts::Orbitron_Light_32;
+
+M5Canvas C(&M5.Display);
+uint32_t drawnVersion = 0xFFFFFFFF;
+uint32_t drawnMs = 0;
+bool dirty = true;
+uint32_t lastAlertSeq = 0;
+uint32_t alertFlashUntil = 0;
+
+uint16_t dim(uint16_t c, float f) {
+    uint8_t r = ((c >> 11) & 0x1F) * f, g = ((c >> 5) & 0x3F) * f, b = (c & 0x1F) * f;
+    return (r << 11) | (g << 5) | b;
+}
+
+// ------------------------------------------------------------------ touch targets
+// Everything tappable registers its rectangle while it is drawn, so a tap always lands on
+// exactly what is on screen. Lists also register a drag-to-scroll area.
+
+enum HitAct : uint8_t {
+    H_TAB, H_ROW, H_TARGET, H_DOM, H_NODE, H_SEARCH, H_CLEAR, H_RANGE, H_ACK, H_MUTE, H_SILENCE,
+    H_HELP, H_SETUP, H_CLOSE, H_FIELD, H_SRC, H_NET, H_SAVE, H_BACK, H_REVEAL, H_RESCAN,
+    H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
+    H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG
+};
+struct Hit {
+    int16_t x, y, w, h;
+    uint8_t act;
+    int16_t arg;
+    bool in(int px, int py) const { return px >= x && px < x + w && py >= y && py < y + h; }
+};
+constexpr int L_NETS = 10;   // scroll list id for the setup screen's networks
+struct ScrollArea {
+    int16_t x, y, w, h;
+    uint8_t list;
+    int16_t rowH, rows;
+};
+Hit hits[160];
+int nhits = 0;
+ScrollArea scrolls[4];
+int nscrolls = 0;
+
+void hit(int x, int y, int w, int h, uint8_t act, int arg = 0) {
+    if (nhits < (int)(sizeof hits / sizeof hits[0])) hits[nhits++] = {(int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, act, (int16_t)arg};
+}
+void scroll_area(int x, int y, int w, int h, uint8_t list, int rowH, int rows) {
+    if (nscrolls < 4) scrolls[nscrolls++] = {(int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, list, (int16_t)rowH, (int16_t)rows};
+}
+
+// Finger state, between press and release.
+struct {
+    bool down, dragging;
+    int x0, y0, x, y;
+    Hit pressed;
+    bool hasPressed;
+    int scroll;          // index into scrolls, -1 none
+    ScrollArea area;
+    int top0;
+    double mx0, my0;     // map drag: world pixel of the centre at the press
+} T = {};
+
+// ------------------------------------------------------------------ primitives
+
+void font(const lgfx::IFont *f) { C.setFont(f); }
+
+void text(int x, int y, const char *s, uint16_t col, textdatum_t d = top_left) {
+    C.setTextDatum(d);
+    C.setTextColor(col);
+    C.drawString(s, x, y);
+}
+
+// Neon text: a dim halo one pixel around, the bright face on top.
+void glow(int x, int y, const char *s, uint16_t col, textdatum_t d = top_left) {
+    C.setTextDatum(d);
+    C.setTextColor(dim(col, 0.28f));
+    C.drawString(s, x - 1, y);
+    C.drawString(s, x + 1, y);
+    C.drawString(s, x, y - 1);
+    C.drawString(s, x, y + 1);
+    C.setTextColor(col);
+    C.drawString(s, x, y);
+}
+
+// Truncate to fit `w` px with the current font.
+const char *fit(const char *s, int w) {
+    static char buf[96];
+    if (C.textWidth(s) <= w) return s;
+    strlcpy(buf, s, sizeof buf);
+    int n = strlen(buf);
+    while (n > 0) {
+        buf[--n] = 0;
+        char tmp[100];
+        snprintf(tmp, sizeof tmp, "%s..", buf);
+        if (C.textWidth(tmp) <= w) {
+            strlcpy(buf, tmp, sizeof buf);
+            return buf;
+        }
+    }
+    return "";
+}
+
+void panel(int x, int y, int w, int h, const char *title, uint16_t accent = ACCENT) {
+    C.fillRoundRect(x, y, w, h, 8, PANEL);
+    C.drawRoundRect(x, y, w, h, 8, LINE2);
+    if (title) {
+        C.drawFastHLine(x + 14, y, 40, accent);   // a short neon tick on the frame
+        C.drawFastHLine(x + 14, y + 1, 40, dim(accent, 0.5f));
+        font(F_SM);
+        text(x + 14, y + 10, title, dim(accent, 0.9f));
+    }
+}
+
+void glow_rect(int x, int y, int w, int h, int r, uint16_t col) {
+    C.drawRoundRect(x - 2, y - 2, w + 4, h + 4, r + 2, dim(col, 0.18f));
+    C.drawRoundRect(x - 1, y - 1, w + 2, h + 2, r + 1, dim(col, 0.4f));
+    C.drawRoundRect(x, y, w, h, r, col);
+}
+
+void chip(int x, int y, const char *s, uint16_t col, bool on, int *wOut = nullptr, int act = -1, int arg = 0) {
+    font(F_SM);
+    int w = C.textWidth(s) + 28, h = 30;
+    if (act >= 0) hit(x - 4, y - 8, w + 8, h + 16, act, arg);   // a finger is bigger than the chip
+    if (on) {
+        C.fillRoundRect(x, y, w, h, 15, dim(col, 0.22f));
+        glow_rect(x, y, w, h, 15, col);
+        text(x + w / 2, y + h / 2 + 1, s, col, middle_center);
+    } else {
+        C.drawRoundRect(x, y, w, h, 15, LINE2);
+        text(x + w / 2, y + h / 2 + 1, s, MUTED, middle_center);
+    }
+    if (wOut) *wOut = w;
+}
+
+void dot(int x, int y, int r, uint16_t col) {
+    C.fillCircle(x, y, r + 3, dim(col, 0.15f));
+    C.fillCircle(x, y, r + 1, dim(col, 0.4f));
+    C.fillCircle(x, y, r, col);
+}
+
+uint16_t rssi_color(int rssi) {
+    if (!rssi) return FAINT;
+    if (rssi >= -60) return ACCENT;
+    if (rssi >= -75) return SKY;
+    if (rssi >= -85) return AMBER;
+    return RED;
+}
+
+void rssi_bar(int x, int y, int w, int h, int rssi, uint16_t col) {
+    C.fillRoundRect(x, y, w, h, h / 2, PANEL2);
+    if (!rssi) return;
+    float f = constrain((rssi + 100) / 70.0f, 0.03f, 1.0f);
+    int fw = max(h, (int)(w * f));
+    C.fillRoundRect(x, y, fw, h, h / 2, dim(col, 0.85f));
+    C.drawFastHLine(x + h / 2, y, fw - h, col);
+}
+
+const char *age_str(double ts) {
+    static char buf[4][12];
+    static int k = 0;
+    char *b = buf[k = (k + 1) & 3];
+    double now = server_now();
+    if (!ts || !now) return "-";
+    double a = max(0.0, now - ts);
+    if (a < 60) snprintf(b, 12, "%ds", (int)a);
+    else if (a < 3600) snprintf(b, 12, "%dm", (int)(a / 60));
+    else if (a < 86400) snprintf(b, 12, "%dh", (int)(a / 3600));
+    else snprintf(b, 12, "%dd", (int)(a / 86400));
+    return b;
+}
+
+const char *dur_str(uint32_t s) {
+    static char b[16];
+    if (s < 3600) snprintf(b, sizeof b, "%um", s / 60);
+    else if (s < 86400) snprintf(b, sizeof b, "%uh %02um", s / 3600, (s / 60) % 60);
+    else snprintf(b, sizeof b, "%ud %02uh", s / 86400, (s / 3600) % 24);
+    return b;
+}
+
+const char *clock_str(double ts, bool secs) {
+    static char b[16];
+    if (!ts || !M->clockValid) return secs ? "--:--:--" : "--:--";
+    time_t t = (time_t)ts;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(b, sizeof b, secs ? "%H:%M:%S" : "%H:%M", &tm);
+    return b;
+}
+
+// The name to show for a detection: dashboard alias, else what it calls itself, else the vendor.
+const char *vendor_of(const Det *d) {
+    return d->alias[0] ? d->alias : d->name[0] ? d->name : (d->descr[0] ? d->descr : d->type);
+}
+
+// ------------------------------------------------------------------ filtering
+
+bool icontains(const char *hay, const char *needle) {
+    if (!*needle) return true;
+    for (const char *h = hay; *h; h++) {
+        const char *a = h, *b = needle;
+        while (*a && *b && tolower(*a) == tolower(*b)) a++, b++;
+        if (!*b) return true;
+    }
+    return false;
+}
+
+bool det_match(const Det *d) {
+    if (A.dom == 1 && strcmp(d->dom, "ble")) return false;
+    if (A.dom == 2 && strcmp(d->dom, "wifi")) return false;
+    if (A.node[0]) {
+        bool by = !strcmp(d->node, A.node);
+        for (int i = 0; i < d->nseen && !by; i++) by = !strcmp(d->seen[i].node, A.node);
+        if (!by) return false;
+    }
+    if (!A.search[0]) return true;
+    return icontains(d->descr, A.search) || icontains(d->alias, A.search) || icontains(d->mac, A.search) ||
+           icontains(d->type, A.search) || icontains(node_name(d->node), A.search) || icontains(d->node, A.search);
+}
+
+bool target_match(const Target *t) {
+    if (A.dom == 1 && strcmp(t->dom, "ble")) return false;
+    if (A.dom == 2 && strcmp(t->dom, "wifi")) return false;
+    if (A.node[0]) {
+        bool by = false;
+        for (int i = 0; i < t->nseen && !by; i++) by = !strcmp(t->seen[i].node, A.node);
+        if (!by) return false;
+    }
+    return !A.search[0] || icontains(t->descr, A.search) || icontains(t->mac, A.search) ||
+           icontains(t->type, A.search);
+}
+
+// Filtered views, rebuilt per frame (cheap: a few hundred rows).
+int liveIdx[MAX_DETS], nLive = 0;
+int tgtIdx[MAX_TARGETS], nTgt = 0;
+extern int nDrone;
+
+void build_lists() {
+    nLive = 0;
+    for (int i = 0; i < M->ndets; i++)
+        if (det_match(det_at(i))) liveIdx[nLive++] = i;
+    nTgt = 0;
+    for (int i = 0; i < M->ntargets; i++)
+        if (target_match(&M->targets[i])) tgtIdx[nTgt++] = i;
+    std::sort(tgtIdx, tgtIdx + nTgt, [](int a, int b) { return M->targets[a].last > M->targets[b].last; });
+}
+
+int list_len(View v) {
+    switch (v) {
+    case V_FLEET: return M->nnodes;
+    case V_LIVE: return nLive;
+    case V_TARGETS: return nTgt;
+    case V_DRONES: return nDrone;
+    default: return 0;
+    }
+}
+
+void clamp_sel(View v, int rows) {
+    int n = list_len(v);
+    int &s = A.sel[v], &t = A.top[v];
+    s = constrain(s, 0, max(0, n - 1));
+    if (s < t) t = s;
+    if (s >= t + rows) t = s - rows + 1;
+    t = constrain(t, 0, max(0, n - rows));
+}
+
+// ------------------------------------------------------------------ MAP
+
+// Web Mercator, in pixels at zoom z.
+double lon2x(double lon, int z) { return (lon + 180.0) / 360.0 * TILE * (double)(1 << z); }
+double lat2y(double lat, int z) {
+    double r = lat * M_PI / 180.0;
+    return (1.0 - log(tan(r) + 1.0 / cos(r)) / M_PI) / 2.0 * TILE * (double)(1 << z);
+}
+double x2lon(double x, int z) { return x / (TILE * (double)(1 << z)) * 360.0 - 180.0; }
+double y2lat(double y, int z) {
+    double n = M_PI - 2.0 * M_PI * y / (TILE * (double)(1 << z));
+    return 180.0 / M_PI * atan(0.5 * (exp(n) - exp(-n)));
+}
+
+constexpr int MX = 0, MY = TOP, MW = W, MH = H - TOP - BOT;
+constexpr int L_MAP = 11;    // scroll id: dragging the map pans it
+constexpr int ZMIN = 3, ZMAX = 19;
+
+const uint16_t ORANGE = rgb(0xfb923c);
+uint16_t tag_color(const char *tag) {
+    if (!strcmp(tag, "friendly")) return ACCENT;
+    if (!strcmp(tag, "neutral")) return AMBER;
+    if (!strcmp(tag, "suspicious")) return ORANGE;
+    if (!strcmp(tag, "hostile")) return RED;
+    return SKY;
+}
+static const char *DRONE_TAGS[] = {"unknown", "friendly", "neutral", "suspicious", "hostile"};
+
+const char *drone_name(const Drone &d) {
+    return d.alias[0] ? d.alias : d.desc[0] ? d.desc : d.id[0] ? d.id : d.mac;
+}
+bool drone_live(const Drone &d) { return server_now() - d.last < DRONE_LIVE_S; }
+
+// Drones, live first then newest.
+int droneIdx[MAX_DRONES], nDrone = 0;
+void build_drones() {
+    nDrone = 0;
+    for (int i = 0; i < M->ndrones; i++) droneIdx[nDrone++] = i;
+    std::sort(droneIdx, droneIdx + nDrone, [](int a, int b) {
+        bool la = drone_live(M->drones[a]), lb = drone_live(M->drones[b]);
+        if (la != lb) return la;
+        return M->drones[a].last > M->drones[b].last;
+    });
+}
+
+// Where a target probably is: the nodes that hear it, weighted by signal power.
+bool target_pos(const Target &t, double &lat, double &lon) {
+    double sw = 0, a = 0, o = 0;
+    for (int i = 0; i < t.nseen; i++) {
+        const Node *n = node_by_id(t.seen[i].node);
+        if (!n || !n->hasPos) continue;
+        double w = pow(10.0, t.seen[i].rssi / 10.0);
+        sw += w, a += w * n->lat, o += w * n->lon;
+    }
+    if (!sw) return false;
+    lat = a / sw, lon = o / sw;
+    return true;
+}
+
+const char *target_label(const Target &t) {
+    return t.alias[0] ? t.alias : t.name[0] ? t.name : t.descr[0] ? t.descr : t.type;
+}
+
+// Text that stays readable over satellite imagery: a dark outline, then the face.
+void map_text(int x, int y, const char *s, uint16_t col, textdatum_t d = middle_left) {
+    C.setTextDatum(d);
+    C.setTextColor(BG);
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++)
+            if (dx || dy) C.drawString(s, x + dx, y + dy);
+    C.setTextColor(col);
+    C.drawString(s, x, y);
+}
+
+void dashed(int x0, int y0, int x1, int y1, uint16_t col) {
+    float dx = x1 - x0, dy = y1 - y0, len = sqrtf(dx * dx + dy * dy);
+    if (len < 1) return;
+    for (float t = 0; t < len; t += 12) {
+        float e = min(len, t + 7);
+        C.drawLine(x0 + dx * t / len, y0 + dy * t / len, x0 + dx * e / len, y0 + dy * e / len, col);
+    }
+}
+
+// Quadcopter glyph: ring, X arms, rotors, heading nose.
+void drone_glyph(int x, int y, float hdg, bool hasHdg, uint16_t col, bool live, float scale = 1.0f) {
+    uint16_t c = live ? col : dim(col, 0.5f);
+    int r = 17 * scale;
+    if (live) {
+        float p = 0.5f + 0.5f * sinf(millis() / 300.0f);
+        C.drawCircle(x, y, r + 4 + (int)(4 * p), dim(c, 0.35f * (1 - p) + 0.1f));
+    }
+    C.fillCircle(x, y, r, dim(c, 0.18f));
+    C.drawCircle(x, y, r, c);
+    float a = (hasHdg ? hdg : 0) * M_PI / 180.0f;
+    for (int k = 0; k < 4; k++) {
+        float ang = a + M_PI / 4 + k * M_PI / 2;
+        int ex = x + sinf(ang) * 11 * scale, ey = y - cosf(ang) * 11 * scale;
+        C.drawLine(x, y, ex, ey, c);
+        C.drawLine(x + 1, y, ex + 1, ey, c);
+        C.fillCircle(ex, ey, 5 * scale, BG);
+        C.drawCircle(ex, ey, 5 * scale, c);
+    }
+    if (hasHdg) {
+        int nx = x + sinf(a) * (r + 3), ny = y - cosf(a) * (r + 3);
+        int lx = x + sinf(a - 0.35f) * (r - 5), ly = y - cosf(a - 0.35f) * (r - 5);
+        int rx = x + sinf(a + 0.35f) * (r - 5), ry = y - cosf(a + 0.35f) * (r - 5);
+        C.fillTriangle(nx, ny, lx, ly, rx, ry, TEXT);
+    }
+}
+
+void pilot_glyph(int x, int y, uint16_t col) {
+    C.fillCircle(x, y - 7, 5, col);
+    C.fillTriangle(x - 8, y + 9, x + 8, y + 9, x, y - 1, col);
+    C.drawCircle(x, y, 14, dim(col, 0.5f));
+}
+
+void map_fit() {
+    double la0 = 90, la1 = -90, lo0 = 180, lo1 = -180;
+    int n = 0;
+    auto add = [&](double la, double lo) {
+        la0 = min(la0, la), la1 = max(la1, la), lo0 = min(lo0, lo), lo1 = max(lo1, lo);
+        n++;
+    };
+    for (int i = 0; i < M->nnodes; i++)
+        if (M->nodes[i].hasPos) add(M->nodes[i].lat, M->nodes[i].lon);
+    for (int i = 0; i < M->ndrones; i++) {
+        const Drone &d = M->drones[i];
+        if (!drone_live(d)) continue;
+        if (d.hasPos) add(d.lat, d.lon);
+        if (d.hasPilot) add(d.plat, d.plon);
+    }
+    if (!n) return;
+    A.mapLat = (la0 + la1) / 2, A.mapLon = (lo0 + lo1) / 2;
+    int z = ZMAX;
+    while (z > ZMIN && (lon2x(lo1, z) - lon2x(lo0, z) > MW - 260 || lat2y(la0, z) - lat2y(la1, z) > MH - 160)) z--;
+    A.mapZoom = z;
+    A.mapInit = true;
+}
+
+void map_center_on(double lat, double lon) {
+    A.mapLat = lat, A.mapLon = lon;
+    A.mapInit = true;
+    maptiles_clear_requests();
+}
+
+bool mapAnimating = false;   // zoom easing in progress: frame at full rate
+
+// Fractional-zoom Mercator (world pixels at zoom z, z not necessarily whole).
+double lon2xf(double lon, double z) { return (lon + 180.0) / 360.0 * TILE * pow(2.0, z); }
+double lat2yf(double lat, double z) {
+    double r = lat * M_PI / 180.0;
+    return (1.0 - log(tan(r) + 1.0 / cos(r)) / M_PI) / 2.0 * TILE * pow(2.0, z);
+}
+double x2lonf(double x, double z) { return x / (TILE * pow(2.0, z)) * 360.0 - 180.0; }
+double y2latf(double y, double z) {
+    double n = M_PI - 2.0 * M_PI * y / (TILE * pow(2.0, z));
+    return 180.0 / M_PI * atan(0.5 * (exp(n) - exp(-n)));
+}
+
+// Zoom anchor: while the zoom eases (double tap, pinch), this map point stays under this
+// screen point, so the map grows out of your finger instead of the screen centre.
+struct { bool on; int x, y; double lat, lon; } ZA = {};
+bool pinching = false;
+
+void screen_to_ll(int x, int y, double zf, double &lat, double &lon) {
+    double cx = lon2xf(A.mapLon, zf), cy = lat2yf(A.mapLat, zf);
+    lon = x2lonf(cx + (x - MX - MW / 2.0), zf);
+    lat = y2latf(cy + (y - MY - MH / 2.0), zf);
+}
+
+void apply_anchor(double zf) {
+    if (!ZA.on) return;
+    A.mapLon = x2lonf(lon2xf(ZA.lon, zf) - (ZA.x - MX - MW / 2.0), zf);
+    A.mapLat = y2latf(lat2yf(ZA.lat, zf) - (ZA.y - MY - MH / 2.0), zf);
+}
+
+void map_zoom_at(int dz, int x, int y) {
+    int nz = constrain(A.mapZoom + dz, ZMIN, ZMAX);
+    if (nz == A.mapZoom) return;
+    ZA.on = true, ZA.x = x, ZA.y = y;
+    screen_to_ll(x, y, A.mapZoomF, ZA.lat, ZA.lon);
+    A.mapZoom = nz;
+    A.mapFollow = false;
+    maptiles_clear_requests();
+}
+
+uint8_t canvasRot();
+constexpr int PNL_W = 720, PNL_H = 1280;   // the panel's native (portrait) framebuffer
+
+// Draw a tile so that tile (z, x, y) covers the given screen square, even when the image
+// is a coarser ancestor (k levels up): it is scaled up and clipped. Written straight into
+// the canvas buffer: the tile is stored column-major, which is the panel's row order, so a
+// 1:1 tile is one memcpy per column and a scaled one a tight nearest-pixel loop.
+void tile_blit(const uint16_t *t, int k, int tx, int ty, double ts, int sx0, int sy0) {
+    double big = ts * (1 << k);                       // the ancestor's size on screen
+    int ax = tx >> k, ay = ty >> k;
+    double ox = sx0 - (tx - (ax << k)) * ts, oy = sy0 - (ty - (ay << k)) * ts;   // its top left
+    int cx0 = max(sx0, MX), cy0 = max(sy0, MY);
+    int cx1 = min(sx0 + (int)ceil(ts), MX + MW), cy1 = min(sy0 + (int)ceil(ts), MY + MH);
+    if (cx1 <= cx0 || cy1 <= cy0) return;
+    uint16_t *buf = (uint16_t *)C.getBuffer();
+    bool r3 = canvasRot() == 3;
+    double scale = TILE / big;                        // source pixels per screen pixel
+    uint32_t step = (uint32_t)(scale * 65536.0 + 0.5);
+    bool one = k == 0 && fabs(big - TILE) < 0.01;
+    for (int X = cx0; X < cx1; X++) {
+        int u = (int)((X - ox) * scale);
+        u = u < 0 ? 0 : u > TILE - 1 ? TILE - 1 : u;
+        const uint16_t *col = t + u * TILE;
+        int n = cy1 - cy0;
+        if (r3) {
+            uint16_t *dst = buf + (size_t)(PNL_H - 1 - X) * PNL_W + cy0;
+            if (one) {
+                memcpy(dst, col + (int)lround(cy0 - oy), n * 2);
+                continue;
+            }
+            uint32_t v = (uint32_t)((cy0 - oy) * scale * 65536.0);
+            for (int i = 0; i < n; i++, v += step) dst[i] = col[min(v >> 16, (uint32_t)(TILE - 1))];
+        } else {
+            uint16_t *dst = buf + (size_t)X * PNL_W + (PNL_W - 1 - cy0);
+            uint32_t v = (uint32_t)((cy0 - oy) * scale * 65536.0);
+            for (int i = 0; i < n; i++, v += step) *(dst - i) = col[min(v >> 16, (uint32_t)(TILE - 1))];
+        }
+    }
+}
+
+void draw_map() {
+    if (!A.mapInit) {
+        map_fit();
+        A.mapZoomF = A.mapZoom;
+        if (!A.mapInit) {   // no node positions yet: don't fetch the middle of the ocean
+            C.fillRect(MX, MY, MW, MH, rgb(0x0a0d12));
+            font(F_MD);
+            text(W / 2, MY + MH / 2, net_online() || M->usbLive ? "waiting for node positions (set them on the dashboard map)"
+                                                                 : "waiting for the dashboard", FAINT, middle_center);
+            return;
+        }
+    }
+    if (A.mapFollow) {
+        for (int k = 0; k < nDrone; k++) {
+            const Drone &d = M->drones[droneIdx[k]];
+            if (drone_live(d) && d.hasPos) { A.mapLat = d.lat, A.mapLon = d.lon; break; }
+        }
+    }
+    // Ease the displayed zoom toward the target: ~150 ms per level, frame-rate independent.
+    static uint32_t lastMs = 0;
+    uint32_t nowMs = millis();
+    float dt = lastMs ? min(0.1f, (nowMs - lastMs) / 1000.0f) : 0;
+    lastMs = nowMs;
+    float target = A.mapZoom;
+    if (pinching) {
+        mapAnimating = true;            // the fingers set the zoom directly
+    } else if (fabsf(A.mapZoomF - target) > 0.004f) {
+        A.mapZoomF += (target - A.mapZoomF) * min(1.0f, dt * 14.0f);
+        if (fabsf(A.mapZoomF - target) < 0.004f) A.mapZoomF = target;
+        mapAnimating = true;
+    } else {
+        A.mapZoomF = target;
+        mapAnimating = false;
+    }
+    apply_anchor(A.mapZoomF);
+    if (!mapAnimating) ZA.on = false;
+    float zf = A.mapZoomF;
+    int zb = constrain((int)floorf(zf + 0.0001f), ZMIN, ZMAX);
+    double sc = pow(2.0, zf - zb);                    // base-zoom pixels -> screen pixels
+    double ts = TILE * sc;
+    int z = zb;
+    double cx = lon2x(A.mapLon, zb) * sc, cy = lat2y(A.mapLat, zb) * sc;
+    double left = cx - MW / 2.0, top = cy - MH / 2.0;
+    auto sx = [&](double lon) { return (int)(MX + lon2x(lon, zb) * sc - left); };
+    auto sy = [&](double lat) { return (int)(MY + lat2y(lat, zb) * sc - top); };
+
+    C.setClipRect(MX, MY, MW, MH);
+    C.fillRect(MX, MY, MW, MH, rgb(0x0a0d12));
+    scroll_area(MX, MY, MW, MH, L_MAP, 1, 1);
+    // Tiles: this zoom's tile if loaded; else an ancestor scaled up, else the previous
+    // layer's, so a zoom or a layer switch never shows a blank map.
+    int n = 1 << zb;
+    int tx0 = (int)floor(left / ts), ty0 = (int)floor(top / ts);
+    int tx1 = (int)floor((left + MW) / ts), ty1 = (int)floor((top + MH) / ts);
+    int missing = 0;
+    bool online = net_online();
+    bool settled = !mapAnimating;
+    for (int ty = ty0; ty <= ty1; ty++) {
+        if (ty < 0 || ty >= n) continue;
+        for (int tx = tx0; tx <= tx1; tx++) {
+            int wx = ((tx % n) + n) % n;
+            int x = MX + (int)floor(tx * ts - left), y = MY + (int)floor(ty * ts - top);
+            const uint16_t *img = online ? (settled ? maptile(A.mapLayer, zb, wx, ty) : maptile_peek(A.mapLayer, zb, wx, ty)) : nullptr;
+            if (img) {
+                tile_blit(img, 0, wx, ty, ts, x, y);
+                continue;
+            }
+            missing++;
+            bool drawn = false;
+            for (int k = 1; k <= 4 && !drawn && zb - k >= 0; k++) {
+                const uint16_t *anc = maptile_peek(A.mapLayer, zb - k, wx >> k, ty >> k);
+                if (anc) tile_blit(anc, k, wx, ty, ts, x, y), drawn = true;
+            }
+            if (!drawn && A.mapPrevLayer != A.mapLayer) {
+                const uint16_t *old = maptile_peek(A.mapPrevLayer, zb, wx, ty);
+                if (old) tile_blit(old, 0, wx, ty, ts, x, y), drawn = true;
+            }
+            if (!drawn) {
+                int is = (int)ceil(ts);
+                C.drawRect(x, y, is, is, rgb(0x141a22));
+                C.drawFastHLine(x, y + is / 2, is, rgb(0x10151c));
+                C.drawFastVLine(x + is / 2, y, is, rgb(0x10151c));
+            }
+        }
+    }
+    // Range rings round the home node: scale at a glance.
+    for (int i = 0; i < M->nnodes; i++) {
+        const Node &nd = M->nodes[i];
+        if (!nd.isHome || !nd.hasPos) continue;
+        double mpp = 156543.03392 * cos(nd.lat * M_PI / 180) / pow(2.0, zf);
+        for (int m : {50, 100, 250, 500, 1000}) {
+            int r = m / mpp;
+            if (r < 40 || r > 900) continue;
+            C.drawCircle(sx(nd.lon), sy(nd.lat), r, dim(ACCENT, 0.35f));
+            font(F_SM);
+            char b[12];
+            snprintf(b, sizeof b, m >= 1000 ? "%d km" : "%d m", m >= 1000 ? m / 1000 : m);
+            map_text(sx(nd.lon), sy(nd.lat) - r - 9, b, dim(ACCENT, 0.85f), middle_center);   // top of the ring: clear of node labels
+        }
+    }
+    // Live targets.
+    double now = server_now();
+    for (int i = 0; i < M->ntargets; i++) {
+        const Target &t = M->targets[i];
+        if (now - t.last > TARGET_LIVE_S) continue;
+        double la, lo;
+        if (!target_pos(t, la, lo)) continue;
+        int x = sx(lo), y = sy(la);
+        if (x < -40 || y < MY - 40 || x > W + 40 || y > H) continue;
+        uint16_t c = mac_muted(t.mac) ? FAINT : PINK;
+        C.fillTriangle(x, y - 9, x + 9, y, x, y + 9, dim(c, 0.6f));
+        C.fillTriangle(x, y + 9, x - 9, y, x, y - 9, dim(c, 0.6f));
+        C.drawLine(x, y - 9, x + 9, y, c), C.drawLine(x + 9, y, x, y + 9, c);
+        C.drawLine(x, y + 9, x - 9, y, c), C.drawLine(x - 9, y, x, y - 9, c);
+        font(F_SM);
+        map_text(x + 13, y, fit(target_label(t), 180), c);
+        int ti = -1;
+        for (int k = 0; k < nTgt; k++) if (tgtIdx[k] == i) ti = k;
+        if (ti >= 0) hit(x - 16, y - 16, 32, 32, H_TGTMAP, ti);
+    }
+    // Nodes: dots first, then labels placed so none overlap (nodes a few metres apart
+    // sit in a cluster). Each label tries right, left, then a column stepping down and
+    // up beside its dot, joined to it by a thin leader line when it moved.
+    struct Box { int x0, y0, x1, y1; };
+    Box placed[MAX_NODES + 2];
+    int np = 0;
+    auto clear = [&](const Box &b) {
+        for (int k = 0; k < np; k++)
+            if (b.x0 < placed[k].x1 && b.x1 > placed[k].x0 && b.y0 < placed[k].y1 && b.y1 > placed[k].y0) return false;
+        return true;
+    };
+    int order[MAX_NODES], no = 0;
+    for (int i = 0; i < M->nnodes; i++)
+        if (M->nodes[i].hasPos) order[no++] = i;
+    std::sort(order, order + no, [](int a, int b) { return M->nodes[a].isHome > M->nodes[b].isHome; });
+    for (int k = 0; k < no; k++) {
+        const Node &nd = M->nodes[order[k]];
+        int x = sx(nd.lon), y = sy(nd.lat);
+        uint16_t c = nd.online ? node_color565(nd.id) : FAINT;
+        dot(x, y, nd.isHome ? 8 : 6, c);
+        C.drawCircle(x, y, nd.isHome ? 12 : 10, BG);
+    }
+    font(F_MD);
+    const int lh = 24;
+    for (int k = 0; k < no; k++) {
+        const Node &nd = M->nodes[order[k]];
+        int x = sx(nd.lon), y = sy(nd.lat);
+        uint16_t c = nd.online ? node_color565(nd.id) : FAINT;
+        const char *nm = nd.alias[0] ? nd.alias : nd.id;
+        int tw = C.textWidth(nm) + 6;
+        Box b = {};
+        bool ok = false;
+        int lx = 0, ly = 0;
+        for (int step = 0; step <= 6 && !ok; step++) {
+            for (int side = 0; side < 2 && !ok; side++) {
+                for (int dir = (step ? -1 : 1); dir <= 1 && !ok; dir += 2) {
+                    int dy = step * lh * dir;
+                    lx = side ? x - 16 - tw : x + 16;
+                    ly = y + dy;
+                    b = {lx - 2, ly - lh / 2, lx + tw, ly + lh / 2};
+                    ok = clear(b);
+                }
+            }
+        }
+        if (!ok) continue;   // no room at all: the dot alone (tap FIT / zoom in)
+        placed[np++] = b;
+        if (ly != y) C.drawLine(x, y, lx < x ? b.x1 - 2 : lx, ly, dim(c, 0.7f));
+        map_text(lx, ly, nm, c);
+    }
+    // Drones: track, pilot and the line between them, then the aircraft on top.
+    for (int k = nDrone - 1; k >= 0; k--) {
+        const Drone &d = M->drones[droneIdx[k]];
+        bool live = drone_live(d);
+        if (!live && now - d.last > 1800) continue;
+        uint16_t c = tag_color(d.tag);
+        for (int p = 1; p < d.ntrack; p++) {
+            int x0 = sx(d.track[p - 1][1]), y0 = sy(d.track[p - 1][0]), x1 = sx(d.track[p][1]), y1 = sy(d.track[p][0]);
+            uint16_t tc = dim(c, 0.35f + 0.65f * p / d.ntrack);
+            C.drawLine(x0, y0, x1, y1, tc);
+            C.drawLine(x0 + 1, y0, x1 + 1, y1, tc);
+        }
+        if (d.hasPilot) {
+            int px = sx(d.plon), py = sy(d.plat);
+            if (d.hasPos) dashed(px, py, sx(d.lon), sy(d.lat), dim(c, live ? 0.9f : 0.45f));
+            pilot_glyph(px, py, live ? c : dim(c, 0.5f));
+            font(F_SM);
+            char b[32];
+            if (d.pilotDist >= 0) snprintf(b, sizeof b, "PILOT  %ld m", (long)d.pilotDist);
+            else snprintf(b, sizeof b, "PILOT");
+            map_text(px + 18, py, b, c);
+            hit(px - 18, py - 18, 36, 36, H_DRONE, k);
+        }
+        if (d.hasPos) {
+            int x = sx(d.lon), y = sy(d.lat);
+            drone_glyph(x, y, d.hdg, d.hasHdg, c, live);
+            font(F_MD);
+            map_text(x + 26, y - 9, fit(drone_name(d), 220), c);
+            char b[48];
+            if (d.hasHagl) snprintf(b, sizeof b, "%d m AGL%s", (int)d.hagl, "");
+            else if (d.hasAlt) snprintf(b, sizeof b, "%d m MSL", (int)d.alt);
+            else b[0] = 0;
+            if (d.hasSpd) snprintf(b + strlen(b), sizeof b - strlen(b), "%s%.1f m/s", b[0] ? "  " : "", d.spd);
+            font(F_SM);
+            if (b[0]) map_text(x + 26, y + 11, b, TEXT);
+            hit(x - 24, y - 24, 48, 48, H_DRONE, k);
+        }
+    }
+    C.clearClipRect();
+
+    // Info card, top left.
+    int ix = PAD, iy = MY + 12, iw = 360, ih = 64;
+    C.fillRoundRect(ix, iy, iw, ih, 8, dim(PANEL, 0.9f));
+    C.drawRoundRect(ix, iy, iw, ih, 8, LINE2);
+    font(F_MD);
+    char b[64];
+    snprintf(b, sizeof b, "%s   z%d", LAYER_NAMES[A.mapLayer], A.mapZoom);
+    glow(ix + 14, iy + 20, b, ACCENT, middle_left);
+    font(F_SM);
+    int ld = live_drones();
+    if (!online) snprintf(b, sizeof b, "map tiles come from the dashboard (Wi-Fi)");
+    else if (missing) snprintf(b, sizeof b, "loading %d tiles   %d drone%s live", missing, ld, ld == 1 ? "" : "s");
+    else snprintf(b, sizeof b, "%u tiles in memory   %d drone%s live", (unsigned)maptiles_cached(), ld, ld == 1 ? "" : "s");
+    text(ix + 14, iy + 46, b, online ? MUTED : AMBER, middle_left);
+
+    // Controls, right edge.
+    struct { const char *t; uint8_t act; bool on; } btn[] = {
+        {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false}, {"LAYER", H_LAYER, false},
+        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}};
+    int bw = 120, bh = 52, bx = W - PAD - bw, by = MY + 12;
+    for (auto &k : btn) {
+        hit(bx - 6, by - 4, bw + 12, bh + 8, k.act);
+        C.fillRoundRect(bx, by, bw, bh, 10, k.on ? dim(PINK, 0.25f) : dim(PANEL, 0.95f));
+        if (k.on) glow_rect(bx, by, bw, bh, 10, PINK);
+        else C.drawRoundRect(bx, by, bw, bh, 10, LINE2);
+        font(k.t[1] ? F_MD : F_LG);
+        glow(bx + bw / 2, by + bh / 2, k.t, k.on ? PINK : ACCENT, middle_center);
+        by += bh + 10;
+    }
+}
+
+void map_zoom(int dz) { map_zoom_at(dz, MX + MW / 2, MY + MH / 2); }
+
+// Keep the map ready from boot, whatever tab is open: request this view's tiles plus one
+// zoom level out (fallback while zooming) and in around the centre (the next zoom). The
+// loaders fetch newest-first, so this view's own tiles are requested last.
+void map_warm() {
+    if (!net_online()) return;
+    if (!A.mapInit) {
+        map_fit();
+        if (!A.mapInit) return;
+        A.mapZoomF = A.mapZoom;
+    }
+    auto want = [&](int z, double fracW, double fracH) {
+        if (z < ZMIN || z > ZMAX) return;
+        int n = 1 << z;
+        double cx = lon2x(A.mapLon, z), cy = lat2y(A.mapLat, z);
+        double hw = MW * fracW / 2, hh = MH * fracH / 2;
+        for (int ty = (int)floor((cy - hh) / TILE); ty <= (int)floor((cy + hh) / TILE); ty++) {
+            if (ty < 0 || ty >= n) continue;
+            for (int tx = (int)floor((cx - hw) / TILE); tx <= (int)floor((cx + hw) / TILE); tx++)
+                maptile(A.mapLayer, z, ((tx % n) + n) % n, ty);
+        }
+    };
+    want(A.mapZoom + 1, 0.6, 0.6);
+    want(A.mapZoom - 1, 1.0, 1.0);
+    want(A.mapZoom - 2, 1.0, 1.0);
+    want(A.mapZoom, 1.0, 1.0);
+}
+
+// ------------------------------------------------------------------ DRONES
+
+const char *fmt_m(char *b, size_t n, bool ok, float v, const char *unit) {
+    if (ok) snprintf(b, n, "%d %s", (int)lroundf(v), unit);
+    else snprintf(b, n, "-");
+    return b;
+}
+
+void draw_drones() {
+    int y = CY;
+    int lw = 500, rows = 7, rh = 78;
+    panel(PAD, y, lw, CB - y, "DRONES  REMOTE ID");
+    A.sel[V_DRONES] = constrain(A.sel[V_DRONES], 0, max(0, nDrone - 1));
+    A.top[V_DRONES] = constrain(A.top[V_DRONES], 0, max(0, nDrone - rows));
+    if (A.sel[V_DRONES] < A.top[V_DRONES]) A.top[V_DRONES] = A.sel[V_DRONES];
+    if (A.sel[V_DRONES] >= A.top[V_DRONES] + rows) A.top[V_DRONES] = A.sel[V_DRONES] - rows + 1;
+    int ry = y + 34;
+    scroll_area(PAD, ry, lw, rows * rh, V_DRONES, rh, rows);
+    for (int k = 0; k < rows; k++, ry += rh) {
+        int i = A.top[V_DRONES] + k;
+        if (i >= nDrone) break;
+        const Drone &d = M->drones[droneIdx[i]];
+        bool live = drone_live(d), sel = i == A.sel[V_DRONES];
+        uint16_t c = tag_color(d.tag);
+        hit(PAD + 6, ry, lw - 12, rh - 6, H_ROW, i);
+        if (sel) {
+            C.fillRoundRect(PAD + 8, ry, lw - 16, rh - 8, 6, dim(c, 0.12f));
+            glow_rect(PAD + 8, ry, lw - 16, rh - 8, 6, dim(c, 0.8f));
+        }
+        C.fillRoundRect(PAD + 14, ry + 8, 5, rh - 24, 2, live ? c : dim(c, 0.35f));
+        drone_glyph(PAD + 50, ry + (rh - 8) / 2, d.hdg, d.hasHdg, c, live, 0.75f);
+        font(F_LG);
+        text(PAD + 84, ry + 8, fit(drone_name(d), lw - 220), live ? TEXT : MUTED);
+        font(F_SM);
+        char l[64];
+        snprintf(l, sizeof l, "%s  via %s", d.ua[0] ? d.ua : "type not sent", node_name(d.closest));
+        text(PAD + 84, ry + 42, fit(l, lw - 220), FAINT);
+        const char *st = live ? (d.status[0] ? d.status : "LIVE") : age_str(d.last);
+        font(F_SM);
+        int sw = C.textWidth(st) + 18;
+        int sx = PAD + lw - 22 - sw;
+        if (live) C.fillRoundRect(sx, ry + 10, sw, 22, 11, c), text(sx + sw / 2, ry + 21, st, BG, middle_center);
+        else C.drawRoundRect(sx, ry + 10, sw, 22, 11, LINE2), text(sx + sw / 2, ry + 21, st, MUTED, middle_center);
+        char h[24];
+        if (d.hasHagl) snprintf(h, sizeof h, "%d m", (int)d.hagl);
+        else if (d.hasAlt) snprintf(h, sizeof h, "%d m MSL", (int)d.alt);
+        else snprintf(h, sizeof h, "-");
+        font(F_MD);
+        text(PAD + lw - 22, ry + 50, h, live ? SKY : FAINT, middle_right);
+    }
+    if (!nDrone) {
+        font(F_MD);
+        text(PAD + lw / 2, (y + CB) / 2 - 14, "no drones yet", FAINT, middle_center);
+        font(F_SM);
+        text(PAD + lw / 2, (y + CB) / 2 + 14, "every node decodes Remote ID (WiFi + Bluetooth)", FAINT, middle_center);
+    }
+
+    // Selected drone.
+    int x = PAD + lw + 12, w = W - PAD - x;
+    panel(x, y, w, CB - y, "SELECTED");
+    if (!nDrone) return;
+    const Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
+    bool live = drone_live(d);
+    uint16_t c = tag_color(d.tag);
+    font(F_BRAND);
+    glow(x + 18, y + 40, fit(drone_name(d), w - 300), c, middle_left);
+    font(F_SM);
+    char sub[96];
+    snprintf(sub, sizeof sub, "%s   %s   %s", d.mac, d.src[0] ? d.src : "", live ? (d.status[0] ? d.status : "live") : "not heard lately");
+    text(x + 18, y + 66, sub, MUTED, middle_left);
+    // SHOW ON MAP
+    font(F_SM);
+    int cw;
+    int mx = x + w - 18 - (C.textWidth("SHOW ON MAP") + 28);
+    chip(mx, y + 26, "SHOW ON MAP", ACCENT, false, &cw, H_DRONEMAP);
+    // Tags.
+    int tx = x + 18, ty = y + 88;
+    for (int t = 0; t < 5; t++) {
+        bool on = !strcmp(d.tag, DRONE_TAGS[t]);
+        int tw2;
+        chip(tx, ty, DRONE_TAGS[t], tag_color(DRONE_TAGS[t]), on, &tw2, net_online() ? H_DRONETAG : -1, t);
+        tx += tw2 + 8;
+    }
+    // Numbers.
+    char b[9][24];
+    const char *k[9] = {"HEIGHT AGL", "ALTITUDE MSL", "SPEED", "CLIMB", "HEADING", "PILOT DISTANCE", "SIGNAL", "HEARD BY", "REPORTS"};
+    fmt_m(b[0], 24, d.hasHagl, d.hagl, "m");
+    fmt_m(b[1], 24, d.hasAlt, d.alt, "m");
+    if (d.hasSpd) snprintf(b[2], 24, "%.1f m/s", d.spd); else strcpy(b[2], "-");
+    snprintf(b[3], 24, "%+.1f m/s", d.vspd);
+    if (d.hasHdg) snprintf(b[4], 24, "%d deg", (int)d.hdg); else strcpy(b[4], "-");
+    if (d.pilotDist >= 0) snprintf(b[5], 24, "%ld m", (long)d.pilotDist); else strcpy(b[5], d.hasPilot ? "located" : "unknown");
+    snprintf(b[6], 24, "%d dBm", d.rssi);
+    strlcpy(b[7], node_name(d.closest), 24);
+    snprintf(b[8], 24, "%u", (unsigned)d.reports);
+    int gx = x + 18, gy = y + 136, gw = (w - 36) / 3;
+    for (int i = 0; i < 9; i++) {
+        int cx2 = gx + (i % 3) * gw, cy2 = gy + (i / 3) * 62;
+        font(F_SM);
+        text(cx2, cy2, k[i], FAINT);
+        font(F_LG);
+        text(cx2, cy2 + 18, fit(b[i], gw - 12), i < 2 ? SKY : TEXT);
+    }
+    // Remote ID fields + a radar of its track around the pilot.
+    int fy = gy + 3 * 62 + 8;
+    struct { const char *k; const char *v; } f[] = {{"SERIAL / ID", d.id}, {"OPERATOR ID", d.op}, {"DESCRIPTION", d.desc},
+                                                    {"AIRCRAFT", d.ua}};
+    for (auto &e : f) {
+        font(F_SM);
+        text(gx, fy, e.k, FAINT);
+        font(F_MONO);
+        text(gx + 150, fy - 2, e.v[0] ? fit(e.v, w / 2 - 170) : "-", e.v[0] ? AMBER : FAINT);
+        fy += 30;
+    }
+    char ft[64];
+    snprintf(ft, sizeof ft, "first %s ago   last %s ago", age_str(d.first), age_str(d.last));
+    font(F_SM);
+    text(gx, fy + 4, ft, FAINT);
+    // Radar box.
+    int rs = min(CB - (gy + 3 * 62) - 20, w / 2 - 40), rx = x + w - 18 - rs, ry2 = CB - 14 - rs;
+    C.fillRoundRect(rx, ry2, rs, rs, 8, PANEL2);
+    C.drawRoundRect(rx, ry2, rs, rs, 8, LINE2);
+    int ccx = rx + rs / 2, ccy = ry2 + rs / 2;
+    for (int r = rs / 6; r < rs / 2; r += rs / 6) C.drawCircle(ccx, ccy, r, LINE);
+    double ola = d.hasPilot ? d.plat : d.lat, olo = d.hasPilot ? d.plon : d.lon;
+    double span = 30;   // metres from centre to edge, at least
+    for (int p = 0; p < d.ntrack; p++) {
+        double dy = (d.track[p][0] - ola) * 111320.0, dx = (d.track[p][1] - olo) * 111320.0 * cos(ola * M_PI / 180);
+        span = max(span, max(fabs(dx), fabs(dy)) * 1.15);
+    }
+    auto px = [&](double lo) { return (int)(ccx + (lo - olo) * 111320.0 * cos(ola * M_PI / 180) / span * (rs / 2 - 8)); };
+    auto py = [&](double la) { return (int)(ccy - (la - ola) * 111320.0 / span * (rs / 2 - 8)); };
+    for (int p = 1; p < d.ntrack; p++)
+        C.drawLine(px(d.track[p - 1][1]), py(d.track[p - 1][0]), px(d.track[p][1]), py(d.track[p][0]), dim(c, 0.4f + 0.6f * p / d.ntrack));
+    if (d.hasPilot) pilot_glyph(ccx, ccy, c);
+    if (d.hasPos) {
+        if (d.hasPilot) dashed(ccx, ccy, px(d.lon), py(d.lat), dim(c, 0.7f));
+        drone_glyph(px(d.lon), py(d.lat), d.hdg, d.hasHdg, c, live, 0.6f);
+    }
+    font(F_SM);
+    char sc[24];
+    snprintf(sc, sizeof sc, "%d m", (int)span);
+    text(rx + rs - 8, ry2 + 8, sc, FAINT, top_right);
+    text(rx + 8, ry2 + 8, d.hasPilot ? "around the pilot" : "track", FAINT);
+}
+
+// ------------------------------------------------------------------ device detail
+
+// Labels for the raw over-the-air fields (USB mode, no dashboard to name them).
+const char *info_label(const char *k) {
+    static const char *map[][2] = {{"name", "Broadcast name"}, {"rnd", "Random address"}, {"conn", "Connectable"},
+                                   {"tx", "TX power"}, {"app", "Appearance"}, {"adv", "Advert type"},
+                                   {"uuids", "Services"}, {"uuid128", "128-bit service"}, {"cid", "Company ID"},
+                                   {"mfr", "Manufacturer data"}, {"sdata", "Service data"}, {"ssid", "SSID"},
+                                   {"ch", "Channel"}, {"sec", "Security"}, {"bssid", "Joins (BSSID)"},
+                                   {"frame", "Frame"}, {"phy", "Wi-Fi"}, {"wps", "WPS"}, {"hidden", "Hidden SSID"},
+                                   {"rate", "Max legacy rate"}, {"vie", "Vendor IEs"}, {"cc", "Country"}};
+    for (auto &m : map)
+        if (!strcmp(m[0], k)) return m[1];
+    return k;
+}
+
+void open_detail(const char *mac) {
+    if (!mac || !*mac) return;
+    DevDetail &dd = M->detail;
+    memset(&dd, 0, sizeof dd);
+    strlcpy(dd.mac, mac, sizeof dd.mac);
+    dd.loading = net_online();
+    A.detail = true;
+    A.editAlias = A.newGroup = false;
+}
+
+const Target *target_by_mac(const char *mac) {
+    for (int i = 0; i < M->ntargets; i++)
+        if (!strcasecmp(M->targets[i].mac, mac)) return &M->targets[i];
+    return nullptr;
+}
+
+void draw_detail() {
+    const DevDetail &dd = M->detail;
+    const Target *t = target_by_mac(dd.mac);
+    int x = PAD, y = CY, w = W - 2 * PAD, h = CB - CY;
+    C.fillRect(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
+    hit(0, TOP, W, H - TOP - BOT, H_NONE);   // swallow taps under the page
+    C.fillRoundRect(x, y, w, h, 10, PANEL);
+    glow_rect(x, y, w, h, 10, dim(ACCENT, 0.8f));
+    const char *alias = dd.valid ? dd.alias : (t ? t->alias : "");
+    const char *name = dd.valid && dd.name[0] ? dd.name : (t ? t->name : "");
+    const char *title = alias[0] ? alias : name[0] ? name : (t && t->descr[0] ? t->descr : dd.mac);
+    font(F_BRAND);
+    glow(x + 20, y + 30, fit(title, w - 360), alias[0] ? PINK : ACCENT, middle_left);
+    font(F_MD);
+    char sub[120];
+    snprintf(sub, sizeof sub, "%s%s%s%s%s", dd.mac, name[0] && strcmp(title, name) ? "   \"" : "", name[0] && strcmp(title, name) ? name : "",
+             name[0] && strcmp(title, name) ? "\"" : "", t && t->descr[0] ? "" : "");
+    text(x + 20, y + 62, sub, SOFT, middle_left);
+    if (t && t->descr[0]) {
+        font(F_SM);
+        text(x + 20 + C.textWidth(sub) + 140, y + 62, fit(t->descr, 300), MUTED, middle_left);
+    }
+    font(F_SM);
+    int cw;
+    chip(x + w - 20 - (C.textWidth("CLOSE  ESC") + 28), y + 16, "CLOSE  ESC", ACCENT, false, &cw, H_DCLOSE);
+
+    // Left: everything it said over the air.
+    int lx = x + 20, ly = y + 92, lw = 720;
+    font(F_SM);
+    text(lx, ly, "OVER THE AIR", dim(ACCENT, 0.9f));
+    C.drawFastHLine(lx, ly + 18, lw, LINE2);
+    int ry = ly + 28, rowH = 30;
+    int shown = 0;
+    if (dd.valid) {
+        for (int i = 0; i < dd.nrows && ry + rowH <= y + h - 10; i++, ry += rowH, shown++) {
+            font(F_SM);
+            text(lx, ry + 8, dd.rows[i][0], MUTED);
+            font(F_MD);
+            bool hl = !strcmp(dd.rows[i][0], "Broadcast name") || !strcmp(dd.rows[i][0], "SSID") || !strcmp(dd.rows[i][0], "Looks for");
+            text(lx + 190, ry + 4, fit(dd.rows[i][1], lw - 190), hl ? SKY : TEXT);
+        }
+    } else if (t && t->info[0]) {
+        JsonDocument doc;
+        if (!deserializeJson(doc, t->info)) {
+            for (JsonPairConst kv : doc.as<JsonObjectConst>()) {
+                if (ry + rowH > y + h - 10) break;
+                char v[120];
+                if (kv.value().is<JsonArrayConst>()) {
+                    v[0] = 0;
+                    for (JsonVariantConst e : kv.value().as<JsonArrayConst>()) {
+                        char one[40];
+                        if (e.is<JsonObjectConst>()) snprintf(one, sizeof one, "%s=%s", (const char *)(e["uuid"] | ""), (const char *)(e["data"] | ""));
+                        else snprintf(one, sizeof one, "%s", e.as<const char *>() ? e.as<const char *>() : "");
+                        if (v[0]) strlcat(v, ", ", sizeof v);
+                        strlcat(v, one, sizeof v);
+                    }
+                } else if (kv.value().is<const char *>()) {
+                    strlcpy(v, kv.value().as<const char *>(), sizeof v);
+                } else {
+                    snprintf(v, sizeof v, "%g", kv.value().as<double>());
+                }
+                font(F_SM);
+                text(lx, ry + 8, info_label(kv.key().c_str()), MUTED);
+                font(F_MD);
+                text(lx + 190, ry + 4, fit(v, lw - 190), TEXT);
+                ry += rowH, shown++;
+            }
+        }
+    }
+    if (!shown) {
+        font(F_MD);
+        text(lx, ry + 10, dd.loading ? "loading from the dashboard..." : "nothing beyond the MAC yet (nodes on the device-intel firmware report more)", FAINT);
+    }
+
+    // Right: alias, group, devices that travel with it.
+    int rx = x + 20 + lw + 30, rw = x + w - 20 - rx, yy = ly;
+    bool canEdit = net_online();
+    font(F_SM);
+    text(rx, yy, "ALIAS", dim(ACCENT, 0.9f));
+    yy += 22;
+    hit(rx, yy - 4, rw, 48, canEdit ? H_DALIAS : H_NONE);
+    C.fillRoundRect(rx, yy, rw, 40, 8, PANEL2);
+    if (A.editAlias) glow_rect(rx, yy, rw, 40, 8, PINK);
+    else C.drawRoundRect(rx, yy, rw, 40, 8, LINE2);
+    font(F_MD);
+    if (A.editAlias) {
+        char b[48];
+        snprintf(b, sizeof b, "%s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
+        text(rx + 12, yy + 20, b, TEXT, middle_left);
+    } else {
+        text(rx + 12, yy + 20, alias[0] ? alias : (canEdit ? "tap or E to name it" : "naming needs the dashboard"), alias[0] ? PINK : FAINT, middle_left);
+    }
+    yy += 60;
+    font(F_SM);
+    text(rx, yy, "GROUP", dim(ACCENT, 0.9f));
+    yy += 22;
+    int gx = rx;
+    const char *cur = dd.valid ? dd.group : (t ? t->group : "");
+    if (A.newGroup) {
+        C.fillRoundRect(rx, yy, rw, 40, 8, PANEL2);
+        glow_rect(rx, yy, rw, 40, 8, PINK);
+        char b[48];
+        snprintf(b, sizeof b, "new group: %s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
+        font(F_MD);
+        text(rx + 12, yy + 20, b, TEXT, middle_left);
+        yy += 52;
+    } else {
+        int cwid;
+        chip(gx, yy, "NONE", AMBER, !cur[0], &cwid, canEdit ? H_DUNGROUP : -1);
+        gx += cwid + 8;
+        for (int i = 0; i < dd.ngroups; i++) {
+            font(F_SM);
+            int need = C.textWidth(dd.groups[i].name) + 36;
+            if (gx + need > rx + rw) { gx = rx; yy += 40; }
+            if (yy > y + h - 220) break;
+            chip(gx, yy, dd.groups[i].name, PURPLE, !strcmp(cur, dd.groups[i].name), &cwid, canEdit ? H_DGROUP : -1, i);
+            gx += cwid + 8;
+        }
+        font(F_SM);
+        if (gx + 110 > rx + rw) { gx = rx; yy += 40; }
+        if (canEdit) chip(gx, yy, "+ NEW", ACCENT, false, &cwid, H_DNEWGROUP);
+        yy += 52;
+    }
+    font(F_SM);
+    text(rx, yy, "TRAVELS WITH", dim(ACCENT, 0.9f));
+    text(rx + rw, yy, "same node, within a minute", FAINT, top_right);
+    yy += 24;
+    if (!dd.valid || !dd.ncomp) {
+        font(F_MD);
+        text(rx, yy + 6, dd.valid ? "nothing turns up with it yet" : (canEdit ? "-" : "needs the dashboard"), FAINT);
+    }
+    for (int i = 0; dd.valid && i < dd.ncomp && yy + 44 <= y + h - 10; i++, yy += 46) {
+        const auto &c = dd.comp[i];
+        hit(rx, yy, rw, 42, H_DCOMP, i);
+        C.fillRoundRect(rx, yy, rw, 40, 6, PANEL2);
+        font(F_MD);
+        text(rx + 10, yy + 12, fit(c.label[0] ? c.label : c.mac, rw - 170), TEXT, middle_left);
+        font(F_SM);
+        text(rx + 10, yy + 30, c.mac, FAINT, middle_left);
+        char tg[24];
+        snprintf(tg, sizeof tg, "%u of %ux", c.together, c.occasions);
+        text(rx + rw - 10, yy + 12, tg, SKY, middle_right);
+        if (c.group[0]) text(rx + rw - 10, yy + 30, fit(c.group, 150), PURPLE, middle_right);
+        int bwid = c.occasions ? (int)(c.together * 100 / c.occasions) : 0;
+        C.fillRect(rx + rw - 120, yy + 37, min(100, bwid), 2, PINK);
+    }
+}
+
+void detail_submit_text() {
+    DevDetail &dd = M->detail;
+    char body[160];
+    if (A.editAlias) {
+        JsonDocument j;
+        j["alias"] = A.editBuf;
+        serializeJson(j, body, sizeof body);
+        char path[64];
+        snprintf(path, sizeof path, "/api/devices/%s", dd.mac);
+        if (net_post(path, body)) strlcpy(dd.alias, A.editBuf, sizeof dd.alias);
+    } else if (A.newGroup && A.editBuf[0]) {
+        JsonDocument j;
+        j["name"] = A.editBuf;
+        j["color"] = (int)(esp_random() % 360);
+        j["add"].add(dd.mac);
+        serializeJson(j, body, sizeof body);
+        if (net_post("/api/groups", body)) strlcpy(dd.group, A.editBuf, sizeof dd.group);
+    }
+    A.editAlias = A.newGroup = false;
+    A.editBuf[0] = 0;
+}
+
+void detail_group(int gi) {
+    DevDetail &dd = M->detail;
+    char body[160];
+    if (gi < 0) {   // take it out of its group
+        int id = 0;
+        for (int i = 0; i < dd.ngroups; i++) if (!strcmp(dd.groups[i].name, dd.group)) id = dd.groups[i].id;
+        if (!id) return;
+        snprintf(body, sizeof body, "{\"id\":%d,\"remove\":[\"%s\"]}", id, dd.mac);
+        if (net_post("/api/groups", body)) dd.group[0] = 0;
+        return;
+    }
+    if (gi >= dd.ngroups) return;
+    snprintf(body, sizeof body, "{\"id\":%d,\"add\":[\"%s\"]}", dd.groups[gi].id, dd.mac);
+    if (net_post("/api/groups", body)) strlcpy(dd.group, dd.groups[gi].name, sizeof dd.group);
+}
+
+void drone_set_tag(int t) {
+    if (!nDrone || t < 0 || t > 4) return;
+    Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
+    char path[64], body[48];
+    snprintf(path, sizeof path, "/api/drones/%s", d.mac);
+    snprintf(body, sizeof body, "{\"tag\":\"%s\"}", DRONE_TAGS[t]);
+    if (net_post(path, body)) strlcpy(d.tag, DRONE_TAGS[t], sizeof d.tag);
+}
+
+// ------------------------------------------------------------------ chrome
+
+const char *TABS[V_COUNT] = {"OVERVIEW", "FLEET", "LIVE", "TARGETS", "MAP", "DRONES", "METRICS"};
+
+void draw_top() {
+    C.fillRect(0, 0, W, TOP, BG);
+    C.drawFastHLine(0, TOP - 1, W, LINE2);
+    // Brand, stacked so seven tabs keep a full-size label.
+    font(F_MD);
+    glow(PAD, TOP / 2 - 9, "OUI-SPY", ACCENT, middle_left);
+    int bw = C.textWidth("OUI-SPY");
+    font(F_SM);
+    glow(PAD, TOP / 2 + 13, "MESH", PINK, middle_left);
+    int tabsL = PAD + bw + 20;
+
+    // Top right: the data-source badge, the clock to its left.
+    const char *state;
+    char label[32];
+    uint16_t lc;
+    int r = net_rssi();
+    if (M->bridging) state = "USB BRIDGE", lc = ACCENT;
+    else if (M->usbLive) state = M->home.id[0] ? M->home.id : "NODE", lc = M->home.alive ? ACCENT : AMBER;
+    else if (S.source == SRC_USB) state = "NO USB NODE", lc = RED;
+    else if (!M->wifiUp) state = "NO WIFI", lc = RED;
+    else if (!M->sockUp) state = "NO LINK", lc = RED;
+    else if (!strcmp(M->mode, "demo")) state = "DEMO", lc = AMBER;
+    else if (!strcmp(M->mode, "replay")) state = "REPLAY", lc = PURPLE;
+    else if (!M->home.alive) state = "HOME DOWN", lc = AMBER;
+    else state = "LIVE", lc = ACCENT;
+    bool usb = M->usbLive || S.source == SRC_USB;
+    if (usb && M->usbLive && !M->bridging) snprintf(label, sizeof label, "USB  %s", state);
+    else if (!usb && r && M->sockUp) snprintf(label, sizeof label, "%s  WIFI %d", state, r);
+    else snprintf(label, sizeof label, "%s", state);
+    font(F_MD);
+    int bwid = C.textWidth(label) + 44, bh = 34, bx = W - PAD - bwid, by = (TOP - bh) / 2;
+    bool down = lc == RED;
+    float pulse = down ? 0.55f + 0.45f * sinf(millis() / 400.0f) : 1.0f;
+    C.fillRoundRect(bx, by, bwid, bh, bh / 2, dim(lc, 0.14f));
+    glow_rect(bx, by, bwid, bh, bh / 2, dim(lc, pulse));
+    dot(bx + 18, TOP / 2, 5, dim(lc, pulse));
+    glow(bx + 32, TOP / 2, label, lc, middle_left);
+    hit(bx, 0, bwid + PAD, TOP, H_SETUP);   // tap the badge to change the source
+    int x = bx - 16;
+    font(F_MD);
+    glow(x, TOP / 2, clock_str(server_now(), true), SOFT, middle_right);
+    int tabsR = x - C.textWidth("00:00:00") - 18;
+
+    // Tabs share what's left evenly; labels shrink to fit if they ever have to.
+    int tw = (tabsR - tabsL) / V_COUNT;
+    // One font for all five, so they always match.
+    const lgfx::IFont *tf = F_MD;
+    font(F_MD);
+    for (int i = 0; i < V_COUNT; i++) {
+        if (C.textWidth(TABS[i]) > tw - 6) tf = F_SM;
+    }
+    for (int i = 0; i < V_COUNT; i++) {
+        int tx = tabsL + i * tw;
+        bool on = A.view == i;
+        hit(tx, 0, tw, TOP, H_TAB, i);
+        const char *label = TABS[i];
+        font(tf);
+        if (i == V_DRONES) {   // live drones: a pink count badge on the tab
+            int ld = live_drones();
+            if (ld) {
+                char nb[6];
+                snprintf(nb, sizeof nb, "%d", ld);
+                font(F_SM);
+                int bwid = max(20, (int)C.textWidth(nb) + 10);
+                int bxx = tx + tw - bwid - 2, byy = 6;
+                float p = 0.6f + 0.4f * sinf(millis() / 250.0f);
+                C.fillRoundRect(bxx - 2, byy - 2, bwid + 4, 22, 11, dim(PINK, 0.3f * p));
+                C.fillRoundRect(bxx, byy, bwid, 18, 9, PINK);
+                text(bxx + bwid / 2, byy + 9, nb, BG, middle_center);
+                font(tf);
+            }
+        }
+        if (on) {
+            C.fillRect(tx + 3, 8, tw - 6, TOP - 16, dim(ACCENT, 0.12f));
+            C.fillRect(tx + 3, TOP - 5, tw - 6, 3, ACCENT);
+            C.drawFastHLine(tx + 3, TOP - 6, tw - 6, dim(ACCENT, 0.4f));
+            glow(tx + tw / 2, TOP / 2 - 1, label, ACCENT, middle_center);
+        } else {
+            text(tx + tw / 2, TOP / 2 - 1, label, MUTED, middle_center);
+        }
+    }
+}
+
+void draw_bottom() {
+    int y = H - BOT;
+    C.fillRect(0, y, W, BOT, BG);
+    bool alert = M->alertsUnacked && M->hasAlert && !M->muteAll;
+    if (alert) {
+        // Fixed-size bar: an alert recolours it, never resizes anything.
+        uint32_t t = millis();
+        bool fresh = t < alertFlashUntil;
+        float pulse = fresh ? 0.5f + 0.5f * sinf(t / 90.0f) : 0.75f + 0.25f * sinf(t / 600.0f);
+        C.fillRect(0, y, W, BOT, dim(PINK, 0.10f));
+        C.drawFastHLine(0, y, W, dim(PINK, 0.4f + 0.6f * pulse));
+        C.drawFastHLine(0, y + 1, W, dim(PINK, 0.25f * pulse + 0.1f));
+        const Det &d = M->lastAlert;
+        font(F_MD);
+        char head[24];
+        snprintf(head, sizeof head, "ALERT x%u", (unsigned)M->alertsUnacked);
+        glow(PAD, y + BOT / 2, head, PINK, middle_left);
+        int x = PAD + C.textWidth("ALERT x000") + 20;
+        font(F_LG);
+        text(x, y + BOT / 2, fit(vendor_of(&d), 210), TEXT, middle_left);
+        x += min(210, (int)C.textWidth(vendor_of(&d))) + 16;
+        font(F_MONO);
+        text(x, y + BOT / 2, d.mac, SOFT, middle_left);
+        x += C.textWidth(d.mac) + 18;
+        font(F_MD);
+        char via[64];
+        snprintf(via, sizeof via, "%d dBm  via %s", d.rssi, node_name(d.node));
+        text(x, y + BOT / 2, fit(via, 190), rssi_color(d.rssi), middle_left);
+        // Touch buttons, right-aligned.
+        int bx = W - PAD, w;
+        static const struct { const char *t; uint8_t act; } btn[] = {{"SILENCE  M", H_SILENCE}, {"MUTE DEVICE  X", H_MUTE}, {"ACK  A", H_ACK}};
+        for (auto &b : btn) {
+            font(F_SM);
+            w = C.textWidth(b.t) + 28;
+            bx -= w;
+            chip(bx, y + 7, b.t, PINK, b.act == H_ACK, nullptr, b.act);
+            bx -= 10;
+        }
+        return;
+    }
+    C.drawFastHLine(0, y, W, LINE2);
+    font(F_SM);
+    const char *hints = A.detail ? (A.editAlias || A.newGroup ? "type the name   ENTER save   ESC cancel" : "E name it   G new group   ESC close")
+                        : A.view == V_METRICS ? "R range   D domain   N node   C clear"
+                        : A.view == V_MAP     ? "drag to pan   + - zoom   L layer   Z fit   O follow   tap a marker"
+                        : A.view == V_DRONES  ? "UP DN select   ENTER show on map   tap a tag to label it"
+                        : A.searching         ? "type to filter   ENTER keep   ESC clear"
+                                              : "/ search   ENTER details   D domain   N node   X mute   A ack";
+    text(PAD, y + BOT / 2, hints, FAINT, middle_left);
+    // SETUP / HELP buttons at the far right; status sits left of them.
+    int bx = W - PAD, w;
+    font(F_SM);
+    w = C.textWidth("HELP") + 28;
+    bx -= w;
+    chip(bx, y + 7, "HELP", ACCENT, false, nullptr, H_HELP);
+    font(F_SM);
+    w = C.textWidth("SETUP") + 28;
+    bx -= w + 10;
+    chip(bx, y + 7, "SETUP", ACCENT, false, nullptr, H_SETUP);
+    int rx = bx - 18;
+    font(F_SM);
+    char right[96];
+    if (millis() < A.toastUntil) {
+        font(F_MD);
+        glow(rx, y + BOT / 2, A.toast, AMBER, middle_right);
+        return;
+    }
+    if (M->usbLive && !M->bridging) {
+        snprintf(right, sizeof right, "USB %s  local view%s%s", M->home.id, net_ota_enabled() ? "   OTA" : "",
+                 M->muteAll ? "   SILENCED" : "");
+        text(rx, y + BOT / 2, right, M->muteAll ? AMBER : FAINT, middle_right);
+        return;
+    }
+    if (M->lastError[0] && !M->sockUp && S.source != SRC_USB) {
+        text(rx, y + BOT / 2, M->lastError, RED, middle_right);
+        return;
+    }
+    if (S.source == SRC_USB) snprintf(right, sizeof right, "plug a node into the USB-A port");
+    else snprintf(right, sizeof right, "%s%s  >  %s%s%s", net_ip().c_str(), net_ota_enabled() ? "  OTA" : "",
+                  net_target().c_str(), M->bridging ? "   bridging USB node" : "", M->muteAll ? "   SILENCED" : "");
+    text(rx, y + BOT / 2, right, M->muteAll ? AMBER : FAINT, middle_right);
+}
+
+// ------------------------------------------------------------------ shared rows
+
+const char *waiting_text() {
+    if (M->sockUp || M->usbLive) return "no nodes reported yet";
+    return S.source == SRC_USB ? "waiting for a node on the USB-A port" : "waiting for the dashboard";
+}
+
+int online_count() {
+    int n = 0;
+    for (int i = 0; i < M->nnodes; i++) n += M->nodes[i].online;
+    return n;
+}
+
+int live_targets() {
+    int n = 0;
+    double now = server_now();
+    for (int i = 0; i < M->ntargets; i++) n += now - M->targets[i].last < TARGET_LIVE_S;
+    return n;
+}
+
+void kpi(int x, int y, int w, int h, const char *label, const char *value, uint16_t col, const char *sub = nullptr) {
+    panel(x, y, w, h, nullptr);
+    C.fillRect(x + 1, y + 10, 3, h - 20, col);
+    font(F_SM);
+    text(x + 18, y + 12, label, MUTED);
+    font(F_XL);
+    glow(x + 18, y + h - 14, value, col, bottom_left);
+    if (sub) {
+        font(F_SM);
+        text(x + w - 14, y + h - 16, sub, FAINT, bottom_right);
+    }
+}
+
+void filters_cell(int x, int y, const Node &n, bool compact) {
+    char b[40];
+    uint16_t col = n.filtersFresh == 1 ? ACCENT : n.filtersFresh == 0 ? AMBER : FAINT;
+    const char *st = n.filtersFresh == 1 ? "in sync" : n.filtersFresh == 0 ? "STALE" : "";
+    if (n.filters < 0) snprintf(b, sizeof b, "-");
+    else if (compact) snprintf(b, sizeof b, "%d  %s", n.filters, n.fcrc[0] ? n.fcrc : "--------");
+    else snprintf(b, sizeof b, "%d", n.filters);
+    font(compact ? F_SM : F_MD);
+    text(x, y, b, n.filters < 0 ? FAINT : TEXT, middle_left);
+    if (!compact) {
+        int w = C.textWidth(b) + 12;
+        font(F_SM);
+        text(x + w, y - 8, n.fcrc[0] ? n.fcrc : "--------", MUTED, middle_left);
+        text(x + w, y + 9, st, col, middle_left);
+    } else if (*st) {
+        text(x + C.textWidth(b) + 10, y, st, col, middle_left);
+    }
+}
+
+// ------------------------------------------------------------------ OVERVIEW
+
+void draw_overview() {
+    int tw = (W - 2 * PAD - 4 * 12) / 5, th = 104, y = CY;
+    char v[24], sub[32];
+    int on = online_count();
+    snprintf(v, sizeof v, "%d/%d", on, M->nnodes);
+    kpi(PAD, y, tw, th, "NODES ONLINE", v, on == M->nnodes && on ? ACCENT : AMBER,
+        M->home.alive ? "home up" : "home down");
+    snprintf(v, sizeof v, "%u", (unsigned)M->stats.day);
+    snprintf(sub, sizeof sub, "%u all time", (unsigned)M->stats.total);
+    kpi(PAD + (tw + 12), y, tw, th, "DETECTIONS 24H", v, SKY, sub);
+    snprintf(v, sizeof v, "%u", M->metrics.valid ? (unsigned)M->metrics.unique : (unsigned)M->stats.macs);
+    snprintf(sub, sizeof sub, "%s window", RANGE_NAMES[A.range % NRANGES]);
+    kpi(PAD + 2 * (tw + 12), y, tw, th, "UNIQUE DEVICES", v, PURPLE, sub);
+    snprintf(v, sizeof v, "%d", live_targets());
+    snprintf(sub, sizeof sub, "%d in 10 min", M->ntargets);
+    kpi(PAD + 3 * (tw + 12), y, tw, th, "TARGETS IN VIEW", v, AMBER, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)M->alertsUnacked);
+    kpi(PAD + 4 * (tw + 12), y, tw, th, M->muteAll ? "ALERTS (SILENCED)" : "UNACKED ALERTS", v,
+        M->alertsUnacked ? PINK : FAINT, M->nmuted ? "devices muted" : nullptr);
+
+    // Fleet column.
+    int fy = y + th + 12, fw = 500, fh = CB - fy;
+    panel(PAD, fy, fw, fh, "FLEET");
+    int rh = 74, ry = fy + 34;
+    for (int i = 0; i < M->nnodes && ry + rh <= fy + fh; i++, ry += rh) {
+        const Node &n = M->nodes[i];
+        uint16_t nc = node_color565(n.id);
+        C.fillRoundRect(PAD + 12, ry + 6, 5, rh - 14, 2, n.online ? nc : dim(nc, 0.35f));
+        font(F_LG);
+        text(PAD + 30, ry + 6, fit(n.alias[0] ? n.alias : n.id, 220), n.online ? TEXT : MUTED);
+        font(F_SM);
+        char l2[64];
+        snprintf(l2, sizeof l2, "%s  %s  fw %s", n.id, n.isHome ? "HOME" : "REMOTE", n.fw[0] ? n.fw : "?");
+        text(PAD + 30, ry + 40, l2, FAINT);
+        // Status + RSSI on the right.
+        int rx = PAD + fw - 16;
+        const char *st = n.online ? "ONLINE" : "OFFLINE";
+        font(F_SM);
+        text(rx, ry + 14, st, n.online ? ACCENT : RED, middle_right);
+        dot(rx - C.textWidth(st) - 12, ry + 14, 4, n.online ? ACCENT : RED);
+        int rssi = n.isHome ? n.lrssi : n.rssi;
+        char rs[16];
+        snprintf(rs, sizeof rs, rssi ? "%d" : "--", rssi);
+        rssi_bar(rx - 150, ry + 34, 100, 8, rssi, rssi_color(rssi));
+        text(rx, ry + 38, rs, rssi_color(rssi), middle_right);
+        filters_cell(PAD + 30, ry + 62, n, true);
+        if (i + 1 < M->nnodes) C.drawFastHLine(PAD + 12, ry + rh - 1, fw - 24, LINE);
+    }
+    if (!M->nnodes) {
+        font(F_MD);
+        text(PAD + fw / 2, fy + fh / 2, waiting_text(), FAINT, middle_center);
+    }
+
+    // Live feed.
+    int lx = PAD + fw + 12, lw = W - PAD - lx, lh = 340;
+    panel(lx, fy, lw, lh, "LIVE FEED");
+    int hy = fy + 34;
+    font(F_SM);
+    const int cAge = lx + 16, cVen = lx + 76, cMac = lx + 296, cRssi = lx + 500, cNode = lx + 566;
+    text(cAge, hy, "AGE", FAINT);
+    text(cVen, hy, "DEVICE", FAINT);
+    text(cMac, hy, "MAC", FAINT);
+    text(cRssi, hy, "RSSI", FAINT);
+    text(cNode, hy, "NODE / CLOSEST", FAINT);
+    int row = 30, yy = hy + 20;
+    for (int i = 0; i < M->ndets && yy + row <= fy + lh - 4; i++, yy += row) {
+        const Det *d = det_at(i);
+        bool muted = mac_muted(d->mac);
+        if (i == 0 && server_now() - d->ts < 10) C.fillRect(lx + 4, yy, lw - 8, row - 2, dim(PINK, 0.08f));
+        font(F_MD);
+        text(cAge, yy + row / 2, age_str(d->ts), MUTED, middle_left);
+        text(cVen, yy + row / 2, fit(vendor_of(d), 206), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
+        font(F_MONO_S);
+        text(cMac, yy + row / 2, d->mac, muted ? FAINT : SOFT, middle_left);
+        font(F_MD);
+        char r[8];
+        snprintf(r, sizeof r, "%d", d->rssi);
+        text(cRssi, yy + row / 2, r, rssi_color(d->rssi), middle_left);
+        char nb[40];
+        if (d->closest[0]) snprintf(nb, sizeof nb, "%s > %s", node_name(d->node), node_name(d->closest));
+        else snprintf(nb, sizeof nb, "%s", node_name(d->node));
+        text(cNode, yy + row / 2, fit(nb, lx + lw - cNode - 12), node_color565(d->closest[0] ? d->closest : d->node), middle_left);
+    }
+    if (!M->ndets) {
+        font(F_MD);
+        text(lx + lw / 2, fy + lh / 2, "no detections yet", FAINT, middle_center);
+    }
+
+    // 24 h activity.
+    int ay = fy + lh + 12, ah = CB - ay;
+    panel(lx, ay, lw, ah, "ACTIVITY  LAST 24 H");
+    int n = M->stats.nhourly;
+    if (n) {
+        uint16_t mx = 1;
+        for (int i = 0; i < n; i++) mx = max(mx, M->stats.hourly[i]);
+        int bx = lx + 16, bw = (lw - 32) / n, by = ay + ah - 26, bh = ah - 64;
+        for (int i = 0; i < n; i++) {
+            int h = M->stats.hourly[i] * bh / mx;
+            if (M->stats.hourly[i] && h < 2) h = 2;
+            uint16_t col = i == n - 1 ? PINK : ACCENT;
+            C.fillRect(bx + i * bw + 2, by - h, bw - 4, h, dim(col, 0.75f));
+            if (h) C.drawFastHLine(bx + i * bw + 2, by - h, bw - 4, col);
+        }
+        C.drawFastHLine(bx, by, bw * n, LINE2);
+        font(F_SM);
+        char m[16];
+        snprintf(m, sizeof m, "peak %u/h", mx);
+        text(lx + lw - 16, ay + 10, m, FAINT, top_right);
+        text(bx, by + 6, "-24h", FAINT);
+        text(bx + bw * n, by + 6, "now", FAINT, top_right);
+    }
+}
+
+// ------------------------------------------------------------------ FLEET
+
+void draw_fleet() {
+    int y = CY, rows = 6, rh = 62, th = 36 + rows * rh;
+    panel(PAD, y, W - 2 * PAD, th + 8, "FLEET");
+    clamp_sel(V_FLEET, rows);
+    const int cx[] = {PAD + 24, PAD + 290, PAD + 400, PAD + 560, PAD + 760, PAD + 860, PAD + 1040, PAD + 1140};
+    const char *hd[] = {"NODE", "ROLE", "STATUS", "LINK RSSI", "NBR", "FIRMWARE", "FILTERS / CRC", ""};
+    font(F_SM);
+    for (int i = 0; i < 7; i++) text(cx[i], y + 34, hd[i], FAINT);
+    text(W - PAD - 24, y + 34, "UPTIME", FAINT, top_right);
+    int ry = y + 56;
+    scroll_area(PAD, ry, W - 2 * PAD, rows * rh, V_FLEET, rh, rows);
+    for (int k = 0; k < rows; k++, ry += rh) {
+        int i = A.top[V_FLEET] + k;
+        if (i >= M->nnodes) break;
+        const Node &n = M->nodes[i];
+        bool sel = i == A.sel[V_FLEET];
+        uint16_t nc = node_color565(n.id);
+        hit(PAD + 8, ry, W - 2 * PAD - 16, rh, H_ROW, i);
+        if (sel) {
+            C.fillRoundRect(PAD + 8, ry, W - 2 * PAD - 16, rh - 6, 6, dim(ACCENT, 0.10f));
+            glow_rect(PAD + 8, ry, W - 2 * PAD - 16, rh - 6, 6, dim(ACCENT, 0.8f));
+        }
+        int my = ry + (rh - 6) / 2;
+        C.fillRoundRect(PAD + 12, ry + 8, 5, rh - 22, 2, n.online ? nc : dim(nc, 0.35f));
+        font(F_LG);
+        text(cx[0], my - 10, fit(n.alias[0] ? n.alias : n.id, 240), n.online ? TEXT : MUTED, middle_left);
+        font(F_SM);
+        text(cx[0], my + 14, n.id, FAINT, middle_left);
+        font(F_MD);
+        text(cx[1], my, n.isHome ? "HOME" : "REMOTE", n.isHome ? ACCENT : SKY, middle_left);
+        dot(cx[2] + 6, my, 5, n.online ? ACCENT : RED);
+        text(cx[2] + 20, my - 8, n.online ? "ONLINE" : "OFFLINE", n.online ? ACCENT : RED, middle_left);
+        font(F_SM);
+        char seen[24];
+        snprintf(seen, sizeof seen, "seen %s ago", n.age >= 0 ? age_str(server_now() - n.age) : "-");
+        text(cx[2] + 20, my + 12, seen, FAINT, middle_left);
+        int rssi = n.isHome ? n.lrssi : n.rssi;
+        rssi_bar(cx[3], my - 4, 120, 10, rssi, rssi_color(rssi));
+        char rs[12];
+        snprintf(rs, sizeof rs, rssi ? "%d" : "--", rssi);
+        font(F_MD);
+        text(cx[3] + 132, my, rs, rssi_color(rssi), middle_left);
+        snprintf(rs, sizeof rs, n.lrssi ? "%d" : "--", n.lrssi);
+        text(cx[4], my, rs, rssi_color(n.lrssi), middle_left);
+        text(cx[5], my, n.fw[0] ? n.fw : "?", n.fw[0] ? TEXT : FAINT, middle_left);
+        if (n.ota[0] && strcmp(n.ota, "done")) {
+            font(F_SM);
+            char o[24];
+            snprintf(o, sizeof o, "OTA %s %d%%", n.ota, n.otaPct);
+            text(cx[5], my + 18, o, AMBER, middle_left);
+        }
+        filters_cell(cx[6], my, n, false);
+        font(F_MD);
+        text(W - PAD - 24, my, n.up ? dur_str(n.up) : "-", MUTED, middle_right);
+    }
+    if (!M->nnodes) {
+        font(F_MD);
+        text(W / 2, y + th / 2, waiting_text(), FAINT, middle_center);
+    }
+
+    // Detail: selected node's neighbours + the home's link counters.
+    int dy = y + th + 20, dh = CB - dy, dw = 640;
+    panel(PAD, dy, dw, dh, "NEIGHBOURS");
+    if (M->nnodes) {
+        const Node &n = M->nodes[A.sel[V_FLEET]];
+        font(F_MD);
+        char h[64];
+        snprintf(h, sizeof h, "%s   ch %d   peers %d   dev %d   %s", n.alias[0] ? n.alias : n.id, n.ch, n.peers, n.dev,
+                 n.mode[0] ? n.mode : "");
+        text(PAD + 16, dy + 32, h, TEXT);
+        int yy = dy + 66;
+        for (int i = 0; i < n.nnbr && yy + 28 < dy + dh; i++, yy += 30) {
+            const Seen &s = n.nbr[i];
+            font(F_MD);
+            text(PAD + 16, yy, fit(node_name(s.node), 200), node_color565(s.node));
+            rssi_bar(PAD + 230, yy + 6, 260, 10, s.rssi, rssi_color(s.rssi));
+            char r[24];
+            snprintf(r, sizeof r, "%d%s", s.rssi, s.age ? "  relay" : "");
+            text(PAD + 504, yy, r, rssi_color(s.rssi));
+        }
+        if (!n.nnbr) text(PAD + 16, yy, "no neighbour report", FAINT);
+    }
+    int hx = PAD + dw + 12, hw = W - PAD - hx;
+    panel(hx, dy, hw, dh, "HOME LINK");
+    const Home &hm = M->home;
+    struct { const char *k; uint32_t v; } cells[] = {{"rx", hm.rx}, {"dup", hm.dup}, {"tx", hm.tx},
+                                                    {"tx fail", hm.txf}, {"pending", hm.pend}, {"bad", hm.bad}};
+    font(F_SM);
+    for (int i = 0; i < 6; i++) {
+        int cxp = hx + 16 + (i % 3) * ((hw - 32) / 3), cyp = dy + 34 + (i / 3) * 56;
+        text(cxp, cyp, cells[i].k, FAINT);
+        char b[16];
+        snprintf(b, sizeof b, "%u", (unsigned)cells[i].v);
+        font(F_LG);
+        text(cxp, cyp + 18, b, (i == 3 || i == 5) && cells[i].v ? AMBER : TEXT);
+        font(F_SM);
+    }
+    char l[96];
+    snprintf(l, sizeof l, "rate %s   ch %d   %s   via %s   up %s", hm.rate[0] ? hm.rate : "?", hm.ch,
+             hm.enc ? "encrypted" : "PLAINTEXT", hm.source[0] ? hm.source : "?", dur_str(hm.up));
+    text(hx + 16, dy + dh - 24, l, hm.enc ? MUTED : AMBER);
+}
+
+// ------------------------------------------------------------------ LIVE / TARGETS filter row
+
+void draw_filter_row(int y, int shown, int total) {
+    int x = PAD;
+    int sw = 420, sh = 38;
+    hit(x, y - 6, sw, sh + 12, H_SEARCH);
+    C.fillRoundRect(x, y, sw, sh, 8, PANEL);
+    if (A.searching) glow_rect(x, y, sw, sh, 8, ACCENT);
+    else C.drawRoundRect(x, y, sw, sh, 8, A.search[0] ? dim(ACCENT, 0.7f) : LINE2);
+    font(F_MD);
+    if (A.search[0] || A.searching) {
+        char b[40];
+        snprintf(b, sizeof b, "%s%s", A.search, A.searching && (millis() / 500) % 2 ? "_" : "");
+        text(x + 14, y + sh / 2, b, TEXT, middle_left);
+    } else {
+        text(x + 14, y + sh / 2, "/  search vendor, MAC, node", FAINT, middle_left);
+    }
+    x += sw + 18;
+    int w;
+    static const char *doms[] = {"ALL", "BLE", "WIFI"};
+    font(F_SM);
+    text(x, y + sh / 2, "D", FAINT, middle_left);
+    x += 16;
+    for (int i = 0; i < 3; i++) {
+        chip(x, y + 4, doms[i], i == 2 ? SKY : i == 1 ? PURPLE : ACCENT, A.dom == i, &w, H_DOM, i);
+        x += w + 8;
+    }
+    x += 16;
+    font(F_SM);
+    text(x, y + sh / 2, "N", FAINT, middle_left);
+    x += 16;
+    chip(x, y + 4, A.node[0] ? node_name(A.node) : "ALL NODES", A.node[0] ? node_color565(A.node) : ACCENT, true, &w, H_NODE);
+    x += w + 16;
+    if (A.search[0] || A.dom || A.node[0]) chip(x, y + 4, "CLEAR", AMBER, false, &w, H_CLEAR);
+    char c[32];
+    snprintf(c, sizeof c, "%d of %d", shown, total);
+    font(F_MD);
+    text(W - PAD, y + sh / 2, c, MUTED, middle_right);
+}
+
+void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows) {
+    for (int i = 0; i < n && i < maxRows; i++) {
+        int yy = y + i * rowH;
+        font(F_MD);
+        uint16_t nc = node_color565(s[i].node);
+        if (i == 0 && n > 1) dot(x + 6, yy + 10, 4, nc);
+        text(x + 18, yy, fit(node_name(s[i].node), 150), nc);
+        rssi_bar(x + 180, yy + 6, w - 270, 10, s[i].rssi, rssi_color(s[i].rssi));
+        char r[16];
+        snprintf(r, sizeof r, "%d", s[i].rssi);
+        text(x + w - 20, yy, r, rssi_color(s[i].rssi), top_right);
+    }
+}
+
+// ------------------------------------------------------------------ LIVE
+
+void draw_live() {
+    draw_filter_row(CY, nLive, M->ndets);
+    int ty = CY + 50, rows = 10, rh = 34, th = 34 + rows * rh + 6;
+    panel(PAD, ty, W - 2 * PAD, th, nullptr);
+    clamp_sel(V_LIVE, rows);
+    const int cAge = PAD + 18, cVen = PAD + 90, cMac = PAD + 400, cType = PAD + 640, cDom = PAD + 740,
+              cRssi = PAD + 820, cNode = PAD + 980, cClose = PAD + 1110;
+    font(F_SM);
+    text(cAge, ty + 12, "AGE", FAINT);
+    text(cVen, ty + 12, "DEVICE", FAINT);
+    text(cMac, ty + 12, "MAC", FAINT);
+    text(cType, ty + 12, "TYPE", FAINT);
+    text(cDom, ty + 12, "DOM", FAINT);
+    text(cRssi, ty + 12, "RSSI", FAINT);
+    text(cNode, ty + 12, "NODE", FAINT);
+    text(cClose, ty + 12, "CLOSEST", FAINT);
+    int ry = ty + 34;
+    scroll_area(PAD, ry, W - 2 * PAD, rows * rh, V_LIVE, rh, rows);
+    for (int k = 0; k < rows; k++, ry += rh) {
+        int li = A.top[V_LIVE] + k;
+        if (li >= nLive) break;
+        const Det *d = det_at(liveIdx[li]);
+        bool sel = li == A.sel[V_LIVE];
+        hit(PAD, ry, W - 2 * PAD, rh, H_ROW, li);
+        bool muted = mac_muted(d->mac);
+        if (sel) {
+            C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, dim(ACCENT, 0.12f));
+            C.fillRect(PAD + 4, ry, 3, rh - 2, ACCENT);
+        } else if (k & 1) {
+            C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
+        }
+        int my = ry + rh / 2;
+        font(F_MD);
+        text(cAge, my, age_str(d->ts), MUTED, middle_left);
+        text(cVen, my, fit(vendor_of(d), 290), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
+        if (muted) {
+            font(F_SM);
+            text(cMac - 14, my, "MUTED", AMBER, middle_right);
+        }
+        font(F_MONO_S);
+        text(cMac, my, d->mac, muted ? FAINT : SOFT, middle_left);
+        font(F_MD);
+        text(cType, my, d->type, MUTED, middle_left);
+        text(cDom, my, d->dom, !strcmp(d->dom, "ble") ? PURPLE : SKY, middle_left);
+        rssi_bar(cRssi, my - 4, 90, 8, d->rssi, rssi_color(d->rssi));
+        char r[8];
+        snprintf(r, sizeof r, "%d", d->rssi);
+        text(cRssi + 100, my, r, rssi_color(d->rssi), middle_left);
+        text(cNode, my, fit(node_name(d->node), 120), node_color565(d->node), middle_left);
+        text(cClose, my, d->closest[0] ? fit(node_name(d->closest), 130) : "-",
+             d->closest[0] ? node_color565(d->closest) : FAINT, middle_left);
+    }
+    if (!nLive) {
+        font(F_MD);
+        text(W / 2, ty + th / 2, M->ndets ? "nothing matches the filter" : "no detections yet", FAINT, middle_center);
+    }
+
+    // Detail of the selected row.
+    int dy = ty + th + 12, dh = CB - dy;
+    panel(PAD, dy, W - 2 * PAD, dh, "SELECTED");
+    if (!nLive) return;
+    const Det *d = det_at(liveIdx[A.sel[V_LIVE]]);
+    font(F_LG);
+    glow(PAD + 16, dy + 32, fit(vendor_of(d), 420), d->isNew ? PINK : TEXT);
+    {
+        font(F_SM);
+        int cw;
+        chip(PAD + 440, dy + 28, "DETAILS  ENTER", ACCENT, true, &cw, H_DETAIL);
+        if (d->group[0]) chip(PAD + 440 + cw + 8, dy + 28, d->group, PURPLE, false, nullptr);
+    }
+    font(F_MONO);
+    text(PAD + 16, dy + 68, d->mac, SOFT);
+    font(F_SM);
+    char l[96];
+    snprintf(l, sizeof l, "%s %s   %s   %s %s   %s", d->type, d->dom, d->descr[0] ? d->descr : "-",
+             clock_str(d->ts, true), d->isNew ? "  FIRST SIGHTING" : "", mac_muted(d->mac) ? "MUTED (X to unmute)" : "X mutes this device");
+    text(PAD + 16, dy + 100, fit(l, 560), MUTED);
+    if (d->nseen) seen_bars(PAD + 620, dy + 30, 600, d->seen, d->nseen, 28, 3);
+    else text(PAD + 620, dy + 34, "heard by one node", FAINT);
+}
+
+// ------------------------------------------------------------------ TARGETS
+
+void draw_targets() {
+    draw_filter_row(CY, nTgt, M->ntargets);
+    int gy = CY + 50, cols = 3, rowsN = 3, gap = 12;
+    int cw = (W - 2 * PAD - (cols - 1) * gap) / cols, ch = (CB - gy - (rowsN - 1) * gap) / rowsN;
+    int per = cols * rowsN;
+    // Page-based scrolling: the selection's page is the one shown.
+    A.sel[V_TARGETS] = constrain(A.sel[V_TARGETS], 0, max(0, nTgt - 1));
+    int page = A.sel[V_TARGETS] / per;
+    double now = server_now();
+    scroll_area(PAD, gy, W - 2 * PAD, CB - gy, V_TARGETS, ch + gap, rowsN);
+    if (nTgt > per) {   // page indicator
+        font(F_SM);
+        char pg[24];
+        snprintf(pg, sizeof pg, "page %d / %d   drag to turn", page + 1, (nTgt + per - 1) / per);
+        text(W / 2, CY + 19, pg, FAINT, middle_center);
+    }
+    for (int k = 0; k < per; k++) {
+        int ti = page * per + k;
+        int x = PAD + (k % cols) * (cw + gap), y = gy + (k / cols) * (ch + gap);
+        if (ti < nTgt) hit(x, y, cw, ch, H_TARGET, ti);
+        if (ti >= nTgt) {
+            C.drawRoundRect(x, y, cw, ch, 8, LINE);
+            continue;
+        }
+        const Target &t = M->targets[tgtIdx[ti]];
+        bool live = now - t.last < TARGET_LIVE_S;
+        bool sel = ti == A.sel[V_TARGETS];
+        bool muted = mac_muted(t.mac);
+        C.fillRoundRect(x, y, cw, ch, 8, PANEL);
+        if (sel) glow_rect(x, y, cw, ch, 8, ACCENT);
+        else C.drawRoundRect(x, y, cw, ch, 8, live ? dim(PINK, 0.5f) : LINE2);
+        font(F_LG);
+        text(x + 16, y + 12, fit(target_label(t), cw - 110), muted ? FAINT : (t.alias[0] ? PINK : TEXT));
+        if (t.group[0]) {
+            font(F_SM);
+            text(x + 16, y + ch - 20, fit(t.group, cw - 32), PURPLE);
+        }
+        font(F_MD);
+        text(x + cw - 16, y + 14, age_str(t.last), live ? PINK : FAINT, top_right);
+        if (live) dot(x + cw - 16 - C.textWidth(age_str(t.last)) - 14, y + 24, 4, PINK);
+        font(F_MONO);
+        text(x + 16, y + 46, t.mac, muted ? FAINT : SOFT);
+        font(F_SM);
+        char l[48];
+        snprintf(l, sizeof l, "%s  %s  %u hits%s", t.type, t.dom, (unsigned)t.hits, muted ? "  MUTED" : "");
+        text(x + cw - 16, y + 52, l, muted ? AMBER : FAINT, top_right);
+        if (t.nseen) {
+            const Seen &best = t.seen[0];
+            font(F_SM);
+            text(x + 16, y + 82, t.nseen > 1 ? "NEAREST" : "HEARD BY", FAINT);
+            font(F_LG);
+            glow(x + 110, y + 76, fit(node_name(best.node), cw - 220), node_color565(best.node));
+            char r[12];
+            snprintf(r, sizeof r, "%d", best.rssi);
+            text(x + cw - 16, y + 76, r, rssi_color(best.rssi), top_right);
+            // Up to two runners-up.
+            for (int i = 1; i < t.nseen && i < 3; i++) {
+                int yy = y + 108 + (i - 1) * 24;
+                if (yy + 18 > y + ch) break;
+                font(F_SM);
+                text(x + 16, yy, fit(node_name(t.seen[i].node), 120), node_color565(t.seen[i].node));
+                rssi_bar(x + 140, yy + 4, cw - 220, 8, t.seen[i].rssi, rssi_color(t.seen[i].rssi));
+                snprintf(r, sizeof r, "%d", t.seen[i].rssi);
+                text(x + cw - 16, yy, r, rssi_color(t.seen[i].rssi), top_right);
+            }
+        }
+    }
+    if (!nTgt) {
+        font(F_MD);
+        text(W / 2, (gy + CB) / 2, M->ntargets ? "nothing matches the filter" : "no devices heard in the last 10 minutes",
+             FAINT, middle_center);
+    }
+}
+
+// ------------------------------------------------------------------ METRICS
+
+void hbars(int x, int y, int w, int h, const char *title, const Bar *bars, int n, bool nodes) {
+    panel(x, y, w, h, title);
+    uint32_t mx = 1;
+    for (int i = 0; i < n; i++) mx = max(mx, bars[i].count);
+    int rh = 28, yy = y + 34;
+    for (int i = 0; i < n && yy + rh <= y + h - 4; i++, yy += rh) {
+        uint16_t col = nodes ? node_color565(bars[i].name) : (i == 0 ? PINK : ACCENT);
+        const char *label = nodes ? node_name(bars[i].name) : bars[i].name;
+        font(F_MD);
+        text(x + 16, yy + rh / 2, fit(label, 150), TEXT, middle_left);
+        int bx = x + 176, bw = w - 176 - 80;
+        int fw = max(2, (int)((uint64_t)bars[i].count * bw / mx));
+        C.fillRoundRect(bx, yy + 8, bw, rh - 16, 3, PANEL2);
+        C.fillRoundRect(bx, yy + 8, fw, rh - 16, 3, dim(col, 0.8f));
+        C.drawFastHLine(bx + 2, yy + 8, fw - 4, col);
+        char c[16];
+        snprintf(c, sizeof c, "%u", (unsigned)bars[i].count);
+        text(x + w - 16, yy + rh / 2, c, MUTED, middle_right);
+    }
+    if (!n) {
+        font(F_MD);
+        text(x + w / 2, y + h / 2, "-", FAINT, middle_center);
+    }
+}
+
+void draw_metrics() {
+    const Metrics &m = M->metrics;
+    int x = PAD, y = CY, w;
+    font(F_SM);
+    text(x, y + 12, "R", FAINT, middle_left);
+    x += 16;
+    for (int i = 0; i < NRANGES; i++) {
+        chip(x, y, RANGE_NAMES[i], ACCENT, A.range == i, &w, H_RANGE, i);
+        x += w + 8;
+    }
+    x += 20;
+    static const char *doms[] = {"ALL", "BLE", "WIFI"};
+    chip(x, y, doms[A.dom], A.dom == 2 ? SKY : A.dom == 1 ? PURPLE : ACCENT, A.dom != 0, &w, H_DOM, -1);
+    x += w + 8;
+    chip(x, y, A.node[0] ? node_name(A.node) : "ALL NODES", A.node[0] ? node_color565(A.node) : ACCENT, A.node[0] != 0, &w, H_NODE);
+    if (m.valid) {
+        char u[48];
+        snprintf(u, sizeof u, "updated %us ago", (unsigned)((millis() - m.fetchedMs) / 1000));
+        font(F_SM);
+        text(W - PAD, y + 12, u, FAINT, middle_right);
+    }
+    if (M->usbLive && !M->bridging) {
+        font(F_SM);
+        text(W - PAD, y + 15, "local history since boot", AMBER, middle_right);
+    }
+    y += 42;
+    int tw = (W - 2 * PAD - 4 * 12) / 5, th = 88;
+    char v[24], sub[40];
+    snprintf(v, sizeof v, "%u", (unsigned)m.total);
+    if (m.prevTotal) snprintf(sub, sizeof sub, "%+d%% vs prev", (int)((int64_t)m.total * 100 / m.prevTotal) - 100);
+    else snprintf(sub, sizeof sub, "prev %u", (unsigned)m.prevTotal);
+    kpi(PAD, y, tw, th, "DETECTIONS", v, SKY, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)m.unique);
+    kpi(PAD + (tw + 12), y, tw, th, "UNIQUE DEVICES", v, PURPLE);
+    snprintf(v, sizeof v, "%u", (unsigned)m.peak);
+    snprintf(sub, sizeof sub, "%s / %um", m.peakTs ? clock_str(m.peakTs, false) : "-", (unsigned)(m.bucket / 60));
+    kpi(PAD + 2 * (tw + 12), y, tw, th, "PEAK", v, AMBER, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)m.newDevices);
+    kpi(PAD + 3 * (tw + 12), y, tw, th, "NEW DEVICES", v, PINK);
+    snprintf(v, sizeof v, "%u", (unsigned)m.nodesActive);
+    snprintf(sub, sizeof sub, "BLE %u  WIFI %u", (unsigned)m.ble, (unsigned)m.wifi);
+    kpi(PAD + 4 * (tw + 12), y, tw, th, "NODES ACTIVE", v, ACCENT, sub);
+
+    // Detections over time (bars) with unique devices (pink line).
+    y += th + 12;
+    int chH = 214;
+    panel(PAD, y, W - 2 * PAD, chH, "DETECTIONS OVER TIME");
+    font(F_SM);
+    text(W - PAD - 16, y + 10, "bars detections   line unique devices", FAINT, top_right);
+    if (m.valid && m.nbuckets) {
+        int n = m.nbuckets;
+        uint16_t mx = 1, mu = 1;
+        for (int i = 0; i < n; i++) mx = max(mx, m.series[i]), mu = max(mu, m.uniqueSeries[i]);
+        int px = PAD + 56, pw = W - 2 * PAD - 72, py = y + 36, ph = chH - 64;
+        float bw = (float)pw / n;
+        C.drawFastHLine(px, py + ph, pw, LINE2);
+        for (int g = 1; g <= 2; g++) C.drawFastHLine(px, py + ph - ph * g / 2, pw, LINE);
+        char lab[12];
+        snprintf(lab, sizeof lab, "%u", mx);
+        text(px - 8, py, lab, FAINT, top_right);
+        text(px - 8, py + ph, "0", FAINT, bottom_right);
+        for (int i = 0; i < n; i++) {
+            int h = (int)m.series[i] * ph / mx;
+            if (m.series[i] && h < 2) h = 2;
+            int bx = px + (int)(i * bw);
+            int bwi = max(1, (int)bw - 1);
+            if (h) {
+                C.fillRect(bx, py + ph - h, bwi, h, dim(ACCENT, 0.7f));
+                C.drawFastHLine(bx, py + ph - h, bwi, ACCENT);
+            }
+        }
+        int lx = -1, ly = 0;
+        for (int i = 0; i < n; i++) {
+            int xx = px + (int)(i * bw + bw / 2), yy = py + ph - (int)m.uniqueSeries[i] * ph / mu;
+            if (lx >= 0) {
+                C.drawLine(lx, ly, xx, yy, PINK);
+                C.drawLine(lx, ly - 1, xx, yy - 1, dim(PINK, 0.5f));
+            }
+            lx = xx, ly = yy;
+        }
+        text(px, py + ph + 6, clock_str(m.start, false), FAINT);
+        text(px + pw / 2, py + ph + 6, clock_str((m.start + m.until) / 2, false), FAINT, top_center);
+        text(px + pw, py + ph + 6, "now", FAINT, top_right);
+    } else {
+        font(F_MD);
+        text(W / 2, y + chH / 2, M->sockUp || M->usbLive ? "loading metrics" : waiting_text(), FAINT, middle_center);
+    }
+
+    // Breakdown row.
+    y += chH + 12;
+    int bh = CB - y;
+    int w1 = 500, w2 = 380, w3 = W - 2 * PAD - w1 - w2 - 24;
+    hbars(PAD, y, w1, bh, "BY VENDOR", m.vendor, m.nvendor, false);
+    hbars(PAD + w1 + 12, y, w2, bh, "BY NODE", m.node, m.nnode, true);
+    int rx = PAD + w1 + w2 + 24;
+    panel(rx, y, w3, bh, "RSSI DISTRIBUTION");
+    if (m.nrssi) {
+        uint16_t mx = 1;
+        for (int i = 0; i < m.nrssi; i++) mx = max(mx, m.rssi[i]);
+        int px = rx + 16, pw = w3 - 32, py = y + 36, ph = bh - 66;
+        int bw = pw / m.nrssi;
+        for (int i = 0; i < m.nrssi; i++) {
+            int h = m.rssi[i] * ph / mx;
+            if (m.rssi[i] && h < 2) h = 2;
+            uint16_t col = rssi_color(m.rssiFrom + i * m.rssiStep + m.rssiStep / 2);
+            if (h) {
+                C.fillRect(px + i * bw + 1, py + ph - h, bw - 2, h, dim(col, 0.75f));
+                C.drawFastHLine(px + i * bw + 1, py + ph - h, bw - 2, col);
+            }
+        }
+        C.drawFastHLine(px, py + ph, bw * m.nrssi, LINE2);
+        font(F_SM);
+        char a[12], b[12];
+        snprintf(a, sizeof a, "%d", m.rssiFrom);
+        snprintf(b, sizeof b, "%d dBm", m.rssiFrom + m.nrssi * m.rssiStep);
+        text(px, py + ph + 6, a, FAINT);
+        text(px + bw * m.nrssi, py + ph + 6, b, FAINT, top_right);
+    }
+}
+
+// ------------------------------------------------------------------ help / OTA / settings
+
+void draw_help() {
+    int w = 860, h = 640, x = (W - w) / 2, y = (H - h) / 2;
+    hit(0, 0, W, H, H_CLOSE);
+    C.fillRoundRect(x, y, w, h, 10, PANEL);
+    glow_rect(x, y, w, h, 10, ACCENT);
+    font(F_BRAND);
+    glow(x + 24, y + 22, "KEYS", ACCENT);
+    static const char *rows[][2] = {
+        {"1 - 7,  TAB,  LEFT RIGHT", "switch view"},
+        {"ENTER   (tap a row twice)", "everything about the device / drone"},
+        {"MAP:  + -  L  Z  O  UP DN", "zoom, layer, fit, follow drone, pan"},
+        {"DETAIL:  E   G", "name the device, put it in a new group"},
+        {"UP  DOWN   (Ctrl: page)", "select a node / detection / target"},
+        {"/", "search; ENTER keeps it, ESC clears"},
+        {"D   N", "domain (all / BLE / WiFi), node filter"},
+        {"C   ESC", "clear filters"},
+        {"R   [   ]", "metrics range 1H / 6H / 24H / 7D"},
+        {"A", "acknowledge alerts"},
+        {"X", "mute / unmute the selected device"},
+        {"M", "silence all alerts (banner + sound)"},
+        {"V", "alert sound on / off"},
+        {"B   F", "brightness, flip the screen"},
+        {"S", "setup: source, Wi-Fi, dashboard, token, OTA"},
+        {"TOUCH", "tap anything; drag lists to scroll"},
+    };
+    int yy = y + 76;
+    for (auto &r : rows) {
+        font(F_MD);
+        text(x + 24, yy, r[0], SOFT);
+        text(x + 330, yy, r[1], TEXT);
+        yy += 32;
+    }
+    font(F_SM);
+    char b[96];
+    snprintf(b, sizeof b, "firmware %s   %s   OTA %s", FW_VERSION, S.hostname.c_str(), net_ota_enabled() ? "on" : "off (set an OTA password)");
+    text(x + 24, y + h - 26, b, FAINT);
+}
+
+void draw_ota() {
+    C.fillScreen(BG);
+    font(F_BRAND_L);
+    glow(W / 2, H / 2 - 60, "FIRMWARE UPDATE", ACCENT, middle_center);
+    int bw = 700, bx = (W - bw) / 2, by = H / 2;
+    C.fillRoundRect(bx, by, bw, 20, 10, PANEL2);
+    C.fillRoundRect(bx, by, bw * A.otaPct / 100, 20, 10, ACCENT);
+    glow_rect(bx, by, bw, 20, 10, dim(ACCENT, 0.7f));
+    font(F_LG);
+    char p[8];
+    snprintf(p, sizeof p, "%u%%", A.otaPct);
+    text(W / 2, by + 50, p, TEXT, top_center);
+}
+
+// Settings editor. Rows: 0 = data source, 1..NF = text fields, NF+1 = save.
+struct Field {
+    const char *label;
+    String *val;
+    bool secret;
+    bool numeric;
+};
+String eSsid, ePass, eHost, ePort, eToken, eOta, eTz, eName;
+uint8_t eSource = SRC_AUTO;
+Field FIELDS[] = {
+    {"Wi-Fi network (tap one on the right)", &eSsid, false, false}, {"Wi-Fi password", &ePass, true, false},
+    {"Dashboard address (blank = find it on the network)", &eHost, false, false}, {"Port", &ePort, false, true},
+    {"Access token (off-LAN only)", &eToken, true, false}, {"OTA password (empty = OTA off)", &eOta, true, false},
+    {"Time zone (POSIX)", &eTz, false, false}, {"Hostname", &eName, false, false},
+};
+constexpr int NF = sizeof(FIELDS) / sizeof(FIELDS[0]);
+constexpr int ROW_SRC = 0, ROW_SAVE = NF + 1;
+int fsel = 0;
+bool inList = false;
+int listSel = 0, netTop = 0;
+bool reveal = false;
+String scanNames[16];
+int scanRssi[16];
+static const char *SRC_NAMES[] = {"AUTO", "NETWORK", "USB ONLY"};
+static const char *SRC_HELP[] = {"USB node first, else Wi-Fi", "dashboard over Wi-Fi", "no network feed"};
+
+void settings_open() {
+    eSsid = S.ssid, ePass = S.pass, eHost = S.host, ePort = String(S.port), eToken = S.token;
+    eOta = S.otaPass, eTz = S.tz, eName = S.hostname, eSource = S.source;
+    fsel = S.ssid.length() ? 3 : 1;
+    inList = false;
+    A.settings = true;
+    net_request_scan();
+}
+
+void settings_commit() {
+    eSsid.trim(), eHost.trim(), eName.trim(), eTz.trim();
+    S.ssid = eSsid, S.pass = ePass, S.host = eHost, S.port = ePort.toInt() ? ePort.toInt() : 5077;
+    S.token = eToken, S.otaPass = eOta, S.tz = eTz, S.hostname = eName.length() ? eName : String("ouispy-tab5");
+    S.source = eSource;
+    settings_save();
+    font(F_BRAND_L);
+    C.fillScreen(BG);
+    glow(W / 2, H / 2, "SAVED  RESTARTING", ACCENT, middle_center);
+    C.pushSprite(0, 0);
+    delay(600);
+    ESP.restart();
+}
+
+constexpr int SF_X = PAD + 20, SF_Y = 92, SF_H = 56, SF_W = 700;
+constexpr int SL_X = SF_X + SF_W + 40, SL_W = W - PAD - 20 - SL_X;
+constexpr int NET_Y = SF_Y + 40, NET_RH = 40, NET_ROWS = 10;
+
+void draw_settings() {
+    C.fillScreen(BG);
+    font(F_BRAND_L);
+    glow(PAD + 20, 26, "SETUP", ACCENT);
+    int bx = W - PAD - 20, w;
+    if (settings_ready()) {
+        font(F_SM);
+        w = C.textWidth("BACK") + 28;
+        bx -= w;
+        chip(bx, 28, "BACK", ACCENT, false, nullptr, H_BACK);
+        bx -= 10;
+    }
+    font(F_SM);
+    w = C.textWidth(reveal ? "HIDE SECRETS" : "SHOW SECRETS") + 28;
+    bx -= w;
+    chip(bx, 28, reveal ? "HIDE SECRETS" : "SHOW SECRETS", AMBER, reveal, nullptr, H_REVEAL);
+    font(F_SM);
+    text(bx - 20, 43, "tap a field or UP DN TAB   ENTER next   ESC back", FAINT, middle_right);
+
+    for (int r = 0; r <= ROW_SAVE; r++) {
+        int y = SF_Y + r * SF_H;
+        bool on = fsel == r && !inList;
+        if (r == ROW_SRC) {
+            font(F_SM);
+            text(SF_X, y, "Data source", on ? ACCENT : MUTED);
+            int sx = SF_X;
+            for (int k = 0; k < 3; k++) {
+                int sw = 140;
+                bool cur = eSource == k;
+                hit(sx, y + 14, sw, 40, H_SRC, k);
+                C.fillRoundRect(sx, y + 18, sw, 32, 8, cur ? dim(ACCENT, 0.22f) : PANEL);
+                if (cur) glow_rect(sx, y + 18, sw, 32, 8, on ? ACCENT : dim(ACCENT, 0.7f));
+                else C.drawRoundRect(sx, y + 18, sw, 32, 8, LINE2);
+                font(F_MD);
+                text(sx + sw / 2, y + 35, SRC_NAMES[k], cur ? ACCENT : MUTED, middle_center);
+                sx += sw + 10;
+            }
+            font(F_SM);
+            text(sx + 4, y + 35, fit(SRC_HELP[eSource], SF_X + SF_W - sx - 4), FAINT, middle_left);
+            continue;
+        }
+        if (r == ROW_SAVE) {
+            int sw = 300;
+            hit(SF_X, y + 4, sw, 50, H_SAVE);
+            C.fillRoundRect(SF_X, y + 8, sw, 42, 8, on ? dim(ACCENT, 0.25f) : dim(ACCENT, 0.08f));
+            glow_rect(SF_X, y + 8, sw, 42, 8, on ? ACCENT : dim(ACCENT, 0.6f));
+            font(F_MD);
+            glow(SF_X + sw / 2, y + 30, "SAVE AND RESTART", ACCENT, middle_center);
+            break;
+        }
+        const Field &f = FIELDS[r - 1];
+        hit(SF_X, y, SF_W, SF_H, H_FIELD, r);
+        font(F_SM);
+        text(SF_X, y, f.label, on ? ACCENT : MUTED);
+        C.fillRoundRect(SF_X, y + 18, SF_W, 34, 6, PANEL);
+        if (on) glow_rect(SF_X, y + 18, SF_W, 34, 6, ACCENT);
+        else C.drawRoundRect(SF_X, y + 18, SF_W, 34, 6, LINE2);
+        String shown = *f.val;
+        if (f.secret && !reveal) {
+            shown = "";
+            for (unsigned k = 0; k < f.val->length(); k++) shown += '*';
+        }
+        if (on && (millis() / 500) % 2) shown += "_";
+        font(F_MD);
+        text(SF_X + 12, y + 36, fit(shown.c_str(), SF_W - 24), TEXT, middle_left);
+    }
+
+    // Networks: tap to use, drag to scroll.
+    int ph = NF * SF_H + 40;
+    panel(SL_X, SF_Y, SL_W, ph, "NETWORKS NEARBY");
+    font(F_SM);
+    w = C.textWidth("RESCAN") + 28;
+    chip(SL_X + SL_W - w - 12, SF_Y + 6, "RESCAN", ACCENT, false, nullptr, H_RESCAN);
+    int n = net_scan_results(scanNames, scanRssi, 16);
+    if (n < 0) {
+        font(F_MD);
+        text(SL_X + 16, NET_Y + 10, "scanning...", FAINT);
+    }
+    netTop = constrain(netTop, 0, max(0, n - NET_ROWS));
+    scroll_area(SL_X, NET_Y, SL_W, NET_ROWS * NET_RH, L_NETS, NET_RH, NET_ROWS);
+    for (int k = 0; k < NET_ROWS; k++) {
+        int i = netTop + k;
+        if (i >= n) break;
+        int y = NET_Y + k * NET_RH;
+        bool on = inList && listSel == i;
+        bool cur = scanNames[i] == eSsid;
+        hit(SL_X, y, SL_W, NET_RH, H_NET, i);
+        if (on || cur) {
+            C.fillRect(SL_X + 4, y + 2, SL_W - 8, NET_RH - 4, dim(ACCENT, on ? 0.18f : 0.10f));
+            C.fillRect(SL_X + 4, y + 2, 3, NET_RH - 4, ACCENT);
+        }
+        font(F_MD);
+        text(SL_X + 18, y + NET_RH / 2, fit(scanNames[i].c_str(), SL_W - 110), cur ? ACCENT : TEXT, middle_left);
+        char r[8];
+        snprintf(r, sizeof r, "%d", scanRssi[i]);
+        text(SL_X + SL_W - 16, y + NET_RH / 2, r, rssi_color(scanRssi[i]), middle_right);
+    }
+    font(F_SM);
+    if (n > NET_ROWS) {
+        char more[32];
+        snprintf(more, sizeof more, "%d-%d of %d   drag to scroll", netTop + 1, min(n, netTop + NET_ROWS), n);
+        text(SL_X + 16, SF_Y + ph - 22, more, FAINT);
+    }
+    text(SF_X, H - 26,
+         "Stored on this device only. On the dashboard's LAN no token is needed; over Tailscale paste the token from home-dashboard/access_token.",
+         FAINT);
+}
+
+void pick_network(int i) {
+    int n = net_scan_results(scanNames, scanRssi, 16);
+    if (i < 0 || i >= n) return;
+    eSsid = scanNames[i];
+    inList = false;
+    fsel = 2;   // straight to the password
+}
+
+void settings_key(uint8_t kc, uint8_t mod, char ch) {
+    bool ctrl = mod & 0x11;
+    if (kc == 0x29) {   // Esc
+        if (inList) inList = false;
+        else if (settings_ready()) A.settings = false;
+        return;
+    }
+    if (ctrl && (ch == 'v' || ch == 'V')) {
+        reveal = !reveal;
+        return;
+    }
+    if (inList) {
+        int n = net_scan_results(scanNames, scanRssi, 16);
+        if (kc == 0x52) listSel = max(0, listSel - 1);
+        else if (kc == 0x51) listSel = min(max(0, n - 1), listSel + 1);
+        else if (kc == 0x50) inList = false;
+        else if (ch == 'r' || ch == 'R') net_request_scan();
+        else if (kc == 0x28) pick_network(listSel);
+        if (listSel < netTop) netTop = listSel;
+        if (listSel >= netTop + NET_ROWS) netTop = listSel - NET_ROWS + 1;
+        return;
+    }
+    if (kc == 0x52) fsel = max(0, fsel - 1);
+    else if (kc == 0x51 || kc == 0x2B) fsel = min((int)ROW_SAVE, fsel + 1);
+    else if (fsel == ROW_SRC && (kc == 0x50 || kc == 0x4F)) eSource = (eSource + (kc == 0x4F ? 1 : 2)) % 3;
+    else if (kc == 0x4F && fsel == 1) inList = true, listSel = netTop;
+    else if (kc == 0x28) {
+        if (fsel == ROW_SAVE) settings_commit();
+        else fsel++;
+    } else if (fsel >= 1 && fsel <= NF) {
+        String &v = *FIELDS[fsel - 1].val;
+        if (kc == 0x2A || kc == 0x4C) {
+            if (v.length()) v.remove(v.length() - 1);
+        } else if (ch >= 0x20 && ch < 0x7f && v.length() < 96) {
+            if (!FIELDS[fsel - 1].numeric || isdigit(ch)) v += ch;
+        }
+    }
+}
+
+// ------------------------------------------------------------------ actions
+
+void cycle_node() {
+    if (!M->nnodes) return;
+    int cur = -1;
+    for (int i = 0; i < M->nnodes; i++)
+        if (!strcmp(M->nodes[i].id, A.node)) cur = i;
+    if (cur + 1 >= M->nnodes) A.node[0] = 0;
+    else strlcpy(A.node, M->nodes[cur + 1].id, sizeof A.node);
+    A.metricsGen++;
+}
+
+void dispatch_drone_map() {
+    if (!nDrone) return;
+    const Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
+    if (d.hasPos) map_center_on(d.lat, d.lon);
+    else if (d.hasPilot) map_center_on(d.plat, d.plon);
+    else return;
+    A.mapZoom = max((int)A.mapZoom, 17);
+    A.view = V_MAP;
+}
+
+const char *selected_mac() {
+    if (A.view == V_LIVE && nLive) return det_at(liveIdx[A.sel[V_LIVE]])->mac;
+    if (A.view == V_TARGETS && nTgt) return M->targets[tgtIdx[A.sel[V_TARGETS]]].mac;
+    if (M->hasAlert) return M->lastAlert.mac;
+    return nullptr;
+}
+
+// The panel stays in its native portrait orientation and the canvas is rotated instead:
+// M5GFX pushes an unrotated sprite with one memcpy per line, while a rotated panel copies
+// pixel by pixel down PSRAM columns (~800 ms a frame). Touch therefore arrives in panel
+// coordinates and is mapped here. Landscape with the keyboard edge at the bottom; F flips it.
+constexpr int PW = 720, PH = 1280;   // panel, native
+uint8_t canvasRot() { return S.flip ? 1 : 3; }
+
+void apply_rotation() {
+    M5.Display.setRotation(0);
+    C.setRotation(canvasRot());
+}
+
+void to_canvas(int &x, int &y) {
+    int px = x, py = y;
+    if (canvasRot() == 3) x = PH - 1 - py, y = px;
+    else x = py, y = PW - 1 - px;
+}
+
+Hit flashHit;            // the control a tap just fired: shown filled for a moment
+uint32_t flashUntil = 0;
+volatile bool pressPaint = false;   // a press arrived: paint its pressed state right away
+
+// Copy one logical rectangle of the canvas to the panel: the pressed state of a button
+// goes out in a few ms instead of waiting for a whole frame (what LVGL calls a partial
+// refresh). Canvas and panel share pixel format and orientation, so it's row memcpys.
+void push_rect(int x, int y, int w, int h) {
+    x = max(0, x), y = max(0, y);
+    w = min(W - x, w), h = min(H - y, h);
+    if (w <= 0 || h <= 0) return;
+    int px0, py0, pw, ph;
+    if (canvasRot() == 3) px0 = y, pw = h, py0 = PH - (x + w), ph = w;
+    else px0 = PW - (y + h), pw = h, py0 = x, ph = w;
+    const lgfx::rgb565_t *buf = (const lgfx::rgb565_t *)C.getBuffer();
+    M5.Display.startWrite();
+    for (int r = 0; r < ph; r++) M5.Display.pushImage(px0, py0 + r, pw, 1, buf + (size_t)(py0 + r) * PW + px0);
+    M5.Display.endWrite();
+}
+
+// Blend a logical rectangle of the canvas toward `col` (a = 0..256): a see-through fill, so
+// the label under a pressed button stays readable and simply lights up.
+void tint_rect(int x, int y, int w, int h, uint16_t col, int a) {
+    x = max(0, x), y = max(0, y);
+    w = min(W - x, w), h = min(H - y, h);
+    if (w <= 0 || h <= 0) return;
+    int px0, py0, pw, ph;
+    if (canvasRot() == 3) px0 = y, pw = h, py0 = PH - (x + w), ph = w;
+    else px0 = PW - (y + h), pw = h, py0 = x, ph = w;
+    uint16_t *buf = (uint16_t *)C.getBuffer();   // rgb565, native byte order
+    int cr = col >> 11, cg = (col >> 5) & 63, cb = col & 31, ia = 256 - a;
+    for (int r = 0; r < ph; r++) {
+        uint16_t *p = buf + (size_t)(py0 + r) * PW + px0;
+        for (int k = 0; k < pw; k++, p++) {
+            uint16_t v = *p;
+            int pr = ((v >> 11) * ia + cr * a) >> 8, pg = (((v >> 5) & 63) * ia + cg * a) >> 8,
+                pb = ((v & 31) * ia + cb * a) >> 8;
+            *p = (pr << 11) | (pg << 5) | pb;
+        }
+    }
+}
+
+void paint_pressed(const Hit &h) {
+    tint_rect(h.x, h.y, h.w, h.h, ACCENT, 80);
+    glow_rect(h.x, h.y, h.w, h.h, 8, ACCENT);
+}
+
+}  // namespace
+
+// ------------------------------------------------------------------ public
+
+uint32_t ui_drawMs = 0, ui_pushMs = 0;
+
+void ui_dirty() { dirty = true; }
+
+void ui_screenshot(Stream &out) {
+    model_lock();
+    const uint8_t *buf = (const uint8_t *)C.getBuffer();
+    size_t n = (size_t)PW * PH * 2;
+    uint32_t sum = 0;
+    for (size_t i = 0; buf && i < n; i += 97) sum += buf[i];
+    out.printf("SHOT %d %d %u %d\n", PW, PH, (unsigned)sum, canvasRot());
+    static uint8_t chunk[2048];   // internal RAM bounce: write PSRAM through a copy
+    for (size_t off = 0; buf && off < n; off += sizeof chunk) {
+        size_t k = min(sizeof chunk, n - off);
+        memcpy(chunk, buf + off, k);
+        for (size_t w = 0; w < k;) {   // HWCDC returns short writes when the host lags
+            size_t r = out.write(chunk + w, k - w);
+            if (!r) delay(1);
+            w += r;
+        }
+    }
+    out.flush();
+    model_unlock();
+}
+
+void ui_init() {
+    apply_rotation();
+    M5.Display.setBrightness(S.bright * 255 / 100);
+    setenv("TZ", S.tz.c_str(), 1);
+    tzset();
+    // The DSI framebuffer's own pixel format: the push is then a plain copy, no conversion.
+    C.setColorDepth(lgfx::color_depth_t::rgb565_nonswapped);
+    C.setPsram(true);
+    if (!C.createSprite(PW, PH)) Serial.println("canvas alloc failed");
+    apply_rotation();   // now the canvas reads 1280 x 720
+    if (!settings_ready()) {
+        settings_open();
+        A.autoSetup = true;   // closes by itself if a node shows up on USB
+    }
+}
+
+void ui_key(uint8_t kc, uint8_t mod, char ch);
+
+void ui_key(uint8_t kc, uint8_t mod) {
+    char ch = m5::unit::tab5_keyboard::hidUsageToChar(kc, mod);
+    dirty = true;
+    model_lock();
+    ui_key(kc, mod, ch);
+    model_unlock();
+}
+
+void ui_key(uint8_t kc, uint8_t mod, char ch) {
+    if (A.settings) {
+        settings_key(kc, mod, ch);
+        return;
+    }
+    bool shift = mod & 0x22, ctrl = mod & 0x11;
+    if (A.help) {
+        A.help = false;
+        return;
+    }
+    if (A.detail) {
+        if (A.editAlias || A.newGroup) {
+            size_t n = strlen(A.editBuf);
+            if (kc == 0x29) A.editAlias = A.newGroup = false;
+            else if (kc == 0x28) detail_submit_text();
+            else if (kc == 0x2A || kc == 0x4C) { if (n) A.editBuf[n - 1] = 0; }
+            else if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\' && n + 1 < 33) A.editBuf[n] = ch, A.editBuf[n + 1] = 0;
+            return;
+        }
+        if (kc == 0x29 || kc == 0x2A) { A.detail = false; return; }
+        if (net_online() && (ch == 'e' || ch == 'E')) {
+            A.editAlias = true;
+            strlcpy(A.editBuf, M->detail.alias, sizeof A.editBuf);
+        } else if (net_online() && (ch == 'g' || ch == 'G')) {
+            A.newGroup = true, A.editBuf[0] = 0;
+        }
+        return;
+    }
+    if (A.searching) {
+        size_t n = strlen(A.search);
+        if (kc == 0x29) {
+            A.search[0] = 0;
+            A.searching = false;
+        } else if (kc == 0x28 || kc == 0x51 || kc == 0x52) {
+            A.searching = false;
+        } else if (kc == 0x2A || kc == 0x4C) {
+            if (n) A.search[n - 1] = 0;
+        } else if (ch >= 0x20 && ch < 0x7f && n + 1 < sizeof A.search) {
+            A.search[n] = ch;
+            A.search[n + 1] = 0;
+        }
+        A.sel[V_LIVE] = A.top[V_LIVE] = A.sel[V_TARGETS] = 0;
+        return;
+    }
+    int page = A.view == V_LIVE ? 10 : A.view == V_TARGETS ? 9 : A.view == V_DRONES ? 7 : 6;
+    if (kc == 0x28) {   // Enter: everything about the selection
+        if (A.view == V_DRONES) dispatch_drone_map();
+        else if (const char *mac = selected_mac()) open_detail(mac);
+        return;
+    }
+    if (A.view == V_MAP) {
+        if (ch == '+' || ch == '=') { map_zoom(1); return; }
+        if (ch == '-' || ch == '_') { map_zoom(-1); return; }
+        if (ch == 'l' || ch == 'L') { A.mapPrevLayer = A.mapLayer; A.mapLayer = (A.mapLayer + 1) % NLAYERS; maptiles_clear_requests(); return; }
+        if (ch == 'z' || ch == 'Z') { A.mapFollow = false; map_fit(); maptiles_clear_requests(); return; }
+        if (ch == 'o' || ch == 'O') { A.mapFollow = !A.mapFollow; return; }
+        if (kc == 0x52 || kc == 0x51) {   // Up / Down pan; Left / Right still switch views
+            double y = lat2y(A.mapLat, A.mapZoom) + (kc == 0x52 ? -200 : 200);
+            A.mapLat = y2lat(y, A.mapZoom);
+            maptiles_clear_requests();
+            return;
+        }
+    }
+    switch (kc) {
+    case 0x2B: A.view = (View)((A.view + (shift ? V_COUNT - 1 : 1)) % V_COUNT); return;   // Tab
+    case 0x4F: A.view = (View)((A.view + 1) % V_COUNT); return;                            // Right
+    case 0x50: A.view = (View)((A.view + V_COUNT - 1) % V_COUNT); return;                  // Left
+    case 0x52: A.sel[A.view] -= ctrl ? page : 1; return;                                    // Up
+    case 0x51: A.sel[A.view] += ctrl ? page : 1; return;                                    // Down
+    case 0x4A: A.sel[A.view] = 0; return;                                                   // Home
+    case 0x29:                                                                             // Esc
+        A.search[0] = 0, A.dom = 0, A.node[0] = 0;
+        A.metricsGen++;
+        return;
+    }
+    if (ch >= '1' && ch <= '7') {
+        A.view = (View)(ch - '1');
+        return;
+    }
+    switch (tolower(ch)) {
+    case '/':
+        if (A.view != V_LIVE && A.view != V_TARGETS) A.view = V_LIVE;
+        A.searching = true;
+        break;
+    case 'a':
+        alerts_ack();
+        toast("alerts acknowledged");
+        break;
+    case 'm':
+        M->muteAll = !M->muteAll;
+        if (M->muteAll) M->alertsUnacked = 0;
+        toast(M->muteAll ? "alerts silenced" : "alerts on");
+        break;
+    case 'x': {
+        const char *mac = selected_mac();
+        if (mac) {
+            char m[18];
+            strlcpy(m, mac, sizeof m);
+            mute_toggle(m);
+            toast(mac_muted(m) ? "muted %s" : "unmuted %s", m);
+        }
+        break;
+    }
+    case 'd':
+        A.dom = (A.dom + 1) % 3;
+        A.metricsGen++;
+        break;
+    case 'n': cycle_node(); break;
+    case 'c':
+        A.search[0] = 0, A.dom = 0, A.node[0] = 0;
+        A.metricsGen++;
+        break;
+    case 'r':
+    case ']':
+    case '[':
+        A.range = (A.range + ((shift && ch == 'R') || ch == '[' ? NRANGES - 1 : 1)) % NRANGES;
+        A.metricsGen++;
+        toast("metrics range %s", RANGE_NAMES[A.range.load()]);
+        break;
+    case 'v':
+        S.sound = !S.sound;
+        settings_save();
+        toast(S.sound ? "alert sound on" : "alert sound off");
+        break;
+    case 'b': {
+        static const uint8_t steps[] = {15, 35, 55, 75, 100};
+        int i = 0;
+        while (i < 5 && steps[i] <= S.bright) i++;
+        S.bright = steps[i % 5];
+        M5.Display.setBrightness(S.bright * 255 / 100);
+        settings_save();
+        toast("brightness %u%%", S.bright);
+        break;
+    }
+    case 'f':
+        S.flip = !S.flip;
+        settings_save();
+        apply_rotation();
+        break;
+    case 's': settings_open(); break;
+    case 'h':
+    case '?': A.help = true; break;
+    }
+}
+
+// A tap = press and release on the same target without moving; moving more than a few
+// pixels turns it into a drag that scrolls the list under the finger.
+constexpr int DRAG_SLOP = 14;
+
+static void dispatch(const Hit &h) {
+    if (A.settings) {
+        switch (h.act) {
+        case H_FIELD: fsel = h.arg, inList = false; break;
+        case H_SRC: eSource = h.arg, fsel = ROW_SRC; break;
+        case H_NET: pick_network(h.arg); break;
+        case H_SAVE: settings_commit(); break;
+        case H_BACK: if (settings_ready()) A.settings = false; break;
+        case H_REVEAL: reveal = !reveal; break;
+        case H_RESCAN: net_request_scan(); break;
+        }
+        return;
+    }
+    if (A.detail) {
+        switch (h.act) {
+        case H_DCLOSE: A.detail = false; A.editAlias = A.newGroup = false; break;
+        case H_DALIAS:
+            A.editAlias = true, A.newGroup = false;
+            strlcpy(A.editBuf, M->detail.alias, sizeof A.editBuf);
+            break;
+        case H_DNEWGROUP: A.newGroup = true, A.editAlias = false, A.editBuf[0] = 0; break;
+        case H_DGROUP: detail_group(h.arg); break;
+        case H_DUNGROUP: detail_group(-1); break;
+        case H_DCOMP:
+            if (h.arg < M->detail.ncomp) {
+                char m[18];
+                strlcpy(m, M->detail.comp[h.arg].mac, sizeof m);
+                open_detail(m);
+            }
+            break;
+        case H_TAB: A.detail = false; A.view = (View)h.arg; break;
+        case H_SETUP: settings_open(); break;
+        case H_HELP: A.help = true; break;
+        default: break;
+        }
+        return;
+    }
+    switch (h.act) {
+    case H_TAB: A.view = (View)h.arg; A.searching = false; break;
+    case H_ROW:
+        // Tap a row to select it, tap it again for everything about it.
+        if (A.view == V_LIVE && A.sel[V_LIVE] == h.arg && nLive) open_detail(det_at(liveIdx[h.arg])->mac);
+        A.sel[A.view] = h.arg;
+        break;
+    case H_TARGET:
+        if (A.sel[V_TARGETS] == h.arg && nTgt) open_detail(M->targets[tgtIdx[h.arg]].mac);
+        A.sel[V_TARGETS] = h.arg;
+        break;
+    case H_DETAIL: {
+        const char *mac = selected_mac();
+        if (mac) open_detail(mac);
+        break;
+    }
+    case H_TGTMAP:
+        if (h.arg < nTgt) open_detail(M->targets[tgtIdx[h.arg]].mac);
+        break;
+    case H_DRONE: A.view = V_DRONES; A.sel[V_DRONES] = h.arg; break;
+    case H_DRONEMAP:
+        if (nDrone) {
+            const Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
+            if (d.hasPos) map_center_on(d.lat, d.lon);
+            else if (d.hasPilot) map_center_on(d.plat, d.plon);
+            A.mapZoom = max((int)A.mapZoom, 17);
+            A.view = V_MAP;
+        }
+        break;
+    case H_DRONETAG: drone_set_tag(h.arg); break;
+    case H_ZOOMIN: map_zoom(1); break;
+    case H_ZOOMOUT: map_zoom(-1); break;
+    case H_LAYER:
+        A.mapPrevLayer = A.mapLayer;
+        A.mapLayer = (A.mapLayer + 1) % NLAYERS;
+        maptiles_clear_requests();
+        toast("map: %s", LAYER_NAMES[A.mapLayer]);
+        break;
+    case H_FIT: A.mapFollow = false; map_fit(); maptiles_clear_requests(); break;
+    case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
+    case H_DOM:
+        A.dom = h.arg >= 0 ? h.arg : (A.dom + 1) % 3;
+        A.metricsGen++;
+        break;
+    case H_NODE: cycle_node(); break;
+    case H_SEARCH: A.searching = !A.searching; break;
+    case H_CLEAR:
+        A.search[0] = 0, A.dom = 0, A.node[0] = 0, A.searching = false;
+        A.metricsGen++;
+        break;
+    case H_RANGE:
+        A.range = h.arg;
+        A.metricsGen++;
+        break;
+    case H_ACK: alerts_ack(); toast("alerts acknowledged"); break;
+    case H_MUTE: {
+        const char *mac = selected_mac();
+        if (mac) {
+            char m[18];
+            strlcpy(m, mac, sizeof m);
+            mute_toggle(m);
+            toast(mac_muted(m) ? "muted %s" : "unmuted %s", m);
+        }
+        break;
+    }
+    case H_SILENCE:
+        M->muteAll = !M->muteAll;
+        if (M->muteAll) M->alertsUnacked = 0;
+        toast(M->muteAll ? "alerts silenced" : "alerts on");
+        break;
+    case H_HELP: A.help = true; break;
+    case H_SETUP: settings_open(); break;
+    case H_CLOSE: A.help = false; break;
+    }
+}
+
+static void apply_drag(int dx, int dy) {
+    const ScrollArea &a = T.area;
+    if (a.list == L_MAP) {
+        int z = A.mapZoom;
+        A.mapLon = x2lon(T.mx0 - dx, z);
+        A.mapLat = y2lat(T.my0 - dy, z);
+        A.mapFollow = false;
+        return;
+    }
+    if (a.list == L_NETS) {
+        netTop = T.top0 - (dy + (dy > 0 ? a.rowH / 2 : -a.rowH / 2)) / a.rowH;
+        return;
+    }
+    View v = (View)a.list;
+    if (v == V_TARGETS) {   // whole pages: a firm swipe turns one
+        int per = 9, pages = max(1, (nTgt + per - 1) / per);
+        int page = constrain(T.top0 + (dy < -70 ? 1 : dy > 70 ? -1 : 0), 0, pages - 1);
+        A.sel[V_TARGETS] = constrain(page * per + A.sel[V_TARGETS] % per, 0, max(0, nTgt - 1));
+        return;
+    }
+    int n = list_len(v);
+    int top = constrain(T.top0 - (dy + (dy > 0 ? a.rowH / 2 : -a.rowH / 2)) / a.rowH, 0, max(0, n - a.rows));
+    A.top[v] = top;
+    A.sel[v] = constrain(A.sel[v], top, max(top, min(n - 1, top + a.rows - 1)));   // keep the selection in view
+}
+
+void ui_press(int x, int y) {
+    to_canvas(x, y);
+    model_lock();
+    T = {};
+    T.down = true;
+    T.x0 = T.x = x, T.y0 = T.y = y;
+    T.scroll = -1;
+    for (int i = nhits - 1; i >= 0; i--)   // last drawn = on top
+        if (hits[i].in(x, y)) {
+            T.pressed = hits[i];
+            T.hasPressed = true;
+            break;
+        }
+    for (int i = 0; i < nscrolls; i++) {
+        const ScrollArea &a = scrolls[i];
+        if (x >= a.x && x < a.x + a.w && y >= a.y && y < a.y + a.h) {
+            T.scroll = i;
+            T.area = a;
+            T.top0 = a.list == L_NETS ? netTop : a.list == V_TARGETS ? A.sel[V_TARGETS] / 9 : a.list == L_MAP ? 0 : A.top[a.list];
+            if (a.list == L_MAP) T.mx0 = lon2x(A.mapLon, A.mapZoom), T.my0 = lat2y(A.mapLat, A.mapZoom);
+        }
+    }
+    if (A.help || A.settings) T.scroll = T.scroll >= 0 && T.area.list == L_NETS && A.settings ? T.scroll : -1;
+    if (A.detail) T.scroll = -1;
+    if (T.hasPressed) pressPaint = true;
+    model_unlock();
+}
+
+void ui_drag(int x, int y) {
+    if (!T.down) return;
+    to_canvas(x, y);
+    T.x = x, T.y = y;
+    int dx = x - T.x0, dy = y - T.y0;
+    if (!T.dragging && (abs(dx) > DRAG_SLOP || abs(dy) > DRAG_SLOP)) {
+        T.dragging = true;
+        T.hasPressed = false;   // it's a drag, not a tap: drop the pressed look
+        pressPaint = false;
+        dirty = true;
+    }
+    if (T.dragging && T.scroll >= 0) {
+        model_lock();
+        apply_drag(dx, dy);
+        model_unlock();
+        dirty = true;
+    }
+}
+
+void ui_release(int x, int y) {
+    if (!T.down) return;
+    to_canvas(x, y);
+    model_lock();
+    bool tap = !T.dragging && T.hasPressed && T.pressed.in(x, y);
+    Hit h = T.pressed;
+    T.down = false;
+    T.hasPressed = false;
+    pressPaint = false;
+    if (T.dragging && T.scroll >= 0 && T.area.list == L_MAP) maptiles_clear_requests();
+    // Double tap on the map: zoom in around that spot.
+    if (!T.dragging && !T.hasPressed && T.scroll >= 0 && T.area.list == L_MAP && A.view == V_MAP && !A.detail) {
+        static uint32_t lastTap = 0;
+        static int ltx = 0, lty = 0;
+        uint32_t ms = millis();
+        if (ms - lastTap < 350 && abs(x - ltx) < 60 && abs(y - lty) < 60) {
+            map_zoom_at(1, x, y);
+            lastTap = 0;
+        } else {
+            lastTap = ms, ltx = x, lty = y;
+        }
+    }
+    if (tap) {
+        flashHit = h;
+        flashUntil = millis() + 180;
+        if (A.help && h.act != H_CLOSE) A.help = false;
+        else dispatch(h);
+    }
+    dirty = true;
+    model_unlock();
+}
+
+void ui_frame() {
+    uint32_t now = millis();
+    bool alertShown = M->alertsUnacked && M->hasAlert && !M->muteAll;
+    static uint32_t lastDroneSeq = 0;
+    if (M->droneSeq != lastDroneSeq) {
+        bool boot = lastDroneSeq == 0 && !M->stateLoaded;
+        lastDroneSeq = M->droneSeq;
+        if (!boot && M->ndrones) {
+            toast("DRONE DETECTED  %d live", live_drones());
+            if (S.sound && !M->muteAll) M5.Speaker.tone(1800, 160);
+            dirty = true;
+        }
+    }
+    if (M->alertSeq != lastAlertSeq) {
+        lastAlertSeq = M->alertSeq;
+        alertFlashUntil = now + 1500;
+        if (S.sound && !M->muteAll && M->alertsUnacked) {
+            M5.Speaker.tone(3200, 110);
+        }
+    }
+    // Redraw on change, every second (ages, clock), faster while text cursors blink or an
+    // alert pulses: never more than ~12 fps.
+    if (pressPaint && !dirty) {   // instant pressed state: paint + push just that control
+        pressPaint = false;
+        model_lock();
+        Hit h = T.pressed;
+        bool ok = T.down && T.hasPressed;
+        if (ok) paint_pressed(h);
+        model_unlock();
+        if (ok) push_rect(h.x - 3, h.y - 3, h.w + 6, h.h + 6);
+        return;
+    }
+    bool anim = (T.down && T.dragging) || millis() < flashUntil || (mapAnimating && A.view == V_MAP);
+    bool pulse = live_drones() && (A.view == V_MAP || A.view == V_DRONES);
+    uint32_t period = anim ? 16 : A.otaActive ? 250 : alertShown ? 120 : pulse ? 150
+                    : (A.searching || A.settings || A.editAlias || A.newGroup) ? 500 : 1000;
+    if (A.settings && A.autoSetup && M->usbLive) {   // a node got plugged in: no setup needed
+        A.settings = false;
+        A.autoSetup = false;
+        dirty = true;
+    }
+    static uint32_t warmMs = 0;
+    if (now - warmMs > 1500 && !mapAnimating && !pinching) {
+        warmMs = now;
+        model_lock();
+        map_warm();
+        model_unlock();
+    }
+    if (!dirty && M->version == drawnVersion && now - drawnMs < period) return;
+    if (now - drawnMs < (anim ? 16 : 40)) return;
+    dirty = false;
+    model_lock();
+    nhits = 0;
+    nscrolls = 0;
+    drawnVersion = M->version;
+    drawnMs = now;
+    if (A.otaActive) {
+        draw_ota();
+    } else if (A.settings) {
+        draw_settings();
+    } else {
+        C.fillScreen(BG);
+        build_lists();
+        build_drones();
+        switch (A.view) {
+        case V_OVERVIEW: draw_overview(); break;
+        case V_FLEET: draw_fleet(); break;
+        case V_LIVE: draw_live(); break;
+        case V_TARGETS: draw_targets(); break;
+        case V_METRICS: draw_metrics(); break;
+        case V_MAP: draw_map(); break;
+        case V_DRONES: draw_drones(); break;
+        default: break;
+        }
+        if (A.detail) draw_detail();
+        draw_top();
+        draw_bottom();
+        if (A.help) draw_help();
+    }
+    // Touch feedback: the control under the finger fills while held, and flashes bright
+    // as the tap fires (fading over ~180 ms).
+    if (!A.otaActive) {
+        if (T.down && T.hasPressed) {
+            paint_pressed(T.pressed);
+        } else if (millis() < flashUntil) {
+            float f = (flashUntil - millis()) / 180.0f;
+            const Hit &h = flashHit;
+            tint_rect(h.x, h.y, h.w, h.h, ACCENT, (int)(110 * f));
+            glow_rect(h.x, h.y, h.w, h.h, 8, dim(ACCENT, 0.4f + 0.6f * f));
+        }
+    }
+    model_unlock();
+    uint32_t t1 = millis();
+    C.pushSprite(0, 0);
+    ui_drawMs = t1 - now;
+    ui_pushMs = millis() - t1;
+}
+
+// Two-finger pinch on the map: continuous zoom around the midpoint; on release it settles
+// to the nearest whole zoom level (where tiles are sharp).
+void ui_pinch(int phase, int x, int y, int dist) {
+    to_canvas(x, y);
+    model_lock();
+    if (A.view != V_MAP || A.detail || A.settings || A.help) {
+        model_unlock();
+        return;
+    }
+    static float z0 = 17;
+    static int d0 = 100;
+    T = {};   // whatever the first finger started is cancelled
+    if (phase == 0) {
+        pinching = true;
+        z0 = A.mapZoomF;
+        d0 = max(dist, 30);
+        ZA.on = true, ZA.x = x, ZA.y = y;
+        screen_to_ll(x, y, A.mapZoomF, ZA.lat, ZA.lon);
+        A.mapFollow = false;
+    } else if (phase == 1 && pinching) {
+        float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)ZMAX);
+        A.mapZoomF = z;
+        ZA.x = x, ZA.y = y;   // two-finger drag pans as it zooms
+    } else if (phase == 2) {
+        pinching = false;
+        A.mapZoom = constrain((int)lroundf(A.mapZoomF), ZMIN, ZMAX);
+        maptiles_clear_requests();
+    }
+    dirty = true;
+    model_unlock();
+}
