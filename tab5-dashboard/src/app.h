@@ -28,6 +28,8 @@ struct App {
     bool mapInit = false;       // centred once on the fleet
     bool mapFollow = false;     // keep the newest live drone centred
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
+    bool droneTracks = true;    // map: drone flight tracks
+    bool pilotOn = true;        // map: pilots, their track and the line to their drone
     bool layerMenu = false;     // the map layer dropdown is open
     char nodeEdit[7] = "";      // node settings panel open for this node id (long press)
     bool editNode = false;      // typing that node's alias

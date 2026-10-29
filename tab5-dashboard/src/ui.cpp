@@ -73,7 +73,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -856,13 +856,18 @@ void draw_map() {
         bool live = drone_live(d);
         if (!live && now - d.last > 1800) continue;
         uint16_t c = drone_color(d);
-        for (int p = 1; p < d.ntrack; p++) {
+        // Pilot track: dashed, in the drone's colour (mesh-mapper's pilot path).
+        if (A.pilotOn && A.droneTracks)
+            for (int p = 1; p < d.nptrack; p++)
+                dashed(sx(d.ptrack[p - 1][1]), sy(d.ptrack[p - 1][0]), sx(d.ptrack[p][1]), sy(d.ptrack[p][0]),
+                       dim(c, live ? 0.75f : 0.35f));
+        for (int p = 1; A.droneTracks && p < d.ntrack; p++) {
             int x0 = sx(d.track[p - 1][1]), y0 = sy(d.track[p - 1][0]), x1 = sx(d.track[p][1]), y1 = sy(d.track[p][0]);
             uint16_t tc = dim(c, (0.35f + 0.65f * p / d.ntrack) * (live ? 1.0f : 0.45f));
             C.drawLine(x0, y0, x1, y1, tc);
             C.drawLine(x0 + 1, y0, x1 + 1, y1, tc);
         }
-        if (d.hasPilot) {
+        if (d.hasPilot && A.pilotOn) {
             int px = sx(d.plon), py = sy(d.plat);
             if (d.hasPos) dashed(px, py, sx(d.lon), sy(d.lat), dim(c, live ? 0.9f : 0.45f));
             pilot_glyph(px, py, live ? c : dim(c, 0.35f));
@@ -931,7 +936,8 @@ void draw_map() {
     // Controls, right edge.
     struct { const char *t; uint8_t act; bool on; } btn[] = {
         {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false},
-        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}, {"TRI", H_TRI, A.triOn}};
+        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}, {"TRI", H_TRI, A.triOn},
+        {"TRACKS", H_TRACKS, A.droneTracks}, {"PILOT", H_PILOT, A.pilotOn}};
     int bw = 120, bh = 52, bx = W - PAD - bw, by = MY + 12;
     for (auto &k : btn) {
         hit(bx - 6, by - 4, bw + 12, bh + 8, k.act);
@@ -3400,6 +3406,8 @@ static void dispatch(const Hit &h) {
         break;
     case H_FIT: A.mapFollow = false; map_fit(); maptiles_clear_requests(); break;
     case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
+    case H_TRACKS: A.droneTracks = !A.droneTracks; toast(A.droneTracks ? "drone tracks on" : "drone tracks off"); break;
+    case H_PILOT: A.pilotOn = !A.pilotOn; toast(A.pilotOn ? "pilots on" : "pilots off"); break;
     case H_TRI: A.triOn = !A.triOn; toast(A.triOn ? "triangulation on: devices at their fix" : "triangulation off"); break;
     case H_DOM:
         A.dom = h.arg >= 0 ? h.arg : (A.dom + 1) % 3;

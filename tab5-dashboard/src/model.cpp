@@ -1,6 +1,7 @@
 #include "model.h"
 #include "settings.h"
 #include <M5GFX.h>
+#include <Preferences.h>
 
 Model *M = nullptr;
 static SemaphoreHandle_t lock_;
@@ -156,6 +157,60 @@ static uint8_t parse_seen(JsonArrayConst arr, Seen *out) {
 
 // ---------------------------------------------------------------- fleet
 
+// What the Tab5 has learned about each node (name, map position, colour), from the
+// dashboard or from the mesh: kept in NVS so a Tab5 fed only by a node on USB, with no
+// dashboard, still shows every node by name and on the map. RAM copy; flash is written
+// only when something changed.
+struct NodeMemo {
+    char id[7];
+    char alias[24];
+    double lat, lon;
+    int16_t hue;
+    bool hasPos;
+};
+static NodeMemo memo[MAX_NODES];
+static int nmemo = -1;
+static Preferences memoPrefs;
+
+static void memo_load() {
+    nmemo = 0;
+    if (!memoPrefs.begin("nodememo", false)) return;
+    size_t len = memoPrefs.getBytesLength("all");
+    if (len && len % sizeof(NodeMemo) == 0 && len <= sizeof memo) {
+        memoPrefs.getBytes("all", memo, len);
+        nmemo = len / sizeof(NodeMemo);
+    }
+}
+
+static void node_memo(Node &n) {
+    if (!n.id[0]) return;
+    if (nmemo < 0) memo_load();
+    NodeMemo *m = nullptr;
+    for (int i = 0; i < nmemo; i++)
+        if (!strcmp(memo[i].id, n.id)) m = &memo[i];
+    // Fill in what this update lacks from what we knew.
+    if (m) {
+        if (!n.alias[0] && m->alias[0]) strlcpy(n.alias, m->alias, sizeof n.alias);
+        if (!n.hasPos && m->hasPos) n.hasPos = true, n.lat = m->lat, n.lon = m->lon;
+        if (n.hue < 0 && m->hue >= 0) n.hue = m->hue;
+    }
+    // Remember what it adds.
+    bool changed = false;
+    if (!m && nmemo < MAX_NODES && (n.alias[0] || n.hasPos || n.hue >= 0)) {
+        m = &memo[nmemo++];
+        memset(m, 0, sizeof *m);
+        strlcpy(m->id, n.id, sizeof m->id);
+        m->hue = -1;
+        changed = true;
+    }
+    if (!m) return;
+    if (n.alias[0] && strcmp(m->alias, n.alias)) strlcpy(m->alias, n.alias, sizeof m->alias), changed = true;
+    if (n.hasPos && (!m->hasPos || fabs(m->lat - n.lat) > 1e-7 || fabs(m->lon - n.lon) > 1e-7))
+        m->hasPos = true, m->lat = n.lat, m->lon = n.lon, changed = true;
+    if (n.hue >= 0 && m->hue != n.hue) m->hue = n.hue, changed = true;
+    if (changed) memoPrefs.putBytes("all", memo, nmemo * sizeof(NodeMemo));
+}
+
 static void parse_node(Node &n, JsonObjectConst o) {
     memset(&n, 0, sizeof n);
     CPY(n.id, o["id"]);
@@ -195,6 +250,7 @@ static void parse_node(Node &n, JsonObjectConst o) {
         CPY(n.ota, ota["state"]);
         n.otaPct = ota["pct"] | 0;
     }
+    node_memo(n);
 }
 
 static void fleet_locked(JsonObjectConst f) {
@@ -654,17 +710,26 @@ static double hav_m(double a1, double o1, double a2, double o2) {
     return 6371000.0 * 2 * asin(sqrt(h));
 }
 
-static void drone_point(Drone *d) {
-    if (!d->hasPos) return;
-    if (d->ntrack && fabsf(d->track[d->ntrack - 1][0] - (float)d->lat) < 1e-6f &&
-        fabsf(d->track[d->ntrack - 1][1] - (float)d->lon) < 1e-6f) return;
-    if (d->ntrack == DRONE_TRACK) {
-        memmove(d->track[0], d->track[1], sizeof(d->track[0]) * (DRONE_TRACK - 1));
-        d->ntrack--;
+static void track_add(float (*tr)[2], uint8_t &n, double la, double lo) {
+    if (n && fabsf(tr[n - 1][0] - (float)la) < 1e-6f && fabsf(tr[n - 1][1] - (float)lo) < 1e-6f) return;
+    if (n == DRONE_TRACK) {
+        memmove(tr[0], tr[1], sizeof(tr[0]) * (DRONE_TRACK - 1));
+        n--;
     }
-    d->track[d->ntrack][0] = d->lat;
-    d->track[d->ntrack][1] = d->lon;
-    d->ntrack++;
+    tr[n][0] = la;
+    tr[n][1] = lo;
+    n++;
+}
+
+static void track_parse(float (*tr)[2], uint8_t &n, JsonArrayConst a) {   // [[ts, lat, lon], ...]
+    n = 0;
+    int skip = max(0, (int)a.size() - DRONE_TRACK), k = 0;
+    for (JsonArrayConst p : a) {
+        if (k++ < skip) continue;
+        tr[n][0] = p[1] | 0.0f;
+        tr[n][1] = p[2] | 0.0f;
+        n++;
+    }
 }
 
 // The dashboard's "drone" event (drones.py _public) and /api/state "drones".
@@ -704,20 +769,11 @@ void ingest_drone(JsonObjectConst o) {
     d->first = o["first"] | d->first;
     d->last = o["last"] | d->last;
     d->reports = o["reports"] | d->reports;
-    JsonArrayConst tr = o["track"];
-    if (!tr.isNull() && tr.size()) {
-        d->ntrack = 0;
-        int skip = max(0, (int)tr.size() - DRONE_TRACK);
-        int k = 0;
-        for (JsonArrayConst p : tr) {
-            if (k++ < skip) continue;
-            d->track[d->ntrack][0] = p[1] | 0.0f;
-            d->track[d->ntrack][1] = p[2] | 0.0f;
-            d->ntrack++;
-        }
-    } else {
-        drone_point(d);
-    }
+    JsonArrayConst tr = o["track"], ptr = o["ptrack"];
+    if (!tr.isNull() && tr.size()) track_parse(d->track, d->ntrack, tr);
+    else if (d->hasPos) track_add(d->track, d->ntrack, d->lat, d->lon);
+    if (!ptr.isNull() && ptr.size()) track_parse(d->ptrack, d->nptrack, ptr);
+    else if (d->hasPilot) track_add(d->ptrack, d->nptrack, d->plat, d->plon);
     clock_from(d->last);
     M->version++;
 }
@@ -760,7 +816,8 @@ void ingest_rid(JsonObjectConst o, const char *homeId) {
     if (hdg <= 360) d->hdg = hdg, d->hasHdg = true;
     d->vspd = o["vspd"] | 0.0f;
     d->pilotDist = d->hasPos && d->hasPilot ? (int32_t)hav_m(d->lat, d->lon, d->plat, d->plon) : -1;
-    drone_point(d);
+    if (d->hasPos) track_add(d->track, d->ntrack, d->lat, d->lon);
+    if (d->hasPilot) track_add(d->ptrack, d->nptrack, d->plat, d->plon);
     M->version++;
 }
 

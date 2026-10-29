@@ -123,6 +123,8 @@ struct Drone {
     uint32_t reports;
     uint8_t ntrack;
     float track[DRONE_TRACK][2];
+    uint8_t nptrack;
+    float ptrack[DRONE_TRACK][2];   // where the pilot stood/walked
 };
 
 // One device's full record, fetched when its detail page opens.

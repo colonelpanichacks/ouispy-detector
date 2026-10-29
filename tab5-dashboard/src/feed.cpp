@@ -368,8 +368,10 @@ void feed_task(void *) {
             lastStatus = ms;
             usb_send("status");
         }
-        bool isHome = !strcmp(localRole, "home");   // only a home can ask the others for status
-        if (isHome && (nn > knownNodes ? ms - lastRstatus > 20000 : ms - lastRstatus > 300000)) {
+        // Every node's status (name, firmware, filters) over the mesh, through whichever node
+        // is on USB: commands are signed with the fleet key, so a remote can ask as well as
+        // the home. Soon after a new node shows up, then every 5 min.
+        if (!lastRstatus || (nn > knownNodes ? ms - lastRstatus > 20000 : ms - lastRstatus > 300000)) {
             lastRstatus = ms;
             knownNodes = nn;
             usb_send("rstatus all");
