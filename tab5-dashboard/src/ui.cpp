@@ -9,6 +9,9 @@
 #include "feed.h"
 #include "maptiles.h"
 #include "gfx.h"
+#include "gps.h"
+#include "wd.h"
+#include "usbhost.h"
 #include "eye_art.h"
 #include "boards_art.h"
 #include <lgfx/v1/platforms/esp32p4/Panel_DSI.hpp>
@@ -73,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -332,12 +335,94 @@ bool icontains(const char *hay, const char *needle) {
     return false;
 }
 
+// Which firmware a node runs (its build stamp suffix): 0 detector, 1 Sky-Spy, 2 wardriver.
+int node_kind(const Node &n) {
+    size_t l = strlen(n.fw);
+    char c = l ? n.fw[l - 1] : 0;
+    return c == 'S' ? 1 : c == 'W' ? 2 : 0;
+}
+const char *KIND_NAME[3] = {"DETECTOR", "SKY-SPY", "WARDRIVER"};
+uint16_t kind_color(int k) { return k == 1 ? PINK : k == 2 ? rgb(0xff2bd6) : SKY; }
+
+// A little house: marks the home node next to its firmware type.
+void home_icon(int x, int y, uint16_t c) {   // x, y = bottom-left
+    C.fillTriangle(x, y - 9, x + 9, y - 17, x + 18, y - 9, c);
+    C.fillRect(x + 3, y - 9, 12, 9, c);
+    C.fillRect(x + 7, y - 5, 4, 5, BG);
+}
+
+// "DETECTOR" / "SKY-SPY" / "WARDRIVER", with the house in front for the home.
+int kind_label(int x, int y, const Node &n) {   // y = middle; returns the width
+    int k = node_kind(n), w = 0;
+    uint16_t c = n.isHome ? ACCENT : kind_color(k);
+    if (n.isHome) home_icon(x, y + 8, c), w = 26;
+    text(x + w, y, KIND_NAME[k], c, middle_left);
+    return w + C.textWidth(KIND_NAME[k]);
+}
+
+bool ota_busy(const Node &n) {
+    return !strcmp(n.ota, "offered") || !strcmp(n.ota, "sending") || !strcmp(n.ota, "running") ||
+           !strcmp(n.ota, "verifying") || !strcmp(n.ota, "staging");
+}
+
+// Firmware updates in flight: a strip at the bottom of Overview and Fleet, one bar per
+// node, flowing blue to pink.
+int ota_strip_h() {
+    int k = 0;
+    for (int i = 0; i < M->nnodes; i++) k += ota_busy(M->nodes[i]);
+    return k ? 16 + min(k, 3) * 44 : 0;
+}
+void draw_ota_strip() {
+    int h = ota_strip_h();
+    if (!h) return;
+    int y = CB - h, x = PAD, w = W - 2 * PAD;
+    fast_round(x, y, w, h, 10, PANEL);
+    glow_rect(x, y, w, h, 10, dim(PINK, 0.8f));
+    int ry = y + 10, shown = 0;
+    for (int i = 0; i < M->nnodes && shown < 3; i++) {
+        const Node &n = M->nodes[i];
+        if (!ota_busy(n)) continue;
+        shown++;
+        font(F_SM);
+        char l[96];
+        bool verify = !strcmp(n.ota, "verifying");
+        snprintf(l, sizeof l, "FIRMWARE  %s  %s", n.alias[0] ? n.alias : n.id,
+                 verify ? "restarting into the new build" : !strcmp(n.ota, "offered") ? "waiting for the node" : "sending over the mesh");
+        text(x + 16, ry + 6, l, TEXT, middle_left);
+        char pc[8];
+        snprintf(pc, sizeof pc, "%d%%", n.otaPct);
+        font(F_MD);
+        text(x + w - 16, ry + 6, pc, PINK, middle_right);
+        int bx = x + 16, bw = w - 32, by = ry + 18, bh = 10;
+        C.fillRoundRect(bx, by, bw, bh, 5, PANEL2);
+        int fw = bw * constrain((int)n.otaPct, 0, 100) / 100;
+        for (int px = 0; px < fw; px += 4) {   // gradient fill, a shine that moves along it
+            float t = (float)px / bw;
+            uint16_t c = lgfx::color565(77 + (int)(178 * t), 163 - (int)(120 * t), 255 - (int)(41 * t));
+            float shine = fmodf(millis() / 900.0f, 1.0f);
+            if (fabsf(t - shine) < 0.04f) c = TEXT;
+            C.fillRect(bx + px, by, min(4, fw - px), bh, c);
+        }
+        if (verify) C.drawRoundRect(bx, by, bw, bh, 5, dim(ACCENT, 0.8f));
+        ry += 44;
+    }
+}
+
 bool det_match(const Det *d) {
     if (A.dom == 1 && strcmp(d->dom, "ble")) return false;
     if (A.dom == 2 && strcmp(d->dom, "wifi")) return false;
     if (A.node[0]) {
         bool by = !strcmp(d->node, A.node);
         for (int i = 0; i < d->nseen && !by; i++) by = !strcmp(d->seen[i].node, A.node);
+        if (!by) return false;
+    }
+    if (A.kindFilter) {   // only what nodes of one firmware type heard
+        const Node *dn = node_by_id(d->node);
+        bool by = dn && node_kind(*dn) == A.kindFilter - 1;
+        for (int i = 0; i < d->nseen && !by; i++) {
+            const Node *sn = node_by_id(d->seen[i].node);
+            by = sn && node_kind(*sn) == A.kindFilter - 1;
+        }
         if (!by) return false;
     }
     if (!A.search[0]) return true;
@@ -372,10 +457,19 @@ void build_lists() {
     std::sort(tgtIdx, tgtIdx + nTgt, [](int a, int b) { return M->targets[a].last > M->targets[b].last; });
 }
 
+// Live with the node filter on a wardriver: the list is its wardriven networks and devices.
+int wdN = 0;
+int *wdIdx = nullptr;
+bool live_is_wardrive() {
+    if (A.kindFilter == 3) return true;   // "WARDRIVERS"
+    const Node *fn = A.node[0] ? node_by_id(A.node) : nullptr;
+    return fn && node_is_wardriver(*fn);
+}
+
 int list_len(View v) {
     switch (v) {
     case V_FLEET: return M->nnodes;
-    case V_LIVE: return nLive;
+    case V_LIVE: return live_is_wardrive() ? wdN : nLive;
     case V_TARGETS: return nTgt;
     case V_DRONES: return nDrone;
     default: return 0;
@@ -602,7 +696,7 @@ void map_zoom_at(int dz, int x, int y) {
     ZA.on = true, ZA.x = x, ZA.y = y;
     screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
     A.mapZoom = nz;
-    A.mapFollow = false;
+    A.mapFollow = false, A.gpsFollow = false;
     maptiles_clear_requests();
 }
 
@@ -639,6 +733,10 @@ void draw_map() {
                                                                  : "waiting for the dashboard", FAINT, middle_center);
             return;
         }
+    }
+    if (A.gpsFollow) {   // our own GPS position stays centred
+        GpsFix gf = gps_fix();
+        if (gf.valid) A.mapLat = gf.lat, A.mapLon = gf.lon;
     }
     if (A.mapFollow) {
         for (int k = 0; k < nDrone; k++) {
@@ -893,6 +991,47 @@ void draw_map() {
             hit(x - 24, y - 24, 48, 48, H_DRONE, k);
         }
     }
+    // Wardriven devices: one dot each where it was loudest, coloured like the web map
+    // (WiFi by security, BLE pink); this session or all history.
+    if (A.wdScope) {
+        static const uint32_t SECC[6] = {0x39ff88, 0xff4d6d, 0xffb020, 0x22d3ee, 0xa78bfa, 0xa78bfa};
+        int drawn = 0;
+        for (int i = 0, n = wd_count(); i < n && drawn < 5000; i++) {
+            const WdDev &d = wd_at(i);
+            if (!d.placed || (A.wdScope == 1 && !d.session)) continue;
+            int x = sx(d.lon), y = sy(d.lat);
+            if (x < MX - 4 || x > MX + MW + 4 || y < MY - 4 || y > MY + MH + 4) continue;
+            uint16_t c = d.kind == 2 ? rgb(0xff2bd6) : rgb(d.sec < 6 ? SECC[d.sec] : 0x7dd3fc);
+            if (d.kind == 2) C.fillRect(x - 2, y - 2, 5, 5, c);
+            else C.fillCircle(x, y, 3, c);
+            drawn++;
+        }
+    }
+    // Us: where the Tab5 is (GPS), its trail, the fix's accuracy and which way we move.
+    {
+        GpsFix gf = gps_fix();
+        static float tr[GPS_TRAIL][2];
+        int nt = gps_trail(tr, GPS_TRAIL);
+        uint16_t me = rgb(0x4da3ff);
+        for (int p = 1; p < nt; p++)
+            C.drawLine(sx(tr[p - 1][1]), sy(tr[p - 1][0]), sx(tr[p][1]), sy(tr[p][0]), dim(me, 0.3f + 0.6f * p / nt));
+        if (gf.valid) {
+            int x = sx(gf.lon), y = sy(gf.lat);
+            double mpp = 156543.03392 * cos(gf.lat * M_PI / 180) / pow(2.0, zf);
+            int r = (int)(gf.acc / mpp);
+            if (r > 12 && r < 1400) C.drawCircle(x, y, r, dim(me, 0.6f));
+            C.fillCircle(x, y, 11, BG);
+            C.fillCircle(x, y, 9, me);
+            C.drawCircle(x, y, 12, TEXT);
+            if (gf.speed > 0.8f) {
+                float a = gf.course * M_PI / 180;
+                C.fillTriangle(x + sinf(a) * 24, y - cosf(a) * 24, x + sinf(a + 2.5f) * 12, y - cosf(a + 2.5f) * 12,
+                               x + sinf(a - 2.5f) * 12, y - cosf(a - 2.5f) * 12, me);
+            }
+            font(F_SM);
+            map_text(x + 18, y, "YOU", me);
+        }
+    }
     C.clearClipRect();
     uint32_t q5 = micros();
 
@@ -917,7 +1056,7 @@ void draw_map() {
     int ld = live_drones();
     if (!online) snprintf(b, sizeof b, "map tiles come from the dashboard (Wi-Fi)");
     else if (missing) snprintf(b, sizeof b, "loading %d tiles   %d drone%s live", missing, ld, ld == 1 ? "" : "s");
-    else snprintf(b, sizeof b, "%u tiles in memory   %d drone%s live", (unsigned)maptiles_cached(), ld, ld == 1 ? "" : "s");
+    else snprintf(b, sizeof b, "%u tiles   %d drone%s live   %s", (unsigned)maptiles_cached(), ld, ld == 1 ? "" : "s", gps_state());
     text(ix + 14, iy + 46, b, online ? MUTED : AMBER, middle_left);
     if (A.layerMenu) {
         int ly = iy + ih + 6, lh = 52;
@@ -937,7 +1076,9 @@ void draw_map() {
     struct { const char *t; uint8_t act; bool on; } btn[] = {
         {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false},
         {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}, {"TRI", H_TRI, A.triOn},
-        {"TRACKS", H_TRACKS, A.droneTracks}, {"PILOT", H_PILOT, A.pilotOn}};
+        {"TRACKS", H_TRACKS, A.droneTracks}, {"PILOT", H_PILOT, A.pilotOn},
+        {A.wdScope == 2 ? "WD ALL" : A.wdScope == 1 ? "WD NOW" : "WD OFF", H_WD, A.wdScope > 0},
+        {"ME", H_ME, A.gpsFollow}};
     int bw = 120, bh = 52, bx = W - PAD - bw, by = MY + 12;
     for (auto &k : btn) {
         hit(bx - 6, by - 4, bw + 12, bh + 8, k.act);
@@ -1404,7 +1545,7 @@ void draw_node_editor() {
     size_t fl = strlen(n->fw);
     bool sky = fl && n->fw[fl - 1] == 'S';
     char sub[120];
-    snprintf(sub, sizeof sub, "%s   %s   %s   fw %s   up %s", n->id, n->isHome ? "HOME" : sky ? "SKY-SPY" : "REMOTE",
+    snprintf(sub, sizeof sub, "%s   %s%s   %s   fw %s   up %s", n->id, n->isHome ? "HOME, " : "", KIND_NAME[node_kind(*n)],
              n->online ? "online" : "OFFLINE", n->fw[0] ? n->fw : "?", n->up ? dur_str(n->up) : "-");
     text(x + 24, y + 62, sub, MUTED, middle_left);
     int cw;
@@ -1463,6 +1604,72 @@ void draw_node_editor() {
     bool armed = A.rebootArm && millis() - A.rebootArm < 3000;
     chip(bx, yy, armed ? "TAP AGAIN TO REBOOT" : "REBOOT", RED, armed, &cw, can ? H_NREBOOT : -1);
     yy += 56;
+    // Find it by ear, and which firmware it runs (any of the three, over the mesh).
+    {
+        font(F_SM);
+        text(lx, yy, "FIND IT", dim(ACCENT, 0.9f));
+        int fx = lx + C.textWidth("FIND IT") + 16;
+        bool loc = !strcmp(A.locateId, n->id);
+        chip(fx, yy - 8, "BEEP 3X", AMBER, false, &cw, can ? H_NBEEP : -1);
+        fx += cw + 10;
+        chip(fx, yy - 8, loc ? "LOCATE BEEP ON" : "LOCATE BEEP", AMBER, loc, &cw, can ? H_NLOCATE : -1);
+        fx += cw + 40;
+        font(F_SM);
+        text(fx, yy, "FIRMWARE", dim(ACCENT, 0.9f));
+        fx += C.textWidth("FIRMWARE") + 16;
+        static const char *FWK[] = {"DETECTOR", "SKY-SPY", "WARDRIVER"};
+        int cur = node_is_wardriver(*n) ? 2 : sky ? 1 : 0;
+        bool armedFw = A.fwArm >= 0 && millis() - A.fwArmMs < 4000;
+        for (int k = 0; k < 3; k++) {
+            char lbl[32];
+            if (armedFw && A.fwArm == k) snprintf(lbl, sizeof lbl, "TAP TO INSTALL %s", FWK[k]);
+            else strlcpy(lbl, FWK[k], sizeof lbl);
+            chip(fx, yy - 8, lbl, k == cur ? ACCENT : (armedFw && A.fwArm == k ? RED : SKY), k == cur || (armedFw && A.fwArm == k),
+                 &cw, can ? H_NFW : -1, k);
+            fx += cw + 8;
+        }
+        yy += 48;
+        if (n->ota[0]) {   // its last / current firmware update
+            font(F_SM);
+            char os[96];
+            bool busy = ota_busy(*n);
+            snprintf(os, sizeof os, "FIRMWARE UPDATE  %s  %d%%", !strcmp(n->ota, "verifying") ? "restarting into the new build" : n->ota,
+                     n->otaPct);
+            uint16_t oc = !strcmp(n->ota, "failed") ? RED : busy ? PINK : ACCENT;
+            text(lx, yy, os, oc, middle_left);
+            int bx = lx + 380, bw = fwid - 380;
+            C.fillRoundRect(bx, yy - 5, bw, 10, 5, PANEL2);
+            C.fillRoundRect(bx, yy - 5, max(10, bw * constrain((int)n->otaPct, 0, 100) / 100), 10, 5, oc);
+            yy += 30;
+        }
+    }
+    // A wardriver: its switches. Straight down our USB when it is the node on it, else
+    // through the dashboard (and the mesh).
+    if (node_is_wardriver(*n)) {
+        bool direct = !strcmp(n->id, usb_node_id()) && usb_live();
+        bool wcan = direct || can;
+        font(F_SM);
+        char wt[96];
+        snprintf(wt, sizeof wt, "WARDRIVER   %lu access points, %lu Bluetooth since boot", (unsigned long)n->wdWifi,
+                 (unsigned long)n->wdBle);
+        text(lx, yy, wt, dim(PINK, 0.95f));
+        yy += 22;
+        int wx = lx;
+        font(F_SM);
+        text(wx, yy + 15, "CHANNELS", MUTED, middle_left);
+        wx += C.textWidth("CHANNELS") + 12;
+        static const char *CH[] = {"1-11", "all", "1,6,11", "1-6", "7-11", "1", "6", "11"};
+        static const char *CHL[] = {"1-11 HOP", "1-13 HOP", "1/6/11", "1-6", "7-11", "CH 1", "CH 6", "CH 11"};
+        for (int i = 0; i < 8; i++) {
+            bool on = !strcmp(n->wdCh, CH[i]) || (i == 1 && !strcmp(n->wdCh, "1-13"));
+            int tw;
+            font(F_SM);
+            if (wx + C.textWidth(CHL[i]) + 28 > lx + fwid) wx = lx + 180, yy += 44;
+            chip(wx, yy, CHL[i], SKY, on, &tw, wcan ? H_NWDCH : -1, i);
+            wx += tw + 8;
+        }
+        yy += 56;
+    }
     // What it reports
     font(F_SM);
     text(lx, yy, "STATUS", dim(ACCENT, 0.9f));
@@ -1850,8 +2057,9 @@ void draw_overview() {
         text(PAD + 30, ry + 6, fit_name(n.alias[0] ? n.alias : n.id, 220), n.online ? TEXT : MUTED);
         font(F_SM);
         char l2[64];
-        snprintf(l2, sizeof l2, "%s  %s  fw %s", n.id, n.isHome ? "HOME" : "REMOTE", n.fw[0] ? n.fw : "?");
-        text(PAD + 30, ry + 40, l2, FAINT);
+        int kw = kind_label(PAD + 30, ry + 46, n);
+        snprintf(l2, sizeof l2, "%s   fw %s", n.id, n.fw[0] ? n.fw : "?");
+        text(PAD + 30 + kw + 12, ry + 46, l2, FAINT, middle_left);
         // Status + RSSI on the right.
         int rx = PAD + fw - 16;
         const char *st = n.online ? "ONLINE" : "OFFLINE";
@@ -1929,6 +2137,7 @@ void draw_overview() {
         text(bx, by + 6, "-24h", FAINT);
         text(bx + bw * n, by + 6, "now", FAINT, top_right);
     }
+    draw_ota_strip();   // firmware updates in flight, on top
 }
 
 // ------------------------------------------------------------------ FLEET
@@ -1964,7 +2173,8 @@ void draw_fleet() {
         font(F_MD);
         size_t fl = strlen(n.fw);
         bool sky = fl && n.fw[fl - 1] == 'S';   // a dedicated Sky-Spy drone node (build stamp suffix)
-        text(cx[1], my, n.isHome ? "HOME" : sky ? "SKY-SPY" : "REMOTE", n.isHome ? ACCENT : sky ? PINK : SKY, middle_left);
+        (void)sky;
+        kind_label(cx[1], my, n);
         dot(cx[2] + 6, my, 5, n.online ? ACCENT : RED);
         text(cx[2] + 20, my - 8, n.online ? "ONLINE" : "OFFLINE", n.online ? ACCENT : RED, middle_left);
         font(F_SM);
@@ -2036,6 +2246,7 @@ void draw_fleet() {
     snprintf(l, sizeof l, "rate %s   ch %d   %s   via %s   up %s", hm.rate[0] ? hm.rate : "?", hm.ch,
              hm.enc ? "encrypted" : "PLAINTEXT", hm.source[0] ? hm.source : "?", dur_str(hm.up));
     text(hx + 16, dy + dh - 24, l, hm.enc ? MUTED : AMBER);
+    draw_ota_strip();   // firmware updates in flight, on top
 }
 
 // ------------------------------------------------------------------ LIVE / TARGETS filter row
@@ -2070,8 +2281,11 @@ void draw_filter_row(int y, int shown, int total) {
     text(x, y + sh / 2, "N", FAINT, middle_left);
     x += 16;
     chip(x, y + 4, A.node[0] ? node_name(A.node) : "ALL NODES", A.node[0] ? node_color565(A.node) : ACCENT, true, &w, H_NODE);
+    x += w + 8;
+    static const char *KF[] = {"ALL TYPES", "DETECTORS", "SKY-SPY", "WARDRIVERS"};
+    chip(x, y + 4, KF[A.kindFilter % 4], A.kindFilter ? kind_color(A.kindFilter - 1) : ACCENT, A.kindFilter != 0, &w, H_KIND);
     x += w + 16;
-    if (A.search[0] || A.dom || A.node[0]) chip(x, y + 4, "CLEAR", AMBER, false, &w, H_CLEAR);
+    if (A.search[0] || A.dom || A.node[0] || A.kindFilter) chip(x, y + 4, "CLEAR", AMBER, false, &w, H_CLEAR);
     char c[32];
     snprintf(c, sizeof c, "%d of %d", shown, total);
     font(F_MD);
@@ -2094,7 +2308,72 @@ void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows)
 
 // ------------------------------------------------------------------ LIVE
 
+void draw_live_wardrive() {
+    if (!wdIdx) wdIdx = (int *)heap_caps_malloc(WD_MAX * sizeof(int), MALLOC_CAP_SPIRAM);
+    if (!wdIdx) return;
+    wdN = 0;
+    for (int i = 0, n = wd_count(); i < n; i++)
+        if (wd_at(i).session) wdIdx[wdN++] = i;
+    std::sort(wdIdx, wdIdx + wdN, [](int a, int b) { return wd_at(a).last > wd_at(b).last; });
+    draw_filter_row(CY, wdN, wd_count());
+    int ty = CY + 50, rh = 34, rows = (CB - ty - 40) / rh, th = 34 + rows * rh + 6;
+    panel(PAD, ty, W - 2 * PAD, th, nullptr);
+    clamp_sel(V_LIVE, rows);
+    const int cAge = PAD + 18, cName = PAD + 90, cMac = PAD + 430, cType = PAD + 670, cSec = PAD + 790,
+              cCh = PAD + 920, cRssi = PAD + 980, cPos = PAD + 1130;
+    font(F_SM);
+    char hdr[64];
+    snprintf(hdr, sizeof hdr, "WARDRIVE THIS SESSION   %lu APs   %lu BLE", (unsigned long)wd_session_count(1),
+             (unsigned long)wd_session_count(2));
+    text(PAD + W - 2 * PAD - 18, ty + 12, hdr, PINK, top_right);
+    text(cAge, ty + 12, "AGE", FAINT);
+    text(cName, ty + 12, "NAME / SSID", FAINT);
+    text(cMac, ty + 12, "MAC", FAINT);
+    text(cType, ty + 12, "TYPE", FAINT);
+    text(cSec, ty + 12, "SECURITY", FAINT);
+    text(cCh, ty + 12, "CH", FAINT);
+    text(cRssi, ty + 12, "BEST", FAINT);
+    text(cPos, ty + 12, "MAP", FAINT);
+    static const char *SEC[] = {"open", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
+    static const uint32_t SECC[6] = {0x39ff88, 0xff4d6d, 0xffb020, 0x22d3ee, 0xa78bfa, 0xa78bfa};
+    int ry = ty + 34;
+    scroll_area(PAD, ry, W - 2 * PAD, rows * rh, V_LIVE, rh, rows);
+    double now = server_now();
+    for (int k = 0; k < rows; k++, ry += rh) {
+        int li = A.top[V_LIVE] + k;
+        if (li >= wdN) break;
+        const WdDev &d = wd_at(wdIdx[li]);
+        if (k & 1) C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, PANEL2);
+        int my = ry + rh / 2;
+        uint16_t c = d.kind == 2 ? rgb(0xff2bd6) : rgb(d.sec < 6 ? SECC[d.sec] : 0x7dd3fc);
+        font(F_MD);
+        text(cAge, my, age_str(d.last ? d.last : now), MUTED, middle_left);
+        const char *nm = d.name[0] ? d.name : d.kind == 1 ? "(hidden network)" : "BLE device";
+        text(cName, my, fit_name(nm, 320), d.name[0] ? TEXT : FAINT, middle_left);
+        char mac[18];
+        snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+        font(F_MONO_S);
+        text(cMac, my, mac, SOFT, middle_left);
+        font(F_MD);
+        text(cType, my, d.kind == 1 ? "WIFI AP" : "BLE", c, middle_left);
+        text(cSec, my, d.kind == 1 && d.sec < 6 ? SEC[d.sec] : "-", d.kind == 1 ? c : FAINT, middle_left);
+        char ch[6];
+        snprintf(ch, sizeof ch, "%u", d.ch);
+        text(cCh, my, d.kind == 1 && d.ch ? ch : "-", MUTED, middle_left);
+        rssi_bar(cRssi, my - 4, 70, 8, d.rssi, rssi_color(d.rssi));
+        char r[8];
+        snprintf(r, sizeof r, "%d", d.rssi);
+        text(cRssi + 78, my, r, rssi_color(d.rssi), middle_left);
+        text(cPos, my, d.placed ? "yes" : "no GPS", d.placed ? ACCENT : FAINT, middle_left);
+    }
+    if (!wdN) {
+        font(F_MD);
+        text(W / 2, ty + th / 2, "nothing wardriven this session yet", FAINT, middle_center);
+    }
+}
+
 void draw_live() {
+    if (live_is_wardrive()) { draw_live_wardrive(); return; }
     draw_filter_row(CY, nLive, M->ndets);
     int ty = CY + 50, rows = 10, rh = 34, th = 34 + rows * rh + 6;
     panel(PAD, ty, W - 2 * PAD, th, nullptr);
@@ -3168,7 +3447,7 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         if (ch == '+' || ch == '=') { map_zoom(1); return; }
         if (ch == '-' || ch == '_') { map_zoom(-1); return; }
         if (ch == 'l' || ch == 'L') { A.mapPrevLayer = A.mapLayer; A.mapLayer = (A.mapLayer + 1) % NLAYERS; maptiles_clear_requests(); return; }
-        if (ch == 'z' || ch == 'Z') { A.mapFollow = false; map_fit(); maptiles_clear_requests(); return; }
+        if (ch == 'z' || ch == 'Z') { A.mapFollow = false, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); return; }
         if (ch == 'o' || ch == 'O') { A.mapFollow = !A.mapFollow; return; }
         if (kc == 0x52 || kc == 0x51) {   // Up / Down pan; Left / Right still switch views
             double y = lat2y(A.mapLat, A.mapZoom) + (kc == 0x52 ? -200 : 200);
@@ -3318,6 +3597,52 @@ static void dispatch(const Hit &h) {
                 A.rebootArm = millis();
             }
             break;
+        case H_NBEEP:
+            node_cmd(id, "locate", "{\"mode\":1}");
+            toast("%s: beep 3 times", id);
+            break;
+        case H_NLOCATE: {
+            bool on = strcmp(A.locateId, id) != 0;
+            if (on && A.locateId[0]) node_cmd(A.locateId, "locate", "{\"mode\":0}");   // one at a time
+            node_cmd(id, "locate", on ? "{\"mode\":2}" : "{\"mode\":0}");
+            strlcpy(A.locateId, on ? id : "", sizeof A.locateId);
+            toast(on ? "%s: beeping until you stop it" : "%s: locate beep off", id);
+            break;
+        }
+        case H_NFW: {
+            static const char *KIND[] = {"detector", "skyspy", "wardrive"};
+            int k = constrain((int)h.arg, 0, 2);
+            if (A.fwArm == k && millis() - A.fwArmMs < 4000) {
+                char args[40];
+                snprintf(args, sizeof args, "{\"kind\":\"%s\"}", KIND[k]);
+                node_cmd(id, "fw_install", args);
+                toast("%s: installing %s firmware over the mesh", id, KIND[k]);
+                A.fwArm = -1;
+            } else {
+                A.fwArm = k;
+                A.fwArmMs = millis();
+            }
+            break;
+        }
+        case H_NWDON:
+        case H_NWDCH: {
+            static const char *CH[] = {"1-11", "all", "1,6,11", "1-6", "7-11", "1", "6", "11"};
+            const Node *wn = edit_node();
+            char words[24], args[48];
+            if (h.act == H_NWDON) {
+                bool on = !wn || wn->wdOn == 0;
+                snprintf(words, sizeof words, "wd %s", on ? "on" : "off");
+                snprintf(args, sizeof args, "{\"on\":%s}", on ? "true" : "false");
+            } else {
+                const char *c = CH[constrain((int)h.arg, 0, 7)];
+                snprintf(words, sizeof words, "wd ch %s", c);
+                snprintf(args, sizeof args, "{\"ch\":\"%s\"}", c);
+            }
+            if (!strcmp(id, usb_node_id()) && usb_live()) usb_send(words);   // on our USB: straight to it
+            else node_cmd(id, "wardrive", args);
+            toast("%s: %s", id, words + 3);
+            break;
+        }
         case H_TAB: A.nodeEdit[0] = 0; A.view = (View)h.arg; break;
         default: break;
         }
@@ -3404,8 +3729,20 @@ static void dispatch(const Hit &h) {
             strlcpy(A.editBuf, M->drones[droneIdx[A.sel[V_DRONES]]].alias, sizeof A.editBuf);
         }
         break;
-    case H_FIT: A.mapFollow = false; map_fit(); maptiles_clear_requests(); break;
+    case H_FIT: A.mapFollow = false, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); break;
     case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
+    case H_WD:
+        A.wdScope = (A.wdScope + 1) % 3;
+        toast(A.wdScope == 2 ? "wardrive: all history" : A.wdScope == 1 ? "wardrive: this session" : "wardrive off");
+        break;
+    case H_ME: {
+        GpsFix gf = gps_fix();
+        A.gpsFollow = !A.gpsFollow;
+        if (A.gpsFollow && !gf.valid) toast(gps_present() ? "following you once the GPS has a fix" : "no GPS on the Grove port");
+        else if (A.gpsFollow) { A.mapFollow = false; A.mapLat = gf.lat, A.mapLon = gf.lon; toast("following you"); }
+        else toast("follow off");
+        break;
+    }
     case H_TRACKS: A.droneTracks = !A.droneTracks; toast(A.droneTracks ? "drone tracks on" : "drone tracks off"); break;
     case H_PILOT: A.pilotOn = !A.pilotOn; toast(A.pilotOn ? "pilots on" : "pilots off"); break;
     case H_TRI: A.triOn = !A.triOn; toast(A.triOn ? "triangulation on: devices at their fix" : "triangulation off"); break;
@@ -3414,9 +3751,10 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
+    case H_KIND: A.kindFilter = (A.kindFilter + 1) % 4; A.metricsGen++; break;
     case H_SEARCH: A.searching = !A.searching; break;
     case H_CLEAR:
-        A.search[0] = 0, A.dom = 0, A.node[0] = 0, A.searching = false;
+        A.search[0] = 0, A.dom = 0, A.node[0] = 0, A.searching = false, A.kindFilter = 0;
         A.metricsGen++;
         break;
     case H_RANGE:
@@ -3450,7 +3788,7 @@ static void apply_drag(int dx, int dy) {
     if (a.list == L_MAP) {
         A.mapLon = x2lonf(T.mx0 - dx, gZoomShown);
         A.mapLat = y2latf(T.my0 - dy, gZoomShown);
-        A.mapFollow = false;
+        A.mapFollow = false, A.gpsFollow = false;
         return;
     }
     if (a.list == L_NETS) {
@@ -3707,7 +4045,7 @@ void ui_pinch(int phase, int x, int y, int dist, uint32_t ms) {
         hn = 0;
         ZA.on = true, ZA.x = x, ZA.y = y;
         screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
-        A.mapFollow = false;
+        A.mapFollow = false, A.gpsFollow = false;
     } else if (phase == 1 && pinching) {
         float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)zmax_layer());
         A.mapZoomF = z;

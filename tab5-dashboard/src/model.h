@@ -50,7 +50,12 @@ struct Node {
     bool hasPos;
     uint8_t nnbr;
     Seen nbr[MAX_SEEN];    // its mesh neighbours (age field holds the hop flag)
+    // A wardriver (build stamp ends in W): its switches and what it has heard since boot.
+    int8_t wdOn;           // -1 not known
+    char wdCh[24];         // channel plan, "1-11", "6", "1,6,11"
+    uint32_t wdWifi, wdBle;
 };
+inline bool node_is_wardriver(const Node &n) { size_t l = strlen(n.fw); return l && n.fw[l - 1] == 'W'; }
 
 struct Home {
     char id[7];

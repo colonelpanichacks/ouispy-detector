@@ -6,6 +6,8 @@
 #include "settings.h"
 #include "usbhost.h"
 #include "net.h"
+#include "gps.h"
+#include "wd.h"
 
 namespace {
 
@@ -140,6 +142,16 @@ void publish_fleet() {
         o["id"] = n.id;
         o["role"] = isHome ? "home" : n.role;
         o["online"] = isLocal ? (bool)home["alive"] : n.online;
+        if (isLocal && tlm.length() && strstr(tlm.c_str(), "\"kind\":\"wardrive\"")) {
+            JsonDocument t(&psram);   // our own USB node is a wardriver: its switches for the editor
+            if (!deserializeJson(t, tlm)) {
+                JsonObject w = o["tlm"].to<JsonObject>();
+                w["wdon"] = t["wdon"] | 0;
+                w["wdch"] = t["wdch"] | "";
+                w["wd"] = t["wd"];
+                w["kind"] = "wardrive";
+            }
+        }
         o["is_home"] = isHome;
         if (n.rssi) o["rssi"] = n.rssi;
         o["age"] = n.lastSeen ? now - n.lastSeen : -1;
@@ -308,6 +320,23 @@ void on_line(char *line) {
     while (n && (line[n - 1] == ' ' || line[n - 1] == '\r')) line[--n] = 0;
     if (!n) return;
     lastLineMs = millis();
+    if (!strncmp(line, "WD {", 4)) {
+        // A wardriver's sighting: stamp it with our GPS fix and the node it came from,
+        // keep it, and send the stamped line up to the dashboard.
+        static char out[2400];
+        GpsFix f = gps_fix();
+        int k = snprintf(out, sizeof out, "WD {\"node\":\"%s\",", localId);
+        if (f.valid) k += snprintf(out + k, sizeof out - k, "\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,", f.lat, f.lon, f.acc);
+        strlcpy(out + k, line + 4, sizeof out - k);
+        net_bridge_line(out);
+        JsonDocument d(&psram);
+        if (!deserializeJson(d, out + 3)) {
+            model_lock();
+            wd_ingest(d.as<JsonObjectConst>(), true);
+            model_unlock();
+        }
+        return;
+    }
     net_bridge_line(line);
     if (!strncmp(line, "TLM ", 4)) on_tlm(line + 4);
     else if (!strncmp(line, "RST ", 4)) on_rst(line + 4);
@@ -392,6 +421,7 @@ void feed_task(void *) {
 }  // namespace
 
 bool usb_live() { return usb_attached() && lastLineMs && millis() - lastLineMs < 15000; }
+const char *usb_node_id() { return localId; }
 
 void feed_start() {
     seen = (SeenMac *)ps_calloc(SEEN_MACS, sizeof(SeenMac));

@@ -1087,3 +1087,6 @@ body.map-maxed .toasts { z-index: 1700; }
 .wd-pop div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; }
 .wd-pop div span { color: var(--muted); }
 .wd-box select.field, .wd-box input.field { flex: 1 1 auto; min-width: 0; }
+.wd-tr { cursor: pointer; }
+.wd-tr:hover td { background: rgba(255, 43, 214, .06); }
+#wdDrawer .chip { margin: 0 4px 4px 0; display: inline-block; }

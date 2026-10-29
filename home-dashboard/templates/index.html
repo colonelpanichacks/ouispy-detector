@@ -94,7 +94,6 @@
     <section class="panel feed-panel">
         <div class="panel-head">
             <h3>Live Detections</h3>
-            <label class="switch wd-live" id="wdLiveWrap" hidden title="Stream what wardrivers hear into this feed"><input type="checkbox" id="wdLive"><span></span>Wardrive</label>
             <span class="count" id="detCount">0</span>
         </div>
         <div class="sec sec-near" data-sec="nearest">
@@ -117,7 +116,7 @@
     <section class="panel tabs-panel">
         <div class="tabs">
             <button class="tab active" data-tab="history">History</button>
-            <button class="tab" data-tab="devices">Devices</button>
+            <button class="tab" data-tab="devices">Live</button>
             <button class="tab" data-tab="drones">Drones <span class="tab-badge" id="droneBadge" hidden>0</span></button>
             <button class="tab" data-tab="fleetctl">Fleet Control</button>
             <button class="tab" data-tab="metrics">Metrics</button>
@@ -190,6 +189,20 @@
                     <table class="htable">
                         <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
                         <tbody id="vBody"></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="fa fa-table wd-sec" id="wdSec" hidden>
+                <h4><span>Wardrive</span>
+                    <select id="wdTabScope" class="field mini"><option value="session">This session</option><option value="history">All history</option></select>
+                    <span class="fa-count" id="wdTotal"></span>
+                    <button class="btn ghost mini" id="wdNewSess">New session</button>
+                    <a class="btn ghost mini" id="wdTabCsv" href="/api/wardrive/wigle.csv?scope=session" download>WiGLE CSV</a>
+                </h4>
+                <div class="table-wrap">
+                    <table class="htable">
+                        <thead><tr><th>Name / SSID</th><th>MAC</th><th>Type</th><th>Security</th><th>Ch</th><th>Maker</th><th>Best</th><th>Seen</th><th>Last seen</th><th>Placed</th></tr></thead>
+                        <tbody id="wdBody"></tbody>
                     </table>
                 </div>
             </div>
@@ -423,7 +436,6 @@
         <div class="remote-box wd-box" id="dWd" hidden>
             <div class="rb-head"><span>Wardriver</span><span class="cfg-age" id="dWdState"></span></div>
             <div class="ctl-row">
-                <label class="switch"><input type="checkbox" id="dWdOn"><span></span>Wardriving</label>
                 <label class="switch" title="Every management frame and BLE advert as hex, on its USB console"><input type="checkbox" id="dWdRaw"><span></span>Raw packets</label>
             </div>
             <label>Channels <span class="lbl-hint">(one channel stays put; several hop; split the band between wardrivers)</span></label>
@@ -443,6 +455,17 @@
                 <a class="btn ghost" href="/api/wardrive/wigle.csv?scope=history" download>WiGLE CSV (all)</a>
             </div>
         </div>
+        <div class="remote-box fw-box" id="dFw">
+            <div class="rb-head"><span>Firmware</span><span class="cfg-age" id="dFwNow"></span></div>
+            <div class="ctl-row">
+                <select id="dFwKind" class="field">
+                    <option value="detector">OUI-SPY detector</option>
+                    <option value="skyspy">Sky-Spy (drones)</option>
+                    <option value="wardrive">Wardriver</option>
+                </select>
+                <button class="btn ghost" id="dFwInstall" title="Build from this checkout, staged on the home and sent over the mesh">Install</button>
+            </div>
+        </div>
         <div class="remote-box" id="dRemote">
             <div class="rb-head">
                 <h4>Remote settings</h4>
@@ -456,6 +479,8 @@
                 <label class="switch" title="In mesh mode the LED is also the link light"><input type="checkbox" id="dLed"><span></span>LED</label>
                 <button class="btn ghost" id="dAudio">Apply</button>
                 <button class="btn ghost" id="dIdent" title="Beep and flash for 15 s, ignoring mute">Identify</button>
+                <button class="btn ghost" id="dBeep3" title="One triple beep (ignores mute)">Beep 3x</button>
+                <label class="switch" title="Triple beeps over and over until turned off (30 min max): find it by ear"><input type="checkbox" id="dLocate"><span></span>Locate beep</label>
             </div>
             <div class="ctl-row">
                 <select id="dPreset" class="field"></select>
@@ -549,6 +574,24 @@
     </div>
 </aside>
 
+<aside class="drawer" id="wdDrawer">
+    <div class="drawer-head">
+        <div>
+            <div class="drawer-title" id="wdTitle">DEVICE</div>
+            <div class="drawer-sub" id="wdSub"></div>
+        </div>
+        <button class="icon-btn" id="wdClose" title="Close">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+    </div>
+    <div class="drawer-body">
+        <div class="dstats" id="wdStats"></div>
+        <div class="dintel" id="wdInfo"></div>
+        <button class="btn ghost" id="wdShowMap" type="button">Show on map</button>
+        <h4>Where it was heard <span class="lbl-hint" id="wdObsHint"></span></h4>
+        <div class="table-wrap"><table class="htable"><thead><tr><th>When</th><th>Signal</th><th>Position</th></tr></thead><tbody id="wdObs"></tbody></table></div>
+    </div>
+</aside>
 <aside class="drawer" id="drDrawer">
     <div class="drawer-head">
         <div>

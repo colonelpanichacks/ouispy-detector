@@ -1448,6 +1448,21 @@ static uint8_t statusCopies = 0;   // STATUS goes out 3 times (radios time-slice
 static uint32_t filtersReportDueAt = 0;
 static uint32_t identifyUntil = 0, identifyNextAt = 0;
 static uint8_t identifyFlags = 0;
+// Locate: a triple beep (with the LEDs) once, or over and over until stopped (30 min cap),
+// to find a node by ear. Ignores mute like identify. Non-blocking: a step every few ms.
+static uint8_t locateMode = 0;          // 0 off, 1 once, 2 continuous
+static uint8_t locateStep = 0;          // 0-5: on/off of the three beeps
+static uint32_t locateNextAt = 0, locateUntil = 0;
+static void locateStart(uint8_t mode) {
+    locateMode = mode > 2 ? 2 : mode;
+    locateStep = 0;
+    locateNextAt = 0;
+    locateUntil = millis() + 30UL * 60 * 1000;
+    if (!locateMode) {
+        ledcWrite(0, 0);
+        digitalWrite(LED_PIN, HIGH);
+    }
+}
 static const char* PRESET_NAMES[] = { "axon", "meta", "ipro", "verkada" };
 static String jsonEsc(const String& in);
 static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len);
@@ -1587,6 +1602,13 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         identifyNextAt = 0;
         if (isSerialConnected()) Serial.printf("[MESH] identify for %u s (home asked)\n", secs);
         meshSendAck(cmd, cmdId, 0, secs);
+        break;
+    }
+    case MESH_CMD_LOCATE: {
+        uint8_t mode = len >= 1 ? payload[0] : 1;
+        locateStart(mode);
+        if (isSerialConnected()) Serial.printf("[MESH] locate %s\n", mode == 2 ? "beeping until stopped" : mode ? "triple beep" : "stopped");
+        meshSendAck(cmd, cmdId, 0, mode);
         break;
     }
     case MESH_CMD_PRESET: {
@@ -1946,6 +1968,28 @@ static void remoteMgmtTick() {
             free(buf);
         }
     }
+    if (locateMode && (int32_t)(now - locateNextAt) >= 0) {
+        if (locateMode == 2 && (int32_t)(now - locateUntil) >= 0) {
+            locateStart(0);
+        } else if (locateStep < 6) {
+            bool on = !(locateStep & 1);
+            if (on) {
+                ledcSetup(0, BUZZER_FREQ, 8);
+                ledcWrite(0, BUZZER_DUTY);
+                digitalWrite(LED_PIN, LOW);
+                startDetectionFlash();
+            } else {
+                ledcWrite(0, 0);
+                digitalWrite(LED_PIN, HIGH);
+            }
+            locateNextAt = now + (on ? 110 : 120);
+            locateStep++;
+        } else {
+            locateStep = 0;
+            if (locateMode == 1) locateMode = 0;
+            else locateNextAt = now + 1100;   // the gap between triples
+        }
+    }
     if (identifyUntil) {
         if ((int32_t)(now - identifyUntil) >= 0) {
             identifyUntil = 0;
@@ -2100,6 +2144,12 @@ static bool remoteConsoleCommand(const String& line) {
         return true;
     }
     if (verb == "reboot") { localReboot("reboot"); return true; }
+    if (verb == "locate") {         // locate 0|1|2: stop / one triple beep / until stopped
+        int mode = arg[0].length() ? arg[0].toInt() : 1;
+        locateStart((uint8_t)constrain(mode, 0, 2));
+        Serial.printf("OK locate %d\n", constrain(mode, 0, 2));
+        return true;
+    }
     if (verb == "ident") {          // local identify: ident [secs]
         int secs = arg[0].length() ? arg[0].toInt() : 10;
         identifyFlags = 3;
@@ -2110,7 +2160,7 @@ static bool remoteConsoleCommand(const String& line) {
     }
 
     bool remote = verb == "rstatus" || verb == "raudio" || verb == "rreboot" ||
-                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias" || verb == "rwd";
+                  verb == "rident" || verb == "rpreset" || verb == "rfilters" || verb == "ralias" || verb == "rwd" || verb == "rlocate";
     if (remote) {
         if (!parseTarget(arg[0], t, all)) { Serial.printf("ERR %s: target must be a node ID or all\n", verb.c_str()); return true; }
         if (verb == "rstatus") {
@@ -2130,11 +2180,14 @@ static bool remoteConsoleCommand(const String& line) {
             int secs = arg[1].length() ? arg[1].toInt() : 10;
             uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
             sendMgmt("rident", t, all, MESH_CMD_IDENTIFY, p, 2);
-        } else if (verb == "rwd") {   // rwd <target> on|off | raw on|off | ch <plan> (wardrive nodes)
+        } else if (verb == "rlocate") {   // rlocate <target> 0|1|2
+            uint8_t p[1] = { (uint8_t)constrain(arg[1].length() ? arg[1].toInt() : 1, 0, 2) };
+            sendMgmt("rlocate", t, all, MESH_CMD_LOCATE, p, 1);
+        } else if (verb == "rwd") {   // rwd <target> raw on|off | ch <plan> (wardrive nodes)
             int sp = rest.indexOf(' ');
             uint8_t p[4];
             if (sp < 0 || !wdMeshPayload(rest.substring(sp + 1), p)) {
-                Serial.println("ERR usage: rwd <node|all> on|off | raw on|off | ch all|6|1-6|1,6,11");
+                Serial.println("ERR usage: rwd <node|all> raw on|off | ch all|6|1-6|1,6,11");
                 return true;
             }
             sendMgmt("rwd", t, all, MESH_CMD_WARDRIVE, p, 4);

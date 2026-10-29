@@ -31,7 +31,8 @@ LABELS = {
     "reboot": "Reboot", "preset": "Install preset", "filters_get": "Read filters",
     "filters_set": "Push filters", "filters_add": "Add filters", "filters_del": "Remove filters",
     "rechan": "Re-channel fleet", "meshpush": "Push home filters",
-    "setkey": "Set fleet key", "wardrive": "Wardriver settings",
+    "setkey": "Set fleet key", "wardrive": "Wardriver settings", "locate": "Locate beep",
+    "fw_install": "Install firmware",
     "fw_stage": "Stage firmware on home", "fw_send": "Update firmware", "fw_self": "Update home firmware",
 }
 
@@ -42,7 +43,7 @@ LABELS = {
 KNOWN_VERBS = {"nodealias", "ralias", "status", "filters", "audio", "ident", "reboot", "rstatus", "rfilters", "raudio",
                "rreboot", "rident", "rpreset", "mfbegin", "mfadd", "mfdel", "mfdata", "mfend",
                "fadd", "fdel", "meshpush", "meshrechan", "fwbegin", "fwdata", "fwend", "fwsend",
-               "fwself", "fwabort", "preset", "meshkey", "rwd", "wd"}
+               "fwself", "fwabort", "preset", "meshkey", "rwd", "wd", "locate", "rlocate"}
 ERR_VERBS = {"mfend": {"mfend", "filters", "fadd", "fdel"}}
 
 
@@ -81,6 +82,12 @@ def plan(op, target, args, home_id):
         label = f"Name node {a!r}" if a else "Clear node name"
         return ([(f"nodealias {a or '-'}", "OK")], "local", label) if local else \
                ([(f"ralias {tgt} {a or '-'}", "CMD")], "ack", label)
+    if op == "locate":
+        # 0 stop, 1 one triple beep, 2 triple beeps until stopped (find a node by ear).
+        mode = max(0, min(2, int(args.get("mode", 1))))
+        label = ["Stop locate beep", "Beep 3 times", "Locate beep on"][mode]
+        return ([(f"locate {mode}", "OK")], "local", label) if local else \
+               ([(f"rlocate {tgt} {mode}", "CMD")], "ack", label)
     if op == "wardrive":
         # A wardriver node's switches (src/wardrive.h): on / off, raw packets, channel plan.
         words = []
@@ -141,6 +148,10 @@ def plan(op, target, args, home_id):
         # Lines are generated while it runs (2,500+ of them): see _stage_firmware.
         if not local:
             raise PlanError("firmware is staged on the home node, over USB")
+        if args.get("kind"):
+            if args["kind"] not in fw.library():
+                raise PlanError(f"no {args['kind']} build in this checkout")
+            return [], "local", f"Stage {args['kind']} firmware on home"
         meta = fw.current()
         if not meta:
             raise PlanError("upload a firmware image first")
@@ -148,7 +159,7 @@ def plan(op, target, args, home_id):
     if op == "fw_send":
         if local or target == "all":
             raise PlanError("pick one remote node (the home updates itself with fw_self)")
-        return [(f"fwsend {tgt}", "CMD")], "ota", "Update firmware"
+        return [(f"fwsend {tgt}", "CMD")], "ota", (f"Install {args['kind']} firmware" if args.get("kind") else "Update firmware")
     if op == "fw_self":
         if not local:
             raise PlanError("fw_self is for the home node")
@@ -197,7 +208,18 @@ class Commander(threading.Thread):
                                     {**args, "filters": part}, auto) for i, part in enumerate(parts)]
                 return jobs[-1]
         home = self.fleet.home_id
-        if op in ("fw_send", "fw_self"):
+        if op == "fw_install":
+            # Any of the three firmwares onto any node: stage that build on the home,
+            # then send it over the mesh (or the home updates itself). Each job loads its
+            # kind's image when it runs, so queued installs of different kinds can't mix.
+            kind = (args or {}).get("kind")
+            if kind not in fw.library():
+                raise PlanError(f"no {kind} build in this checkout (build it first)")
+            self.submit("fw_stage", home, {"kind": kind}, auto)
+            if target == home:
+                return self.submit("fw_self", home, {"kind": kind, "convert": True}, auto)
+            return self.submit("fw_send", target, {"kind": kind, "convert": True}, auto)
+        if op in ("fw_send", "fw_self") and not (args or {}).get("kind"):
             # Never turn a detector into a Sky-Spy node (or back) by accident.
             meta = fw.current() or {}
             node = (self.fleet.nodes.get(target) or {}) if hasattr(self.fleet, "nodes") else {}
@@ -345,7 +367,8 @@ class Commander(threading.Thread):
         reply names the byte count, so a lost line or reply is resent and a
         stale reply can't be mistaken for the current one."""
         try:
-            img, meta = fw.load()
+            kind = (job.get("args") or {}).get("kind")
+            img, meta = fw.load_kind(kind) if kind else fw.load()
         except fw.FirmwareError as e:
             return self._finish(job, "failed", str(e))
         with self.cv:

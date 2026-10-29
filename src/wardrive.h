@@ -21,8 +21,7 @@ constexpr bool wdOn() { return true; }   // this build is a wardriver
 #else
 constexpr bool wdOn() { return false; }
 #endif
-// Wardriving switched on (console "wd on|off", or from the dashboard / Tab5; kept in NVS).
-// Off: the radios keep scanning but nothing is collected or printed.
+// Always true on a wardriver: it is always wardriving.
 bool wdActive();
 
 // Producers: radio callbacks (WiFi driver task, NimBLE host task). Heap-free.
@@ -34,15 +33,15 @@ void wdBleAdvert(const uint8_t mac[6], bool randomAddr, int8_t rssi, const char*
 // loop(): print what the callbacks queued.
 void wdLoop();
 
-// Console: "wd" (state), "wd on|off", "wd raw on|off", "wd ch all|6|1-6|1,6,11" (kept in NVS).
+// Console: "wd" (state), "wd raw on|off", "wd ch all|6|1-6|1,6,11" (kept in NVS).
 // Returns true when the line was ours.
 bool wdConsole(const String& verb, const String& arg);
 
-// MESH_CMD_WARDRIVE payload: u8 on (0/1, 255 keep), u8 raw (0/1, 255 keep), u16 le channel
+// MESH_CMD_WARDRIVE payload: u8 reserved (255), u8 raw (0/1, 255 keep), u16 le channel
 // mask (bit n = channel n, 0 keep). Returns false on a bad payload or a node that is
 // not a wardriver.
 bool wdApplyMesh(const uint8_t* p, uint16_t len);
-// Build that payload from console words ("on", "raw on", "ch 1-6"); false if invalid.
+// Build that payload from console words ("raw on", "ch 1-6"); false if invalid.
 bool wdMeshPayload(const String& words, uint8_t out[4]);
 
 // The channel plan for the WiFi sweep: one channel (it stays there), a range or a list

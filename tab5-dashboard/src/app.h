@@ -30,10 +30,16 @@ struct App {
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
     bool droneTracks = true;    // map: drone flight tracks
     bool pilotOn = true;        // map: pilots, their track and the line to their drone
+    uint8_t wdScope = 0;        // map: wardriven devices 0 off, 1 this session, 2 all history
+    uint8_t kindFilter = 0;     // Live: 0 all, 1 detectors, 2 Sky-Spy, 3 wardrivers
+    bool gpsFollow = false;     // map: keep our own GPS position centred
     bool layerMenu = false;     // the map layer dropdown is open
     char nodeEdit[7] = "";      // node settings panel open for this node id (long press)
     bool editNode = false;      // typing that node's alias
     uint32_t rebootArm = 0;     // reboot needs a second tap within 3 s
+    char locateId[7] = "";   // node beeping until stopped (locate)
+    int8_t fwArm = -1;          // firmware kind armed in the node editor (tap again to install)
+    uint32_t fwArmMs = 0;
     bool editDrone = false;     // typing the selected drone's alias
     // detail pages
     bool detail = false;        // device detail open (M->detail.mac)

@@ -152,7 +152,8 @@ setInterval(updateSerialPill, 500);
 function renderSources() {
     if (S.booted) { renderFleetCtl(); renderRemote(); }
     const box = $("sources");
-    const entries = Object.values(S.sources);
+    // The USB wardriver reader only earns a pill while it is reading one.
+    const entries = Object.values(S.sources).filter((s) => s.kind !== "wardrive-usb" || s.connected);
     if (!entries.length) {
         box.innerHTML = `<span class="src-pill"><span class="dot"></span><b>NO FEED</b> serial off, MQTT not configured</span>`;
         return;
@@ -320,7 +321,10 @@ function renderNodes() {
         nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.alias ? `${n.alias} (${n.id})` : n.id)}</option>`).join("");
     sel.value = cur;
     const vs = $("vNode"), vcur = vs.value;
-    vs.innerHTML = `<option value="">Seen by any node</option>` + sel.innerHTML.replace(/^<option value="">All nodes<\/option>/, "");
+    vs.innerHTML = `<option value="">Seen by any node</option>` +
+        `<optgroup label="By firmware"><option value="kind:detector">All detectors</option><option value="kind:skyspy">All Sky-Spy nodes</option>` +
+        `<option value="kind:wardrive">All wardrivers</option></optgroup><optgroup label="One node">` +
+        sel.innerHTML.replace(/^<option value="">All nodes<\/option>/, "") + `</optgroup>`;
     vs.value = vcur;
 }
 
@@ -1600,6 +1604,7 @@ function closeDrawer() { $("drawer").classList.remove("open"); }
 $("dClose").onclick = closeDrawer;
 
 async function openDrawer(id) {
+    $("wdDrawer").classList.remove("open");
     $("vDrawer").classList.remove("open");
     $("drawer").classList.add("open");
     const r = await fetch(`/api/nodes/${id}`);
@@ -2334,6 +2339,7 @@ $("vQ").addEventListener("input", () => { clearTimeout(devTimer); devTimer = set
 ["vNode", "vDom"].forEach((id) => $(id).addEventListener("change", loadDevices));
 
 async function openDevice(mac) {
+    $("wdDrawer").classList.remove("open");
     if (!mac) return;
     S.device = mac;
     closeDrawer();
@@ -3067,7 +3073,7 @@ async function boot() {
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
     sock.on("drone", onDrone);
-    sock.on("wd", onWd);
+    sock.on("wd", (e) => onWd(e));   // late-bound: the Live tab wraps onWd
     sock.on("wd_session", () => loadWd());
     sock.on("groups", (g) => {
         S.groups = g.groups || [];
@@ -3354,6 +3360,7 @@ function faaHtml(f) {
         .slice(0, 14).map(([k, v]) => `<div class="ik">${esc(k)}</div><div class="iv">${esc(String(v))}</div>`).join("")}</div>`).join("<hr>");
 }
 async function openDrone(mac) {
+    $("wdDrawer").classList.remove("open");
     S.droneOpen = mac;
     closeDrawer();
     $("vDrawer").classList.remove("open");
@@ -3418,8 +3425,6 @@ setInterval(() => {
 }, 5000);
 
 boot();
-})();
-
 
 // ------------------------------------------------------------------
 // wardriving: what wardriver nodes hear (wardrive.py), on the map and in the live feed
@@ -3445,8 +3450,6 @@ $("mapWd").onclick = () => {
     syncWdBtn();
     loadWd();
 };
-$("wdLive").checked = S.wdLive;
-$("wdLive").onchange = () => { S.wdLive = $("wdLive").checked; lsSet("ouispy.wdLive", S.wdLive); };
 async function loadWd() {
     syncWdBtn();
     if (S.wdScope === "off") { S.wd = {}; renderWd(); return; }
@@ -3465,8 +3468,7 @@ function onWd(ev) {
         if (S.wdScope !== "off") S.wd[wdKey(d)] = d;
         if (d.seen === 1) fresh.push(d);
     }
-    $("wdLiveWrap").hidden = false;   // a wardriver is reporting: offer the stream
-    if (S.wdLive && fresh.length) wdFeed(fresh);
+    S.wdReporting = true;
     clearTimeout(wdRenderTimer);
     wdRenderTimer = setTimeout(renderWd, 300);
 }
@@ -3482,7 +3484,7 @@ function renderWd() {
         const c = wdColor(d);
         L.circleMarker([d.lat, d.lon], { renderer: S.wdCanvas, radius: d.kind === "ble" ? 3.5 : 4.5, color: c, weight: 1,
                                           fillColor: c, fillOpacity: 0.75 })
-            .bindPopup(() => wdPopup(d), { className: "wd-popup" })
+            .on("click", () => openWdDevice(d.mac, d.kind))
             .addTo(S.wdLayer);
     }
 }
@@ -3514,13 +3516,13 @@ function wdFeed(list) {
 }
 // Node drawer: a wardriver's switches.
 function showWardriver(n) {
+    n = nodeById(n.id) || n;   // the fleet record carries its firmware stamp and telemetry
     const box = $("dWd");
     box.hidden = !isWardriver(n);
     if (box.hidden) return;
     const t = n.tlm || {};
     const cfgCh = (n.cfg && n.cfg.wdch) || t.wdch || "";
     $("dWdState").textContent = t.wd ? `${t.wd[0]} APs, ${t.wd[1]} BLE since boot${cfgCh ? " | ch " + cfgCh : ""}` : (cfgCh ? "ch " + cfgCh : "");
-    if (t.wdon != null) $("dWdOn").checked = !!t.wdon;
     const pick = $("dWdChPick");
     if (cfgCh && [...pick.options].some((o) => o.value === cfgCh)) pick.value = cfgCh;
 }
@@ -3528,9 +3530,8 @@ $("dWdChPick").onchange = () => { $("dWdCh").hidden = $("dWdChPick").value !== "
 $("dWdApply").onclick = () => {
     const pick = $("dWdChPick").value;
     const ch = pick === "custom" ? $("dWdCh").value.trim() : pick;
-    command(S.selected, "wardrive", { on: $("dWdOn").checked, raw: $("dWdRaw").checked, ...(ch ? { ch } : {}) });
+    command(S.selected, "wardrive", { raw: $("dWdRaw").checked, ...(ch ? { ch } : {}) });
 };
-$("dWdOn").onchange = () => command(S.selected, "wardrive", { on: $("dWdOn").checked });
 $("dWdRaw").onchange = () => command(S.selected, "wardrive", { raw: $("dWdRaw").checked });
 $("dWdSession").onclick = async () => {
     await api("/api/wardrive/session", { method: "POST", body: {} }).catch(() => null);
@@ -3539,3 +3540,160 @@ $("dWdSession").onclick = async () => {
 };
 syncWdBtn();
 loadWd();
+
+// The Live tab's Wardrive table (shown once a wardriver is on the fleet or reporting).
+S.wdTab = [];
+S.wdTabScope = lsGet("ouispy.wdTabScope", "session");
+$("wdTabScope").value = S.wdTabScope;
+$("wdTabScope").onchange = () => {
+    S.wdTabScope = $("wdTabScope").value;
+    lsSet("ouispy.wdTabScope", S.wdTabScope);
+    $("wdTabCsv").href = `/api/wardrive/wigle.csv?scope=${S.wdTabScope}`;
+    loadWdTab();
+};
+$("wdTabCsv").href = `/api/wardrive/wigle.csv?scope=${S.wdTabScope}`;
+$("wdNewSess").onclick = () => $("dWdSession").onclick();
+function wdTabWanted() {
+    return Object.keys(S.wd).length > 0 || (S.fleet && S.fleet.nodes || []).some(isWardriver) || !!S.wdReporting;
+}
+// "Seen by" set to a wardriver: the Live tab is that wardriver's networks and devices.
+function wdNodeFilter() {
+    const id = $("vNode").value;
+    if (id === "kind:wardrive") return "*";   // every wardriver
+    return id && isWardriver(nodeById(id)) ? id : "";
+}
+async function loadWdTab() {
+    const only = wdNodeFilter();
+    $("wdSec").hidden = !wdTabWanted() && !only;
+    document.querySelector("#tab-devices .fa-table:not(.wd-sec)").hidden = !!only;
+    if ($("wdSec").hidden || !$("tab-devices").classList.contains("active")) return;
+    const q = new URLSearchParams({ scope: S.wdTabScope, limit: 3000 });
+    if (only && only !== "*") q.set("node", only);
+    const r = await fetch(`/api/wardrive?${q}`).then((x) => x.json()).catch(() => null);
+    if (!r) return;
+    S.wdTab = r.devices;
+    renderWdTab(r);
+}
+function renderWdTab(r) {
+    const h = r && r.history || {}, t = r && r.this_session || {};
+    $("wdTotal").textContent = S.wdTabScope === "session"
+        ? `${(t.wifi || 0)} APs, ${(t.ble || 0)} BLE this session`
+        : `${(h.wifi || {}).n || 0} APs, ${(h.ble || {}).n || 0} BLE`;
+    $("wdBody").innerHTML = S.wdTab.slice(0, 1500).map((d) => `<tr class="wd-tr" data-k="${esc(wdKey(d))}">
+        <td class="v" style="color:${wdColor(d)}">${esc(wdName(d))}</td><td>${esc(d.mac)}${d.rnd ? " <small>(random)</small>" : ""}</td>
+        <td>${d.kind === "wifi" ? "WiFi AP" : "BLE"}</td><td>${esc(d.sec || (d.kind === "ble" ? "-" : "?"))}</td><td>${d.ch || "-"}</td>
+        <td>${esc(d.vendor || (d.mfr != null ? "CID 0x" + Number(d.mfr).toString(16).padStart(4, "0") : "-"))}</td>
+        <td>${d.rssi != null ? d.rssi + " dBm" : "-"}</td><td>${d.seen}</td><td>${ago(d.last)}</td>
+        <td>${d.lat != null ? "yes" : "-"}</td></tr>`).join("") ||
+        `<tr><td colspan="10" style="text-align:center;padding:20px">Nothing wardriven ${S.wdTabScope === "session" ? "this session" : "yet"}</td></tr>`;
+    $("wdBody").querySelectorAll("tr.wd-tr").forEach((tr) => tr.onclick = () => {
+        const d = S.wdTab.find((x) => wdKey(x) === tr.dataset.k);
+        if (d) openWdDevice(d.mac, d.kind);
+    });
+}
+let wdTabTimer = null;
+const _onWdPrev = onWd;
+onWd = function (ev) {
+    _onWdPrev(ev);
+    if (!$("tab-devices").classList.contains("active")) { $("wdSec").hidden = !wdTabWanted(); return; }
+    clearTimeout(wdTabTimer);
+    wdTabTimer = setTimeout(loadWdTab, 1500);   // live, at most every 1.5 s
+};
+document.querySelectorAll('.tab[data-tab="devices"]').forEach((b) => b.addEventListener("click", () => setTimeout(loadWdTab, 50)));
+$("vNode").addEventListener("change", loadWdTab);
+setInterval(() => { if ($("tab-devices").classList.contains("active")) loadWdTab(); }, 15000);
+
+// Node drawer: find it by ear, and put any of the three firmwares on it.
+const FW_NAMES = { detector: "OUI-SPY detector", skyspy: "Sky-Spy", wardrive: "Wardriver" };
+function nodeKind(n) { return isSkySpy(n) ? "skyspy" : isWardriver(n) ? "wardrive" : "detector"; }
+$("dBeep3").onclick = () => command(S.selected, "locate", { mode: 1 });
+$("dLocate").onchange = () => command(S.selected, "locate", { mode: $("dLocate").checked ? 2 : 0 });
+async function showFw(n) {
+    n = nodeById(n.id) || n;
+    const lib = await fetch("/api/firmware/library").then((r) => r.json()).catch(() => ({}));
+    const kind = nodeKind(n);
+    $("dFwNow").textContent = `runs ${FW_NAMES[kind]}${n.cfg && n.cfg.fw ? " (" + n.cfg.fw + ")" : ""}`;
+    for (const o of $("dFwKind").options) {
+        const m = lib[o.value];
+        o.disabled = !m;
+        o.textContent = FW_NAMES[o.value] + (m ? ` - build ${m.build}` : " - not built");
+    }
+    $("dFwKind").value = kind;
+}
+$("dFwInstall").onclick = () => {
+    const n = nodeById(S.selected), kind = $("dFwKind").value;
+    if (!n) return;
+    const change = nodeKind(n) !== kind;
+    if (!confirm(`${change ? "Turn" : "Update"} ${nodeName(n.id)} ${change ? "into a " + FW_NAMES[kind] : "with the latest " + FW_NAMES[kind] + " build"}?` +
+                 "\n\nIt goes over the mesh and the node restarts when it is done.")) return;
+    command(S.selected, "fw_install", { kind });
+};
+// A wardriven device: everything known, decoded (the right-hand drawer, like a drone's).
+S.wdOpen = null;
+async function openWdDevice(mac, kind) {
+    S.wdOpen = { mac, kind };
+    closeDrawer();
+    $("vDrawer").classList.remove("open");
+    $("drDrawer").classList.remove("open");
+    $("wdDrawer").classList.add("open");
+    $("wdTitle").textContent = mac;
+    $("wdSub").textContent = "loading...";
+    let d;
+    try { d = await api(`/api/wardrive/device/${encodeURIComponent(mac)}?kind=${kind}`); } catch (e) { return; }
+    if (!d || d.error || !S.wdOpen || S.wdOpen.mac !== mac) return;
+    S.wdOpen.dev = d;
+    const dec = d.decoded || {};
+    $("wdTitle").textContent = wdName(d);
+    $("wdSub").textContent = [d.mac, d.kind === "wifi" ? "WiFi access point" : "Bluetooth LE", d.vendor].filter(Boolean).join(" | ");
+    const cells = [
+        ["Best signal", d.rssi != null ? `${d.rssi} dBm` : "-"],
+        ["Seen", `${d.seen}x`],
+        ["Sessions", d.sessions || 1],
+        d.kind === "wifi" ? ["Security", d.sec || "?"] : ["TX power", dec["tx power"] || "-"],
+        d.kind === "wifi" ? ["Channel", d.ch || "-"] : ["Services", (dec.services || []).length],
+        ["On map", d.lat != null ? "yes" : "no GPS fix"],
+    ];
+    $("wdStats").innerHTML = cells.map(([k, v]) => `<div class="hs"><div class="k">${k}</div><div class="v">${esc(String(v))}</div></div>`).join("");
+    const rows = [];
+    const row = (k, v, cls) => { if (v !== undefined && v !== null && v !== "") rows.push(`<div class="ik">${k}</div><div class="iv ${cls || ""}">${v}</div>`); };
+    row(d.kind === "wifi" ? "SSID" : "Name", d.name ? esc(d.name) : `<span class="sub">${d.kind === "wifi" ? "hidden" : "not advertised"}</span>`);
+    row("MAC", `<code>${esc(d.mac)}</code>`);
+    row("Address", esc(dec.address || ""));
+    row("Maker (MAC OUI)", esc(d.vendor || (d.rnd ? "random address: no maker in it" : "not registered")));
+    if (d.kind === "wifi") {
+        row("Standard", esc(dec.standard || ""));
+        row("Security", esc(d.sec || ""), d.sec === "open" || d.sec === "WEP" ? "bad" : "");
+        row("Channel", d.ch ? `${d.ch} (${2407 + 5 * d.ch} MHz)` : "");
+        row("Top legacy rate", esc(dec["top legacy rate"] || ""));
+        row("Country", esc(dec.country || ""));
+        row("Hidden network", dec.hidden ? "yes" : "");
+        row("WPS", dec.WPS ? "on" : "", dec.WPS ? "bad" : "");
+        row("Vendor tags", (dec["vendor tags"] || []).map((v) => `<span class="chip">${esc(v.name)} <small>${esc(v.oui)}</small></span>`).join(""));
+    } else {
+        row("Company", dec.company ? `${esc(dec.company.name)} <small>${esc(dec.company.id)}</small>` : "");
+        row("Appearance", esc(dec.appearance || ""));
+        row("Services", (dec.services || []).map((u) => `<span class="chip">${esc(u.name)} <small>0x${esc(u.uuid)}</small></span>`).join(""));
+        row("TX power", esc(dec["tx power"] || ""));
+        row("Flags", (dec.flags || []).map((f) => `<span class="chip">${esc(f)}</span>`).join(""));
+    }
+    row("Placed at", d.lat != null ? `${d.lat.toFixed(6)}, ${d.lon.toFixed(6)} <span class="sub">(where it was loudest)</span>` : "");
+    row("First seen", esc(fullTime(d.first)));
+    row("Last seen", esc(fullTime(d.last)) + ` <span class="sub">(${ago(d.last)})</span>`);
+    row("Wardriver", d.node ? esc(nodeName(d.node)) : "");
+    $("wdInfo").innerHTML = `<h4>${d.kind === "wifi" ? "Access point" : "Bluetooth"}</h4><div class="igrid">${rows.join("")}</div>`;
+    $("wdShowMap").hidden = d.lat == null;
+    const obs = d.sightings || [];
+    $("wdObsHint").textContent = obs.length ? `(${obs.length} positioned sightings)` : "(no GPS fix on any sighting yet)";
+    $("wdObs").innerHTML = obs.slice(0, 120).map((o) => `<tr><td>${esc(fullTime(o.ts))}</td><td>${o.rssi != null ? o.rssi + " dBm" : "-"}</td>
+        <td>${o.lat.toFixed(5)}, ${o.lon.toFixed(5)}</td></tr>`).join("");
+}
+$("wdClose").onclick = () => { $("wdDrawer").classList.remove("open"); S.wdOpen = null; };
+$("wdShowMap").onclick = () => {
+    const d = S.wdOpen && S.wdOpen.dev;
+    if (!d || d.lat == null) return;
+    if (S.wdScope === "off") { S.wdScope = "history"; lsSet("ouispy.wdScope", "history"); loadWd(); }
+    map.setView([d.lat, d.lon], Math.max(map.getZoom(), 18));
+};
+const _showWardriverPrev = showWardriver;
+showWardriver = function (n) { _showWardriverPrev(n); showFw(n); };
+})();

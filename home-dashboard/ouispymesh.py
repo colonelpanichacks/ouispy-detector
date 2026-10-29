@@ -240,6 +240,7 @@ fleet = Fleet(store, emit)
 import drones as drones_mod
 drones = drones_mod.Drones(store, emit)
 fleet.drones = drones
+drones.on_det = fleet.feed_detection
 import wardrive as wardrive_mod
 wardrive = wardrive_mod.Wardrive(store, emit)
 fleet.wardrive = wardrive
@@ -517,7 +518,11 @@ def api_stats():
 @app.route("/api/devices")
 def api_devices():
     f = _filters()
-    total, rows = store.devices(q=f["q"], node=f["node"], dom=f["dom"],
+    node = f["node"]
+    if isinstance(node, str) and node.lower().startswith("kind:"):   # every node running one firmware
+        kind = node[5:].lower()
+        node = [n["id"] for n in fleet.snapshot()["nodes"] if fw.node_kind((n.get("cfg") or {}).get("fw")) == kind]
+    total, rows = store.devices(q=f["q"], node=node, dom=f["dom"],
                                 limit=min(int(request.args.get("limit", 300)), 2000))
     return jsonify({"total": total, "rows": rows})
 
@@ -561,11 +566,24 @@ def api_device_detail(mac):
     })
 
 
+@app.route("/api/firmware/library")
+def api_fw_library():
+    return jsonify(fw.library())
+
+
 @app.route("/api/wardrive")
 def api_wardrive():
     scope = "history" if request.args.get("scope") == "history" else "session"
     return jsonify({"scope": scope, **wardrive.summary(),
-                    "devices": wardrive.devices(scope, limit=int(request.args.get("limit", 20000)))})
+                    "devices": wardrive.devices(scope, limit=int(request.args.get("limit", 20000)),
+                                                placed=request.args.get("placed") == "1",
+                                                node=(request.args.get("node") or "").upper() or None)})
+
+
+@app.route("/api/wardrive/device/<mac>")
+def api_wardrive_device(mac):
+    d = wardrive.detail(mac, "ble" if request.args.get("kind") == "ble" else "wifi")
+    return (jsonify(d), 200) if d else (jsonify({"error": "unknown device"}), 404)
 
 
 @app.route("/api/wardrive/session", methods=["POST"])

@@ -14,6 +14,7 @@
 #include "gfx.h"
 #include <Preferences.h>
 #include "maptiles.h"
+#include "wd.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
@@ -121,7 +122,7 @@ void set_error(const char *fmt, ...) {
 // before it is parsed: the console alone is one event per serial line.
 bool wanted(const char *name) {
     static const char *keep[] = {"fleet", "det", "sighting", "node_filters", "node_event", "dets_cleared", "bridge_tx",
-                                 "drone", "groups", "mac_aliases", "tri"};
+                                 "drone", "groups", "mac_aliases", "tri", "wd", "wd_session"};
     for (auto k : keep)
         if (!strcmp(name, k)) return true;
     return false;
@@ -163,6 +164,15 @@ void on_event(uint8_t *payload, size_t len) {
     else if (!strcmp(name, "dets_cleared")) ingest_cleared(body);
     else if (!strcmp(name, "drone")) ingest_drone(body);
     else if (!strcmp(name, "tri")) ingest_tri(body);
+    else if (!strcmp(name, "wd")) {   // wardrive devices the dashboard just stored (any wardriver)
+        model_lock();
+        for (JsonObjectConst d : body["devices"].as<JsonArrayConst>()) wd_ingest(d, true);
+        model_unlock();
+    } else if (!strcmp(name, "wd_session")) {
+        model_lock();
+        wd_new_session();
+        model_unlock();
+    }
     else if (!strcmp(name, "mac_aliases")) { ingest_names(body, JsonObjectConst(), JsonObjectConst()); wantDetail = true; }
     else if (!strcmp(name, "groups")) { ingest_names(JsonObjectConst(), JsonObjectConst(), body["group_of"]); wantDetail = true; }
     else if (!strcmp(name, "node_event")) {
@@ -530,11 +540,23 @@ void fetch_state() {
     filter["fleet"]["ts"] = true;
     JsonObject nf = filter["fleet"]["nodes"][0].to<JsonObject>();
     for (const char *k : {"id", "alias", "role", "online", "is_home", "rssi", "age", "since", "color",
-                          "filters_fresh", "cfg", "ota", "lat", "lon"})
+                          "filters_fresh", "cfg", "ota", "lat", "lon", "tlm"})
         nf[k] = true;
     JsonDocument doc(&psram);
     if (http_json("/api/state", doc, &filter)) ingest_state(doc);
     else wantState = true;
+}
+
+// The map's wardrive History view: every placed device the dashboard has.
+void fetch_wardrive() {
+    JsonDocument filter;
+    JsonObject f = filter["devices"][0].to<JsonObject>();
+    for (const char *k : {"kind", "mac", "name", "rssi", "sec", "ch", "lat", "lon", "last", "seen", "now"}) f[k] = true;
+    JsonDocument doc(&psram);
+    if (!http_json("/api/wardrive?scope=history&placed=1&limit=6000", doc, &filter)) return;
+    model_lock();
+    for (JsonObjectConst d : doc["devices"].as<JsonArrayConst>()) wd_ingest(d, false);
+    model_unlock();
 }
 
 void fetch_stats() {
@@ -617,6 +639,12 @@ void poll_task(void *) {
         if (now - lastStats > 30000) {
             lastStats = now;
             fetch_stats();
+        }
+        static uint32_t lastWd = 0;
+        if (A.wdScope == 2 && M->sockUp && (!lastWd || now - lastWd > 300000)) {
+            lastWd = now;
+            fetch_wardrive();
+            continue;
         }
         if (gen != A.metricsGen || now - lastMetrics > 30000) {
             gen = A.metricsGen;

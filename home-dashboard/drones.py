@@ -118,6 +118,7 @@ class Drones:
         self.store = store
         self.emit = emit
         self.lock = threading.Lock()
+        self.on_det = None   # fleet.feed_detection: drones are devices in Live like any other
         self.live = {}       # mac -> state
         self._faa_q = queue.Queue()
         self._faa_seen = {}  # mac -> ts of the last lookup attempt (failures retry)
@@ -218,6 +219,22 @@ class Drones:
         if d.get("id") and d.get("idt") in FAA_ID_TYPES:
             self._maybe_faa(d["mac"], d["id"])
         self.emit("drone", out)
+        if self.on_det:
+            try:
+                self.on_det(self._as_detection(out, node, d.get("rssi")), "rid")
+            except Exception as e:   # never lose the drone over the feed row
+                print("drones: live row failed:", e)
+
+    @staticmethod
+    def _as_detection(p, node, rssi):
+        """A drone as a Live detection row: "DRONE DJI Mini 5 Pro" (FAA), else its serial."""
+        faa = p.get("faa") or {}
+        it = ((faa.get("data") or {}).get("items") or faa.get("items") or [None])[0] or {}
+        model = " ".join(x for x in (it.get("makeName"), it.get("modelName")) if x)
+        what = p.get("alias") or model or p.get("desc") or p.get("id") or p.get("ua_type") or "Remote ID"
+        return {"mac": p["mac"], "rssi": rssi, "type": "RID", "match": p.get("id") or "",
+                "desc": f"DRONE {what}", "node": node,
+                "dom": "ble" if p.get("src") == "ble" else "wifi"}
 
     # ---------------- FAA UAS DOC lookup ----------------
     # A drone with a CTA-2063 serial or CAA registration gets looked up in the

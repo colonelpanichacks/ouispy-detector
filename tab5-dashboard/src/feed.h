@@ -6,3 +6,4 @@
 
 void feed_start();
 bool usb_live();          // a node is plugged in and talking
+const char *usb_node_id();   // its node id ("" until its first TLM)

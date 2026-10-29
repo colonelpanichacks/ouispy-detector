@@ -412,6 +412,16 @@ class Fleet:
             st = self.nodes.get(nid)
             if st is None:
                 st = self.nodes[nid] = self._blank(nid, cfg.get("role"))
+            ota = st.get("ota") or {}
+            if ota.get("state") == "verifying":
+                if cfg.get("fw") and cfg.get("fw") != ota.get("fw_before"):
+                    ota.update(state="done", finished=now, ts=now, fw=cfg.get("fw"))   # back with a new build
+                elif now - (ota.get("ts") or now) > 180:
+                    ota.update(state="failed", finished=now, ts=now, err="came back with the old build")
+                if ota.get("state") != "verifying":
+                    last = self.store.get_setting("ota_last") or {}
+                    last[nid] = ota
+                    self.store.set_setting("ota_last", last)
             st["cfg"] = cfg
             st["cfg_ts"] = now
             if cfg.get("role") == "home" and not self.home_id:
@@ -450,6 +460,11 @@ class Fleet:
             started = prev.get("started") if prev.get("state") in ("offered", "sending") else now
             rec = {k: o.get(k) for k in ("state", "pct", "bytes", "size", "kbps", "direct", "proto", "err")}
             rec.update(ts=now, started=started or now)
+            # The last chunk is in and the node restarts into the new image before it
+            # confirms: "went silent" at the very end is almost always a success. Wait for
+            # the node to come back and say which build it runs (_node_config).
+            if rec["state"] == "failed" and (rec.get("pct") or 0) >= 98 and "silent" in str(rec.get("err") or ""):
+                rec.update(state="verifying", err="", fw_before=((st.get("cfg") or {}).get("fw")))
             if rec["state"] in ("done", "failed"):
                 rec["finished"] = now
             st["ota"] = rec

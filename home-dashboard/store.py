@@ -317,7 +317,11 @@ class Store:
                          "OR mac IN (SELECT mac FROM mac_aliases WHERE alias LIKE ?))")
             like = f"%{q}%"
             args += [like] * 6
-        if node:
+        if isinstance(node, (list, tuple, set)):   # several nodes (e.g. every Sky-Spy node)
+            node = list(node) or ["-"]
+            where.append(f"node IN ({','.join('?' * len(node))})")
+            args += node
+        elif node:
             where.append("node=?")
             args.append(node)
         if mac:

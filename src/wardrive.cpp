@@ -28,6 +28,16 @@ struct WdObs {
     uint16_t mfr;      // BLE company id
     uint16_t appear;   // BLE GAP appearance
     char txt[33];      // SSID or BLE name
+    // Intel: BLE service / service-data UUIDs, TX power, flags; WiFi vendor IE OUIs,
+    // country, top legacy rate.
+    uint16_t uuid[6];
+    uint8_t nuuid;
+    int8_t txp;        // BLE advertised TX power, 127 none
+    uint8_t adFlags;   // BLE AD flags (0x01), 0 none
+    uint8_t vend[9];   // up to 3 vendor IE OUIs
+    uint8_t nvend;
+    char cc[3];
+    uint8_t rate;      // units of 500 kb/s
 };
 
 struct WdRaw {
@@ -49,26 +59,10 @@ static volatile uint16_t qHead = 0, qTail = 0;
 static portMUX_TYPE wdMux = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t dropped = 0, rawDropped = 0;
 static volatile bool rawOn = false;
-static volatile int8_t active = -1;   // -1 not loaded yet
+// Always on: a wardriver is always wardriving (no switch).
+static constexpr int8_t active = 1;
 
-bool wdActive() {
-    if (!wdOn()) return false;
-    if (active < 0) {
-        Preferences p;
-        p.begin("wd", true);
-        active = p.getBool("on", true) ? 1 : 0;
-        p.end();
-    }
-    return active == 1;
-}
-
-static void setActive(bool on) {
-    active = on;
-    Preferences p;
-    p.begin("wd", false);
-    p.putBool("on", on);
-    p.end();
-}
+bool wdActive() { return wdOn(); }
 
 // Callback-side hold: hash of (kind, mac) -> last time queued. Races are harmless
 // (at worst a duplicate gets through).
@@ -132,6 +126,9 @@ void wdWifiFrame(const uint8_t* f, int len, uint8_t subtype, int8_t rssi, uint8_
         else if (t == DI_CHAN && l) o.ch = v[0];
         else if (t == DI_SEC && l) o.sec = v[0];
         else if (t == DI_WCAP && l) o.wcap = v[0];
+        else if (t == DI_RATE && l) o.rate = v[0];
+        else if (t == DI_COUNTRY && l >= 2) o.cc[0] = v[0], o.cc[1] = v[1], o.cc[2] = 0;
+        else if (t == DI_VENDOR) { o.nvend = l / 3 > 3 ? 3 : l / 3; memcpy(o.vend, v, o.nvend * 3); }
     }
     push(o);
 }
@@ -156,7 +153,23 @@ void wdBleAdvert(const uint8_t mac[6], bool randomAddr, int8_t rssi, const char*
     o.hasMfr = hasMfr;
     o.mfr = mfr;
     o.appear = appearance;
+    o.txp = 127;
     if (name) strlcpy(o.txt, name, sizeof o.txt);
+    // AD structures: flags, 16-bit service UUIDs (complete / incomplete), service data
+    // UUIDs, TX power.
+    for (int i = 0; adv && i + 1 < advLen;) {
+        uint8_t l = adv[i];
+        if (!l || i + 1 + l > advLen) break;
+        uint8_t t = adv[i + 1];
+        const uint8_t* v = adv + i + 2;
+        int vl = l - 1;
+        if (t == 0x01 && vl >= 1) o.adFlags = v[0];
+        else if (t == 0x0A && vl >= 1) o.txp = (int8_t)v[0];
+        else if ((t == 0x02 || t == 0x03) && vl >= 2)
+            for (int k = 0; k + 1 < vl && o.nuuid < 6; k += 2) o.uuid[o.nuuid++] = v[k] | (v[k + 1] << 8);
+        else if (t == 0x16 && vl >= 2 && o.nuuid < 6) o.uuid[o.nuuid++] = v[0] | (v[1] << 8);
+        i += 1 + l;
+    }
     push(o);
 }
 
@@ -211,14 +224,33 @@ static void printObs(const WdObs& o, bool isNew) {
     snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", o.mac[0], o.mac[1], o.mac[2], o.mac[3], o.mac[4], o.mac[5]);
     jsonStr(txt, sizeof txt, o.txt);
     if (o.kind == WD_WIFI) {
+        char extra[96] = "";
+        int n = 0;
+        const char* std = (o.wcap & 4) ? "ax" : (o.wcap & 2) ? "ac" : (o.wcap & 1) ? "n" : "";
+        if (*std) n += snprintf(extra + n, sizeof extra - n, ",\"std\":\"%s\"", std);
+        if (o.rate) n += snprintf(extra + n, sizeof extra - n, ",\"rate\":%u", o.rate / 2);
+        if (o.cc[0] >= 'A' && o.cc[0] <= 'Z') n += snprintf(extra + n, sizeof extra - n, ",\"cc\":\"%c%c\"", o.cc[0], o.cc[1]);
+        if (o.nvend) {
+            n += snprintf(extra + n, sizeof extra - n, ",\"vend\":[");
+            for (int k = 0; k < o.nvend; k++)
+                n += snprintf(extra + n, sizeof extra - n, "%s\"%02X%02X%02X\"", k ? "," : "", o.vend[3 * k], o.vend[3 * k + 1], o.vend[3 * k + 2]);
+            n += snprintf(extra + n, sizeof extra - n, "]");
+        }
         Serial.printf("WD {\"t\":\"wifi\",\"mac\":\"%s\",\"ssid\":\"%s\",\"ch\":%u,\"rssi\":%d,\"sec\":\"%s\","
-                      "\"hidden\":%d,\"wps\":%d,\"new\":%d}\n",
-                      mac, txt, o.ch, o.rssi, secName(o.sec), (o.wcap & 16) ? 1 : 0, (o.wcap & 8) ? 1 : 0, isNew ? 1 : 0);
+                      "\"hidden\":%d,\"wps\":%d%s,\"new\":%d}\n",
+                      mac, txt, o.ch, o.rssi, secName(o.sec), (o.wcap & 16) ? 1 : 0, (o.wcap & 8) ? 1 : 0, extra, isNew ? 1 : 0);
     } else {
-        char extra[48] = "";
+        char extra[140] = "";
         int n = 0;
         if (o.hasMfr) n += snprintf(extra + n, sizeof extra - n, ",\"mfr\":%u", o.mfr);
         if (o.appear) n += snprintf(extra + n, sizeof extra - n, ",\"app\":%u", o.appear);
+        if (o.txp != 127) n += snprintf(extra + n, sizeof extra - n, ",\"tx\":%d", o.txp);
+        if (o.adFlags) n += snprintf(extra + n, sizeof extra - n, ",\"fl\":%u", o.adFlags);
+        if (o.nuuid) {
+            n += snprintf(extra + n, sizeof extra - n, ",\"svc\":[");
+            for (int k = 0; k < o.nuuid; k++) n += snprintf(extra + n, sizeof extra - n, "%s\"%04X\"", k ? "," : "", o.uuid[k]);
+            n += snprintf(extra + n, sizeof extra - n, "]");
+        }
         Serial.printf("WD {\"t\":\"ble\",\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"rnd\":%d%s,\"new\":%d}\n",
                       mac, txt, o.rssi, o.rnd, extra, isNew ? 1 : 0);
     }
@@ -246,7 +278,6 @@ static void printRaw(const WdRaw& r) {
 }
 
 void wdLoop() {
-    wdActive();   // loads the switch before the radio callbacks look at it
     // A bounded batch per pass, and only while USB has room: a busy or absent host
     // must never stall the scan loop (sightings just wait in the ring, or drop).
     for (int i = 0; i < 12; i++) {
@@ -264,7 +295,7 @@ void wdLoop() {
         if (!isNew && now - s->lastMs < WD_REPEAT_MS && o.rssi < s->lastRssi + WD_STRONGER_DB) continue;
         s->lastMs = now;
         s->lastRssi = o.rssi;
-        if (Serial && Serial.availableForWrite() > 160) printObs(o, isNew);
+        if (Serial && Serial.availableForWrite() > 200) printObs(o, isNew);
     }
     for (int i = 0; i < 6; i++) {
         WdRaw r;
@@ -352,8 +383,7 @@ bool wdMeshPayload(const String& words, uint8_t out[4]) {
     out[0] = out[1] = 255, out[2] = out[3] = 0;
     String w = words;
     w.trim();
-    if (w == "on" || w == "off") out[0] = w == "on";
-    else if (w == "raw on" || w == "raw off") out[1] = w == "raw on";
+    if (w == "raw on" || w == "raw off") out[1] = w == "raw on";
     else if (w.startsWith("ch ")) {
         uint16_t m = parseChannels(w.substring(3));
         if (!m) return false;
@@ -368,7 +398,6 @@ bool wdApplyMesh(const uint8_t* p, uint16_t len) {
     if (m & ~CH_ALL) return false;
     if (m) saveMask(m);
     if (p[1] != 255) rawOn = p[1] == 1;
-    if (p[0] != 255) setActive(p[0] == 1);
     return true;
 }
 
@@ -376,11 +405,6 @@ bool wdConsole(const String& verb, const String& arg) {
     if (verb != "wd") return false;
     if (!wdOn()) {
         Serial.println("ERR wd: not a wardriver (flash the wardrive build)");
-        return true;
-    }
-    if (arg == "on" || arg == "off") {
-        setActive(arg == "on");
-        Serial.printf("OK wd %s\n", arg.c_str());
         return true;
     }
     if (arg.startsWith("ch")) {

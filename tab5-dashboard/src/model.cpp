@@ -250,6 +250,14 @@ static void parse_node(Node &n, JsonObjectConst o) {
         CPY(n.ota, ota["state"]);
         n.otaPct = ota["pct"] | 0;
     }
+    n.wdOn = -1;
+    JsonObjectConst tl = o["tlm"];
+    if (!tl.isNull() && tl["wdon"].is<int>()) {
+        n.wdOn = tl["wdon"] | 0;
+        CPY(n.wdCh, tl["wdch"]);
+        n.wdWifi = tl["wd"][0] | 0;
+        n.wdBle = tl["wd"][1] | 0;
+    }
     node_memo(n);
 }
 
