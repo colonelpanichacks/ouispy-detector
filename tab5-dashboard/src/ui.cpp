@@ -1088,7 +1088,11 @@ void draw_detail() {
     glow_rect(x, y, w, h, 10, dim(ACCENT, 0.8f));
     const char *alias = dd.valid ? dd.alias : (t ? t->alias : "");
     const char *name = dd.valid && dd.name[0] ? dd.name : (t ? t->name : "");
-    const char *title = alias[0] ? alias : name[0] ? name : (t && t->descr[0] ? t->descr : dd.mac);
+    // No alias or broadcast name: the vendor, from the live target or else the feed.
+    const char *vend = t && t->descr[0] ? t->descr : "";
+    for (int i = 0; !vend[0] && i < M->ndets; i++)
+        if (!strcasecmp(det_at(i)->mac, dd.mac) && det_at(i)->descr[0]) vend = det_at(i)->descr;
+    const char *title = alias[0] ? alias : name[0] ? name : vend[0] ? vend : dd.mac;
     font(F_BRAND);
     glow(x + 20, y + 30, fit(title, w - 360), alias[0] ? PINK : ACCENT, middle_left);
     font(F_MD);
@@ -1096,9 +1100,11 @@ void draw_detail() {
     snprintf(sub, sizeof sub, "%s%s%s%s%s", dd.mac, name[0] && strcmp(title, name) ? "   \"" : "", name[0] && strcmp(title, name) ? name : "",
              name[0] && strcmp(title, name) ? "\"" : "", t && t->descr[0] ? "" : "");
     text(x + 20, y + 62, sub, SOFT, middle_left);
-    if (t && t->descr[0]) {
+    if (vend[0] && strcmp(title, vend)) {
+        font(F_MD);
+        int sw = C.textWidth(sub);
         font(F_SM);
-        text(x + 20 + C.textWidth(sub) + 140, y + 62, fit(t->descr, 300), MUTED, middle_left);
+        text(x + 20 + sw + 24, y + 62, fit(vend, 300), MUTED, middle_left);
     }
     font(F_SM);
     int cw;
