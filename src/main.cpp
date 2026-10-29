@@ -2920,7 +2920,47 @@ static void scanDomains(bool& wifi, bool& ble) {
         else ble = true;
     }
     if (ridEnabled) wifi = ble = true;
+#ifdef SKYSPY_NODE
+    // A Sky-Spy node does what Sky-Spy does: no channel sweep. It stays parked on the
+    // mesh channel (put the fleet on channel 6, where Remote ID's WiFi NAN and most
+    // beacons are) with WiFi capture on and a continuous BLE scan alongside.
+    wifi = false;
+    ble = true;
+#endif
 }
+
+#ifdef SKYSPY_NODE
+// The Sky-Spy node lives on channel 6 (Remote ID's WiFi NAN channel, where most beacon
+// Remote ID is too) and steps onto the mesh channel only to send: right after a drone
+// report is queued, when a command or reply needs the air, and for a short window every
+// 2 s (announces, the dashboard's commands, OTA). ~90% of its time stays on channel 6.
+// With the whole mesh on channel 6 it never has to leave.
+static void skyspyRadioTick() {
+    const uint8_t RID_CH = 6;
+    if (!meshCfg.enabled || currentMode != SCANNING_MODE || meshCfg.channel == RID_CH) return;
+    static bool onMesh = true;
+    static uint32_t windowUntil = 0, nextWindow = 0, parkedAt = 0;
+    uint32_t now = millis();
+    if ((int32_t)(now - nextWindow) >= 0) {
+        windowUntil = now + 200;
+        nextWindow = now + 2000;
+    }
+    bool want = (int32_t)(windowUntil - now) > 0 || now - ridLastSendMs < 60 || meshNeedsAir() ||
+                meshOtaBusy();
+    if (onMesh && want && !meshOtaBusy() && now - parkedAt > 600 && (int32_t)(windowUntil - now) <= 0)
+        want = false;   // never camp on the mesh channel: back to listening after 600 ms
+    if (want && !onMesh) {
+        meshParkChannel();
+        onMesh = true;
+        parkedAt = now;
+    } else if (!want && onMesh) {
+        esp_wifi_set_channel(RID_CH, WIFI_SECOND_CHAN_NONE);
+        meshNoteRadioChannel(RID_CH);
+        meshUnparkChannel();
+        onMesh = false;
+    }
+}
+#endif
 
 // rid.cpp: a drone was heard for the first time. A Sky-Spy node alerts the way
 // the standalone Sky-Spy firmware does; a detector stays quiet (the dashboard alerts).
@@ -2951,6 +2991,9 @@ static bool scan_init() {
         if (pBLEScan != nullptr) {
             pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
             pBLEScan->setActiveScan(true);
+#ifdef SKYSPY_NODE
+            pBLEScan->setDuplicateFilter(false);   // every advert: a drone's position each time it sends one
+#endif
             pBLEScan->setInterval(300);
             pBLEScan->setWindow(200);
         }
@@ -3055,6 +3098,16 @@ static void scan_to_ble_scan() {
     // time-slices the two), and TX flush happens in meshTick().
     meshParkChannel();
     meshSetBlePhase(true);
+#ifdef SKYSPY_NODE
+    // ...and WiFi capture stays on: Remote ID beacons and NAN frames on this channel
+    // are decoded while BLE scans (Sky-Spy runs both at once the same way).
+    {
+        wifi_promiscuous_filter_t filt = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+        esp_wifi_set_promiscuous_filter(&filt);
+        esp_wifi_set_promiscuous_rx_cb(promiscuousCallback);
+        esp_wifi_set_promiscuous(true);
+    }
+#endif
 
     g_radioPhase = PHASE_BLE_SCAN;
 }
@@ -6842,6 +6895,9 @@ void loop() {
         }
 
         ridLoop();
+#ifdef SKYSPY_NODE
+        skyspyRadioTick();
+#endif
 
         // Drain one ring entry per pass. Dedup, cooldown, device tracking,
         // alerts, MQTT and the session file all happen here in loop context

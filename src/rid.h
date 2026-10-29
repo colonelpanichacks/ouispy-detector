@@ -17,5 +17,7 @@ void ridLoop();
 // Mesh: a drone report from another node (body = after the packet header).
 void ridFromMesh(const uint8_t* body, int len);
 
+extern uint32_t ridLastSendMs;   // millis() of the last drone report queued for the mesh
+
 // Number of drones heard in the last minute (telemetry).
 uint8_t ridActive();

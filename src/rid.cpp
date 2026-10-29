@@ -215,8 +215,30 @@ void ridFromMesh(const uint8_t* body, int len) {
     printBody(body);
 }
 
+// Repeats: the home sweeps channels and a drone report is best effort (no ack), so
+// each one goes out again ~150 ms and ~300 ms later; one copy reaching the home is
+// enough (the dashboard keeps the newest position).
+#define RID_COPIES 2
+#define RID_COPY_MS 150UL
+static uint8_t copyBody[RID_MAX][RID_BODY_LEN];
+static uint8_t copyLeft[RID_MAX];
+static uint32_t copyAt[RID_MAX];
+uint32_t ridLastSendMs = 0;   // a drone report went into the mesh queue (Sky-Spy hop logic)
+
+static void sendDrone(const uint8_t *body) {
+    meshSendDrone(body, RID_BODY_LEN);
+    ridLastSendMs = millis();
+}
+
 void ridLoop() {
     uint32_t now = millis();
+    for (int i = 0; i < RID_MAX; i++) {
+        if (copyLeft[i] && (int32_t)(now - copyAt[i]) >= 0) {
+            sendDrone(copyBody[i]);
+            copyLeft[i]--;
+            copyAt[i] = now + RID_COPY_MS;
+        }
+    }
     for (int i = 0; i < RID_MAX; i++) {
         Drone snap;
         bool go = false;
@@ -240,7 +262,10 @@ void ridLoop() {
         uint8_t body[RID_BODY_LEN];
         encode(snap, selfId, body);
         printBody(body);
-        meshSendDrone(body, RID_BODY_LEN);
+        sendDrone(body);
+        memcpy(copyBody[i], body, RID_BODY_LEN);
+        copyLeft[i] = RID_COPIES;
+        copyAt[i] = now + RID_COPY_MS;
     }
 }
 
