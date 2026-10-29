@@ -90,6 +90,10 @@ class SerialSource(Source):
                 for p in list_serial_ports():
                     if p["serial"] == pref:
                         return p["device"]
+                # The home is known by serial number and isn't plugged in: wait for it.
+                # Falling back to the old path opened whatever board got that name next
+                # (the Tab5 once, which resets when its port opens).
+                return None
             return self.port_cfg
         now = time.time()
         cands = [p for p in list_serial_ports() if p["espressif"]
