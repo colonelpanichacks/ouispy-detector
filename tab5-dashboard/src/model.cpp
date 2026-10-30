@@ -229,6 +229,28 @@ void node_memo_flush(bool linkDown) {
     model_unlock();
 }
 
+// The GPS node on our own USB reports its fix to us every second; the dashboard only
+// hears it over the mesh, which drops out once we drive out of range of the home. So
+// that node's marker takes our live fix, and a dashboard update can't drag it back.
+static char localFixId[7];
+static double localLat, localLon;
+static uint32_t localFixMs;
+
+static void apply_local_fix(Node &n) {
+    if (!localFixMs || millis() - localFixMs > 10000 || strcmp(n.id, localFixId)) return;
+    n.hasPos = true, n.lat = localLat, n.lon = localLon;
+}
+
+void node_local_fix(const char *id, double la, double lo) {
+    if (!id || !*id) return;
+    Guard g;
+    strlcpy(localFixId, id, sizeof localFixId);
+    localLat = la, localLon = lo, localFixMs = millis();
+    node_trail_add(id, la, lo);
+    for (int i = 0; i < M->nnodes; i++)
+        if (!strcmp(M->nodes[i].id, id)) apply_local_fix(M->nodes[i]);
+}
+
 static void parse_node(Node &n, JsonObjectConst o) {
     memset(&n, 0, sizeof n);
     CPY(n.id, o["id"]);
@@ -262,6 +284,7 @@ static void parse_node(Node &n, JsonObjectConst o) {
         n.up = cfg["up"] | 0;
         n.heap = cfg["heap"] | 0;
         size_t fl = strlen(n.fw);
+        apply_local_fix(n);
         if (n.hasPos && fl && (n.fw[fl - 1] == 'G' || n.fw[fl - 1] == 'Y')) node_trail_add(n.id, n.lat, n.lon);
         n.nnbr = parse_seen(cfg["nbr"], n.nbr);
     }

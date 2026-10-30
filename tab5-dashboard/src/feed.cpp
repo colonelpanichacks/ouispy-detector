@@ -341,8 +341,10 @@ void on_line(char *line) {
     net_bridge_line(line);
     if (!strncmp(line, "GPS {", 5)) {   // a GPS node on our USB: its fix is ours too
         JsonDocument d(&psram);
-        if (!deserializeJson(d, line + 4) && d["lat"].is<double>())
+        if (!deserializeJson(d, line + 4) && d["lat"].is<double>()) {
             gps_external(d["lat"], d["lon"], d["acc"] | 10.0f, d["alt"] | 0.0f, d["sats"] | 0, d["spd"] | 0.0f, d["crs"] | 0.0f);
+            node_local_fix(localId, d["lat"], d["lon"]);
+        }
         return;
     }
     if (!strncmp(line, "TLM ", 4)) on_tlm(line + 4);

@@ -253,6 +253,7 @@ void model_unlock();
 
 double server_now();                  // server epoch now, extrapolated
 const Node *node_by_id(const char *id);
+void node_local_fix(const char *id, double la, double lo);   // the GPS node on our USB: its live fix
 const char *node_name(const char *id);  // alias, else id
 uint16_t node_color565(const char *id);
 const Det *det_at(int i);             // 0 = newest
