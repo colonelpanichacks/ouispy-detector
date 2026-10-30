@@ -33,6 +33,7 @@ bool otaStaged(uint32_t& size);
 uint16_t otaOfferPayload(const uint8_t target[3], uint8_t* out);
 void otaSendBegin(const uint8_t target[3], uint16_t session);
 void otaSendAbort();
+bool otaOffering();          // offer sent, target hasn't answered yet
 bool otaSelfInstall(String& err);
 void otaPrintStatus();
 

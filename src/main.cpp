@@ -2109,6 +2109,21 @@ static bool parseTarget(String t, uint8_t out[3], bool& all) {
 // Flood a management command: fleet-wide commands go out unwrapped (so
 // older firmware still obeys AUDIO/REBOOT/FILTERS), addressed ones inside a
 // MESH_CMD_TARGET wrapper.
+// The update offer, kept to repeat until the target answers: a Sky-Spy hunting a drone is
+// on the mesh channel only 200 ms every 2 s, so one burst of copies can miss it entirely.
+// The target treats the same offer again as "resume", so repeats are harmless.
+static uint8_t reoffer[4 + 48];
+static uint16_t reofferLen = 0;
+static uint32_t reofferAt = 0;
+
+static void reofferTick() {
+    if (!reofferLen) return;
+    if (!otaOffering()) { reofferLen = 0; return; }
+    if (millis() - reofferAt < 4000) return;
+    reofferAt = millis();
+    meshQueueCommand(MESH_CMD_TARGET, meshNewCmdId(), reoffer, reofferLen);
+}
+
 static bool sendMgmt(const char* op, const uint8_t t[3], bool all, uint8_t cmd,
                      const uint8_t* p, uint16_t len) {
     if (!meshCfg.enabled) { Serial.printf("ERR %s: mesh disabled on this node\n", op); return false; }
@@ -2368,7 +2383,14 @@ static bool remoteConsoleCommand(const String& line) {
         if (meshOtaBusy()) { Serial.println("ERR fwsend: an update is already running"); return true; }
         uint8_t p[48];
         uint16_t n = otaOfferPayload(t, p);
-        if (sendMgmt("fwsend", t, false, MESH_CMD_OTA_OFFER, p, n)) otaSendBegin(t, (uint16_t)(p[0] | (p[1] << 8)));
+        if (sendMgmt("fwsend", t, false, MESH_CMD_OTA_OFFER, p, n)) {
+            otaSendBegin(t, (uint16_t)(p[0] | (p[1] << 8)));
+            memcpy(reoffer, t, 3);
+            reoffer[3] = MESH_CMD_OTA_OFFER;
+            memcpy(reoffer + 4, p, n);
+            reofferLen = n + 4;
+            reofferAt = millis();
+        }
         return true;
     }
     if (verb == "fwabort") { otaSendAbort(); Serial.println("OK fwabort"); return true; }
@@ -6851,6 +6873,7 @@ void loop() {
     gpsNodeLoop();
     checkBootButtonLoop();   // BOOT hold -> clear lock, back to config mode
     meshOtaTick();
+    reofferTick();
     otaRollbackTick();
     // Once this image is confirmed, drop the old-layout filter keys that were
     // kept as the rollback's copy (the blob is the list from now on).

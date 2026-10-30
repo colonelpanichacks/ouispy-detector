@@ -213,6 +213,8 @@ void otaSendBegin(const uint8_t target[3], uint16_t session) {
     txReport("offered");
 }
 
+bool otaOffering() { return txState == TX_OFFER; }
+
 void otaSendAbort() {
     if (txState == TX_OFFER || txState == TX_SEND) txFail("aborted");
 }
