@@ -12,6 +12,7 @@
 #include "net.h"
 #include "maptiles.h"
 #include "sdcard.h"
+#include "store.h"
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
@@ -263,10 +264,13 @@ void setup() {
     touchQ = xQueueCreate(64, sizeof(TouchEv));
     xTaskCreatePinnedToCore(hw_task, "hw", 6144, nullptr, 4, nullptr, 1);
     gps_begin();   // any GPS unit on Grove port A: our own position, wardrive stamping
+    // The card before any feed: what was saved goes back in first, then live data lands on it.
+    sd_begin();
+    store_load();
     if (S.source != SRC_NETWORK) feed_start();
     net_start();
-    sd_begin();
     maptiles_start();
+    store_start();
 }
 
 void loop() {

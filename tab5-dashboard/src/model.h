@@ -273,6 +273,7 @@ constexpr int NODE_TRAIL = 400;
 int node_trail(const char *id, float (*out)[2], int max);
 bool node_track_on(const char *id);
 void node_track_set(const char *id, bool on);
+size_t node_trails_raw(void **buf, int **count);   // all trails as one block (store.cpp)
 void ingest_stats(JsonDocument &doc);
 void ingest_cleared(JsonObjectConst e);
 void ingest_drone(JsonObjectConst d);          // dashboard "drone" event shape

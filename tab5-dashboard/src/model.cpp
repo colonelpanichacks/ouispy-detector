@@ -635,19 +635,31 @@ void ingest_state(JsonDocument &doc) {
 
     // Rebuild the feed from the server's newest 150, then put back anything newer that
     // arrived over the socket while this was in flight.
+    // Anything older than the server's 150 stays too: the history the Tab5 kept itself
+    // (restored from the card, or heard on USB with no dashboard) isn't the server's to drop.
     Det *newer = (Det *)ps_malloc(sizeof(Det) * MAX_DETS);
-    int nn = 0;
+    Det *older = (Det *)ps_malloc(sizeof(Det) * MAX_DETS);
+    int nn = 0, no = 0;
     JsonArrayConst recent = doc["recent"];
     uint32_t stateMax = 0;
-    for (JsonObjectConst o : recent) stateMax = max(stateMax, (uint32_t)(o["id"] | 0));
-    if (newer) {
-        for (int i = M->ndets - 1; i >= 0; i--)
-            if (det_at(i)->id > stateMax) newer[nn++] = *det_at(i);
+    double oldest = 1e18;
+    for (JsonObjectConst o : recent) {
+        stateMax = max(stateMax, (uint32_t)(o["id"] | 0));
+        oldest = min(oldest, (double)(o["ts"] | 1e18));
+    }
+    if (newer && older) {
+        for (int i = M->ndets - 1; i >= 0; i--) {   // oldest first
+            const Det *d = det_at(i);
+            if (d->id > stateMax) newer[nn++] = *d;
+            else if (d->ts < oldest) older[no++] = *d;
+        }
     }
     M->ndets = 0;
     M->detHead = MAX_DETS - 1;
     M->maxDetId = 0;
     M->ntargets = 0;
+    for (int i = 0; i < no; i++) ring_push(older[i]);
+    free(older);
     for (int i = (int)recent.size() - 1; i >= 0; i--) {   // oldest first
         JsonObjectConst o = recent[i];
         Det d;
@@ -835,6 +847,13 @@ int node_trail(const char *id, float (*out)[2], int max) {
     return k;
 }
 bool node_track_on(const char *id) { NTrail *t = ntrail_find(id, false); return !t || !t->off; }
+// The trails as one block, for store.cpp (saved to and restored from the card).
+size_t node_trails_raw(void **buf, int **count) {
+    if (!ntr) ntr = (NTrail *)heap_caps_calloc(MAX_NODES, sizeof(NTrail), MALLOC_CAP_SPIRAM);
+    *buf = ntr;
+    *count = &nntr;
+    return ntr ? MAX_NODES * sizeof(NTrail) : 0;
+}
 void node_track_set(const char *id, bool on) {
     NTrail *t = ntrail_find(id, true);
     if (t) t->off = !on;

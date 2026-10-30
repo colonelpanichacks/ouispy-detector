@@ -115,3 +115,32 @@ void wd_new_session() {
     sessWifi = sessBle = 0;
     ver++;
 }
+
+// The whole store as one block for store.cpp: {u32 count, u32 sessWifi, u32 sessBle}
+// then the devices. wd_restore rebuilds the index. Both under the model lock.
+size_t wd_snapshot(uint8_t *out, size_t cap) {
+    size_t need = 12 + (size_t)n * sizeof(WdDev);
+    if (!devs || need > cap) return 0;
+    uint32_t h[3] = {(uint32_t)n, sessWifi, sessBle};
+    memcpy(out, h, 12);
+    memcpy(out + 12, devs, (size_t)n * sizeof(WdDev));
+    return need;
+}
+
+bool wd_restore(const uint8_t *in, size_t len) {
+    if (len < 12 || !ready()) return false;
+    uint32_t h[3];
+    memcpy(h, in, 12);
+    if (h[0] > WD_MAX || len != 12 + (size_t)h[0] * sizeof(WdDev)) return false;
+    memcpy(devs, in + 12, len - 12);
+    n = h[0];
+    sessWifi = h[1], sessBle = h[2];
+    memset(idx, 0xFF, IDX * sizeof(int16_t));
+    for (int i = 0; i < n; i++) {
+        uint32_t k = hkey(devs[i].mac, devs[i].kind) % IDX;
+        while (idx[k] >= 0) k = (k + 1) % IDX;
+        idx[k] = i;
+    }
+    ver++;
+    return true;
+}

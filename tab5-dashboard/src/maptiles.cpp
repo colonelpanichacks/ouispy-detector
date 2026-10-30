@@ -6,6 +6,8 @@
 #include "sdcard.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <mbedtls/platform.h>
 
 // Keyless, checked by their pixels: Esri imagery, and Esri's dark gray canvas with its
 // labels composited in by the dashboard (or without). CARTO now wants an API key.
@@ -45,10 +47,45 @@ int slot_of(uint8_t layer, int z, int x, int y) {
     return -1;
 }
 
-// Download one tile from the dashboard into buf; returns its size (0 = failed).
-size_t download(const Want &w, uint8_t *buf) {
+// The same public servers the dashboard's tile proxy uses (tiles.py), for when the
+// dashboard isn't reachable: any Wi-Fi with internet (a phone hotspot) still gets maps.
+// The dark map comes without its label layer this way (the dashboard composites those).
+const char *DIRECT[NLAYERS] = {
+    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/%d/%ld/%ld",
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%ld/%ld",
+    "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%ld/%ld",
+};
+constexpr size_t PLACEHOLDER_UNDER = 10000;   // Esri's "no imagery here yet" tile (satellite): never kept
+uint32_t dashFailMs = 0;                      // the dashboard last failed a tile: go direct for a while
+
+// TLS buffers (~40 KB a connection) in PSRAM, not the internal RAM the Wi-Fi link lives on.
+void *tls_calloc(size_t n, size_t sz) {
+    void *p = heap_caps_calloc(n, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return p ? p : heap_caps_calloc(n, sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+size_t read_body(HTTPClient &h, uint8_t *buf) {
+    size_t n = 0;
+    int len = h.getSize();
+    WiFiClient *s = h.getStreamPtr();
+    uint32_t t0 = millis();
+    while (n < BUF_N && millis() - t0 < 8000) {
+        int a = s->available();
+        if (a > 0) {
+            n += s->readBytes(buf + n, min((size_t)a, BUF_N - n));
+            if (len > 0 && (int)n >= len) break;
+        } else if (!h.connected()) {
+            break;
+        } else {
+            delay(2);
+        }
+    }
+    return n;
+}
+
+size_t from_dashboard(const Want &w, uint8_t *buf) {
     String base = net_base();
-    if (!base.length() || WiFi.status() != WL_CONNECTED) return 0;
+    if (!base.length()) return 0;
     char path[96];
     snprintf(path, sizeof path, "/tiles/%s/%d/%ld/%ld", LAYER_IDS[w.layer], w.z, (long)w.x, (long)w.y);
     WiFiClient c;
@@ -56,24 +93,42 @@ size_t download(const Want &w, uint8_t *buf) {
     h.setTimeout(8000);
     h.setConnectTimeout(3000);
     if (!h.begin(c, base + path)) return 0;
-    size_t n = 0;
-    if (h.GET() == 200) {
-        int len = h.getSize();
-        WiFiClient *s = h.getStreamPtr();
-        uint32_t t0 = millis();
-        while (n < BUF_N && millis() - t0 < 8000) {
-            int a = s->available();
-            if (a > 0) {
-                n += s->readBytes(buf + n, min((size_t)a, BUF_N - n));
-                if (len > 0 && (int)n >= len) break;
-            } else if (!h.connected()) {
-                break;
-            } else {
-                delay(2);
-            }
-        }
-    }
+    size_t n = h.GET() == 200 ? read_body(h, buf) : 0;
     h.end();
+    return n;
+}
+
+size_t from_internet(const Want &w, uint8_t *buf, bool &keep) {
+    static WiFiClientSecure *c = nullptr;
+    if (!c) {
+        c = new WiFiClientSecure();
+        c->setInsecure();   // public map pictures, nothing sent: no certificate store to carry
+    }
+    char url[160];
+    snprintf(url, sizeof url, DIRECT[w.layer], w.z, (long)w.y, (long)w.x);
+    HTTPClient h;
+    h.setTimeout(10000);
+    h.setConnectTimeout(5000);
+    h.setReuse(true);
+    h.setUserAgent("OUI-SPY-Mesh-Tab5/1.0 (field map)");
+    if (!h.begin(*c, url)) return 0;
+    size_t n = h.GET() == 200 ? read_body(h, buf) : 0;
+    h.end();
+    keep = !(w.layer == 0 && n < PLACEHOLDER_UNDER);
+    return n;
+}
+
+// One tile from the dashboard, else straight from the internet; its size (0 = failed).
+// keep: worth putting in the card's cache.
+size_t download(const Want &w, uint8_t *buf, bool &keep) {
+    keep = true;
+    if (WiFi.status() != WL_CONNECTED) return 0;
+    size_t n = 0;
+    if (!dashFailMs || millis() - dashFailMs > 30000) {
+        n = from_dashboard(w, buf);
+        dashFailMs = n ? 0 : millis();
+    }
+    if (!n) n = from_internet(w, buf, keep);
     return n;
 }
 
@@ -100,11 +155,17 @@ void loader(void *) {
         // it dry crashes the whole device: wait for room instead of downloading into it.
         // The card first (no Wi-Fi needed, and no internal RAM: SD DMA reads into PSRAM),
         // the dashboard for what it doesn't have.
-        size_t n = sd_tile(LAYER_IDS[w.layer], w.z, w.x, w.y, buf, BUF_N);
+        // Then the card's cache of tiles fetched before; a download is kept there too.
+        const char *lid = LAYER_IDS[w.layer];
+        int src = 0;   // 0 pack, 1 cache, 2 download
+        bool keep = true;
+        size_t n = sd_tile(lid, w.z, w.x, w.y, buf, BUF_N);
+        if (!n && (n = sd_cache_get(lid, w.z, w.x, w.y, buf, BUF_N))) src = 1;
         if (!n) {
+            src = 2;
             net_bulk_begin();
             while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HEAP_FLOOR) vTaskDelay(pdMS_TO_TICKS(100));
-            n = download(w, buf);
+            n = download(w, buf, keep);
             net_bulk_end();
         }
         if (!n) {
@@ -113,7 +174,11 @@ void loader(void *) {
         }
         dec->fillSprite(0);
         bool png = n > 4 && buf[0] == 0x89 && buf[1] == 'P';
-        if (!(png ? dec->drawPng(buf, n, 0, 0) : dec->drawJpg(buf, n, 0, 0))) continue;
+        if (!(png ? dec->drawPng(buf, n, 0, 0) : dec->drawJpg(buf, n, 0, 0))) {
+            if (src == 1) sd_cache_drop(lid, w.z, w.x, w.y);   // a bad copy: fetch it again next time
+            continue;
+        }
+        if (src == 2 && keep) sd_cache_put(lid, w.z, w.x, w.y, buf, n);
         // Row-major, cache-line aligned, written out of the CPU cache: the PPA reads it by DMA.
         uint16_t *t = (uint16_t *)heap_caps_aligned_alloc(128, TILE * TILE * 2, MALLOC_CAP_SPIRAM);
         if (!t) continue;
@@ -140,10 +205,11 @@ void loader(void *) {
 }  // namespace
 
 void maptiles_start() {
-    // 16 KB each (PNG decoding plus HTTP), in PSRAM: these tasks never touch flash, and
+    mbedtls_platform_set_calloc_free(tls_calloc, free);
+    // 24 KB each (PNG decoding, HTTP and a TLS handshake), in PSRAM: these tasks never touch flash, and
     // internal RAM is the scarce one.
     for (int i = 0; i < LOADERS; i++)
-        xTaskCreatePinnedToCoreWithCaps(loader, "tiles", 16384, nullptr, 1, &loaderTask[i], 0, MALLOC_CAP_SPIRAM);
+        xTaskCreatePinnedToCoreWithCaps(loader, "tiles", 24576, nullptr, 1, &loaderTask[i], 0, MALLOC_CAP_SPIRAM);
 }
 
 const uint16_t *maptile_peek(uint8_t layer, int z, int x, int y) {

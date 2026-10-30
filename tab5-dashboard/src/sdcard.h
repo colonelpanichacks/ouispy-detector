@@ -3,6 +3,8 @@
 //
 //   /sdcard/maps/*.pak     map tile packs (home-dashboard/tilepack.py builds them)
 //   /sdcard/db/lookup.ldb  vendor / Bluetooth names (home-dashboard/lookupdb.py builds it)
+//   /sdcard/tiles/...      tiles fetched over Wi-Fi, kept (sd_cache_*)
+//   /sdcard/state/         what the Tab5 knows, saved across reboots (store.cpp)
 //
 // A pack: a 64-byte header, a sorted index of {u64 key, u32 offset, u32 length} (key =
 // z << 48 | x << 24 | y) and the JPEG tiles. Packs stay under 2 GB (FAT32 caps a file at 4 GB, and fseek
@@ -16,6 +18,12 @@ const char *sd_state();          // "no card", "12.3 of 29.7 GB free, 3 map pack
 uint32_t sd_tiles();             // tiles in every mounted pack
 // A tile's JPEG from the packs into buf; its length, 0 = not on the card. Any task.
 size_t sd_tile(const char *layer, int z, long x, long y, uint8_t *buf, size_t cap);
+// Tiles fetched over Wi-Fi, kept on the card (/sdcard/tiles/<layer>/z/x/y): offline for good.
+size_t sd_cache_get(const char *layer, int z, long x, long y, uint8_t *buf, size_t cap);
+void sd_cache_put(const char *layer, int z, long x, long y, const uint8_t *buf, size_t n);
+void sd_cache_drop(const char *layer, int z, long x, long y);   // it didn't decode
+uint32_t sd_cache_puts();   // written this boot
+uint32_t sd_cache_hits();   // read back this boot
 
 // Files written onto the card elsewhere (or as <name>.part, then sd_finish renames and mounts
 // them). Pushing them in over Wi-Fi crashed the Tab5 (see net.cpp /sd/put).

@@ -15,6 +15,7 @@
 #include <Preferences.h>
 #include "maptiles.h"
 #include "sdcard.h"
+#include "store.h"
 #include "wd.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
@@ -324,6 +325,7 @@ void ota_begin() {
     ArduinoOTA.setPassword(S.otaPass.c_str());
     ArduinoOTA.setMdnsEnabled(false);   // mdns is already up under the same name
     ArduinoOTA.onStart([] {
+        store_save();   // the reboot after it loses nothing
         A.otaActive = true;
         A.otaPct = 0;
         sio.disconnect();
@@ -414,7 +416,7 @@ void debug_poll() {
                  "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
                  "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
                  "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
-                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
+                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
                  "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
                  "\"sync\":%lu,\"ppa_push\":%lu,\"m_unused\":%lu,\"m_tiles\":%lu,\"m_rings\":%lu,\"m_tgt_nodes\":%lu,\"m_drones\":%lu,\"m_chrome\":%lu}}\n",
                  (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
@@ -423,7 +425,7 @@ void debug_poll() {
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                  (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,
-                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(),
+                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(), (unsigned long)sd_cache_puts(), (unsigned long)sd_cache_hits(), store_state(),
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0,
                  (unsigned long)ui_prof[0], (unsigned long)ui_prof[1], (unsigned long)ui_prof[2], (unsigned long)ui_prof[3],
                  (unsigned long)ui_prof[5], (unsigned long)ui_prof[4], (unsigned long)ui_prof[6], 0UL, (unsigned long)ui_prof[7], (unsigned long)ui_prof[8],
@@ -762,13 +764,47 @@ void fetch_detail() {
     model_unlock();
     if (!mac[0]) return;
     JsonDocument doc(&psram);
-    if (http_json(String("/api/devices/") + mac + "?flat=1", doc, nullptr)) ingest_detail(doc);
-    else {
+    if (http_json(String("/api/devices/") + mac + "?flat=1", doc, nullptr)) {
+        ingest_detail(doc);
+        intel_put(mac, doc);
+    } else if (intel_get(mac, doc)) {   // the copy on the card
+        ingest_detail(doc);
+    } else {
         model_lock();
         M->detail.loading = false;
         M->version++;
         model_unlock();
     }
+}
+
+// While the dashboard is there, its record of every device the Tab5 has heard goes onto
+// the card, one every 15 s, so the detail page has it all after the Tab5 leaves. Refreshed
+// after 6 h (new names, companions).
+bool prefetch_intel() {   // false: nothing fetched (all done, or already fresh on the card)
+    static uint32_t done[4096];   // MAC hashes handled this boot (open addressing, 0 = free)
+    static int ndone = 0;
+    if (!sd_ok() || ndone > 3000) return false;
+    char mac[18] = "";
+    model_lock();
+    for (int i = 0; i < M->ntargets + M->ndets && !mac[0]; i++) {
+        const char *m = i < M->ntargets ? M->targets[i].mac : det_at(i - M->ntargets)->mac;
+        if (!m[0]) continue;
+        uint32_t h = 2166136261u;
+        for (const char *p = m; *p; p++) h = (h ^ toupper(*p)) * 16777619u;
+        h |= 1;
+        uint32_t k = h % 4096;
+        while (done[k] && done[k] != h) k = (k + 1) % 4096;
+        if (done[k]) continue;
+        done[k] = h, ndone++;
+        strlcpy(mac, m, sizeof mac);
+    }
+    model_unlock();
+    if (!mac[0]) return false;
+    long age = intel_age(mac);
+    if (age >= 0 && age < 6 * 3600) return false;
+    JsonDocument doc(&psram);
+    if (http_json(String("/api/devices/") + mac + "?flat=1", doc, nullptr)) intel_put(mac, doc);
+    return true;
 }
 
 void poll_task(void *) {
@@ -825,6 +861,15 @@ void poll_task(void *) {
             lastPrune = now;
             prune_targets();
         }
+        static uint32_t lastPrefetch = 0;
+        // Background work, so only with room to spare: one record every 15 s, never while
+        // internal RAM is tight (a fetch beside the live socket's bursts is what starved
+        // the Wi-Fi link).
+        if (M->sockUp && now - lastPrefetch > 15000 && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) > 64 * 1024 &&
+            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) > 32 * 1024) {
+            lastPrefetch = now;
+            if (!prefetch_intel()) lastPrefetch = now - 14500;   // skipped one: the next soon
+        }
     }
 }
 
@@ -833,7 +878,11 @@ void poll_task(void *) {
 static SemaphoreHandle_t bulkLock = xSemaphoreCreateMutex();
 void net_bulk_begin() {
     xSemaphoreTake(bulkLock, portMAX_DELAY);
-    for (int i = 0; i < 100 && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 48 * 1024; i++) delay(50);
+    // Free AND in one piece: the Wi-Fi link reads a burst into one contiguous DMA buffer,
+    // and a fragmented heap with plenty free still failed that (sdio_rx_get_buffer assert).
+    for (int i = 0; i < 100 && (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 48 * 1024 ||
+                                heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 24 * 1024); i++)
+        delay(50);
 }
 void net_bulk_end() { xSemaphoreGive(bulkLock); }
 

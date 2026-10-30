@@ -303,3 +303,68 @@ const char *sd_vendor(const char *mac) {
     c.p = p + 1;   // 0 = an empty slot
     return c.n;
 }
+
+// ---------------------------------------------------------------- tile cache
+// Every tile fetched over Wi-Fi is kept on the card too (/sdcard/tiles/<layer>/z/x/y), so a
+// place looked at once has its map with no Wi-Fi, after a reboot, for good. Stops writing
+// with under 512 MB free; the packs and anything else on the card come first.
+namespace {
+uint64_t cacheFree = 0;
+uint32_t cachePuts = 0, cacheHits = 0;
+void tile_path(char *out, size_t cap, const char *layer, int z, long x, long y, int depth) {
+    // depth 0 = the file, 1 = its x folder, 2 = z, 3 = layer
+    if (depth == 3) snprintf(out, cap, "/sdcard/tiles/%s", layer);
+    else if (depth == 2) snprintf(out, cap, "/sdcard/tiles/%s/%d", layer, z);
+    else if (depth == 1) snprintf(out, cap, "/sdcard/tiles/%s/%d/%ld", layer, z, x);
+    else snprintf(out, cap, "/sdcard/tiles/%s/%d/%ld/%ld", layer, z, x, y);
+}
+}  // namespace
+
+size_t sd_cache_get(const char *layer, int z, long x, long y, uint8_t *buf, size_t cap) {
+    if (!mounted) return 0;
+    char p[80];
+    tile_path(p, sizeof p, layer, z, x, y, 0);
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    size_t n = 0;
+    if (FILE *f = fopen(p, "rb")) {
+        n = fread(buf, 1, cap, f);
+        fclose(f);
+    }
+    xSemaphoreGive(lock_);
+    if (n == cap) n = 0;   // bigger than any tile: not one
+    if (n) cacheHits++;
+    return n;
+}
+
+void sd_cache_put(const char *layer, int z, long x, long y, const uint8_t *buf, size_t n) {
+    if (!mounted || n < 64) return;
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    if (!cacheFree || cachePuts % 500 == 0) cacheFree = SD.totalBytes() - SD.usedBytes();
+    if (cacheFree > 512ULL * 1024 * 1024) {
+        char p[80];
+        mkdir("/sdcard/tiles", 0775);
+        for (int d = 3; d >= 1; d--) {
+            tile_path(p, sizeof p, layer, z, x, y, d);
+            mkdir(p, 0775);
+        }
+        tile_path(p, sizeof p, layer, z, x, y, 0);
+        if (FILE *f = fopen(p, "wb")) {
+            bool ok = fwrite(buf, 1, n, f) == n;
+            if (fclose(f) || !ok) remove(p);   // half a tile is worse than none
+            else cachePuts++, cacheFree -= n;
+        }
+    }
+    xSemaphoreGive(lock_);
+}
+
+void sd_cache_drop(const char *layer, int z, long x, long y) {
+    if (!mounted) return;
+    char p[80];
+    tile_path(p, sizeof p, layer, z, x, y, 0);
+    xSemaphoreTake(lock_, portMAX_DELAY);
+    remove(p);
+    xSemaphoreGive(lock_);
+}
+
+uint32_t sd_cache_puts() { return cachePuts; }
+uint32_t sd_cache_hits() { return cacheHits; }

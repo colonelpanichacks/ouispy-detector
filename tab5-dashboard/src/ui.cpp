@@ -9,6 +9,7 @@
 #include "feed.h"
 #include "maptiles.h"
 #include "sdcard.h"
+#include "store.h"
 #include "gfx.h"
 #include "gps.h"
 #include "wd.h"
@@ -1457,6 +1458,13 @@ void open_detail(const char *mac) {
     memset(&dd, 0, sizeof dd);
     strlcpy(dd.mac, mac, sizeof dd.mac);
     dd.loading = net_online();
+    if (!dd.loading) {   // no dashboard: its record from the card, when it was saved
+        JsonDocument doc;
+        if (intel_get(mac, doc)) {
+            doc["mac"] = dd.mac;
+            ingest_detail(doc);
+        }
+    }
     A.detail = true;
     A.editAlias = A.newGroup = false;
 }

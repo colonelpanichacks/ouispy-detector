@@ -31,3 +31,5 @@ const WdDev &wd_at(int i);
 uint32_t wd_session_count(uint8_t kind);   // 0 = both
 uint32_t wd_version();                     // bumps on every change (redraw)
 void wd_new_session();                     // everything so far becomes history
+size_t wd_snapshot(uint8_t *out, size_t cap);    // the store as one block, 0 = no room (store.cpp)
+bool wd_restore(const uint8_t *in, size_t len);
