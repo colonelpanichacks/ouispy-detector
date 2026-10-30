@@ -310,3 +310,5 @@ void loop() {
     }
     delay(5);
 }
+
+bool kb_present() { return kbOk; }   // the Tab5 Keyboard answers (else the UI offers its own)

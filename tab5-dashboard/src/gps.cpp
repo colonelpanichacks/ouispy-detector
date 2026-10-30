@@ -183,6 +183,17 @@ void gps_begin() {
     xTaskCreatePinnedToCore(gps_task, "gps", 4096, nullptr, 2, nullptr, 0);
 }
 
+void gps_external(double lat, double lon, float acc, float alt, uint8_t sats, float spd, float crs) {
+    if (present) return;   // our own module wins
+    portENTER_CRITICAL(&mux);
+    fix.valid = true;
+    fix.lat = lat, fix.lon = lon, fix.acc = acc, fix.alt = alt, fix.sats = sats, fix.speed = spd, fix.course = crs;
+    fix.ms = millis();
+    add_trail(lat, lon);
+    portEXIT_CRITICAL(&mux);
+    snprintf(state, sizeof state, "GPS from the node on USB  %u sats", sats);
+}
+
 GpsFix gps_fix() {
     portENTER_CRITICAL(&mux);
     GpsFix f = fix;

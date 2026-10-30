@@ -68,6 +68,8 @@ class Fleet:
         self.emit = emit                 # emit(event_name, payload)
         self.drones = None               # drones.Drones, set by the app
         self.wardrive = None             # wardrive.Wardrive, set by the app
+        self.on_fix = None               # (node, lat, lon, acc, by): a GPS node's position
+        self._usb_node = {}              # source -> node id on it (from its TLM)
         self.tri = None                  # tri.Tri, set by the app: fixes for every display
         self.tri_fixes = {}              # mac -> last fix (sent with /api/state)
         self._tri_q = set()
@@ -141,6 +143,25 @@ class Fleet:
             else:
                 self._node_filters(obj)
             return
+        if line.startswith("POS "):
+            # A GPS node's position, over the mesh (the home prints it).
+            try:
+                o = json.loads(line[4:])
+                if self.on_fix:
+                    self.on_fix(str(o["node"]).upper(), float(o["lat"]), float(o["lon"]), o.get("acc"), "mesh")
+            except (ValueError, KeyError, TypeError):
+                pass
+            return
+        if line.startswith("GPS ") and source in ("serial", "bridge", "wardrive-usb"):
+            # A GPS node on USB (ours, or a Tab5's): its own fix, every second.
+            try:
+                o = json.loads(line[4:])
+                nid = self._usb_node.get(source)
+                if nid and self.on_fix and "lat" in o:
+                    self.on_fix(nid, float(o["lat"]), float(o["lon"]), o.get("acc"), "usb")
+            except (ValueError, KeyError, TypeError):
+                pass
+            return
         if line.startswith("DENIED "):
             # A node reported lost is talking on the mesh: the nodes drop it; raise the alarm.
             try:
@@ -211,6 +232,8 @@ class Fleet:
 
     def feed_tlm(self, t, source="serial"):
         now = time.time()
+        if t.get("id"):
+            self._usb_node[source] = t["id"]   # which node is on this USB line (its GPS lines)
         if t.get("role") == "remote":
             # A remote's own telemetry (a node on a Tab5's USB, bridged up): it is that
             # node's view, not the home's. Taking it as the home's made the home id flip

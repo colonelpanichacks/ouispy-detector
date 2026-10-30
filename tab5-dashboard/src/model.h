@@ -55,7 +55,7 @@ struct Node {
     char wdCh[24];         // channel plan, "1-11", "6", "1,6,11"
     uint32_t wdWifi, wdBle;
 };
-inline bool node_is_wardriver(const Node &n) { size_t l = strlen(n.fw); return l && n.fw[l - 1] == 'W'; }
+inline bool node_is_wardriver(const Node &n) { size_t l = strlen(n.fw); return l && (n.fw[l - 1] == 'W' || n.fw[l - 1] == 'Y'); }
 
 struct Home {
     char id[7];

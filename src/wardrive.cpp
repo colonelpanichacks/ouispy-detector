@@ -1,6 +1,7 @@
 #include "wardrive.h"
 #include "devinfo.h"
 #include <Preferences.h>
+#include "gpsnode.h"
 
 // Sightings travel from the radio callbacks to loop() through a small ring (two
 // producers, so a spinlock), are de-duplicated against a table of every device seen,
@@ -219,8 +220,17 @@ static const char* secName(uint8_t s) {
     }
 }
 
+#ifdef GPS_NODE
+void gpsNodeWigle(bool wifi, const char* mac, const char* name, const char* sec, int ch, int rssi);
+#endif
+
 static void printObs(const WdObs& o, bool isNew) {
     char mac[18], txt[200];
+    // A GPS node knows where it is: the sighting carries its own fix (and goes in its log).
+    char loc[64] = "";
+    double la, lo;
+    float acc;
+    if (gpsNodeFix(la, lo, acc)) snprintf(loc, sizeof loc, ",\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f", la, lo, acc);
     snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", o.mac[0], o.mac[1], o.mac[2], o.mac[3], o.mac[4], o.mac[5]);
     jsonStr(txt, sizeof txt, o.txt);
     if (o.kind == WD_WIFI) {
@@ -237,8 +247,11 @@ static void printObs(const WdObs& o, bool isNew) {
             n += snprintf(extra + n, sizeof extra - n, "]");
         }
         Serial.printf("WD {\"t\":\"wifi\",\"mac\":\"%s\",\"ssid\":\"%s\",\"ch\":%u,\"rssi\":%d,\"sec\":\"%s\","
-                      "\"hidden\":%d,\"wps\":%d%s,\"new\":%d}\n",
-                      mac, txt, o.ch, o.rssi, secName(o.sec), (o.wcap & 16) ? 1 : 0, (o.wcap & 8) ? 1 : 0, extra, isNew ? 1 : 0);
+                      "\"hidden\":%d,\"wps\":%d%s%s,\"new\":%d}\n",
+                      mac, txt, o.ch, o.rssi, secName(o.sec), (o.wcap & 16) ? 1 : 0, (o.wcap & 8) ? 1 : 0, extra, loc, isNew ? 1 : 0);
+#ifdef GPS_NODE
+        gpsNodeWigle(true, mac, o.txt, secName(o.sec), o.ch, o.rssi);
+#endif
     } else {
         char extra[140] = "";
         int n = 0;
@@ -251,8 +264,11 @@ static void printObs(const WdObs& o, bool isNew) {
             for (int k = 0; k < o.nuuid; k++) n += snprintf(extra + n, sizeof extra - n, "%s\"%04X\"", k ? "," : "", o.uuid[k]);
             n += snprintf(extra + n, sizeof extra - n, "]");
         }
-        Serial.printf("WD {\"t\":\"ble\",\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"rnd\":%d%s,\"new\":%d}\n",
-                      mac, txt, o.rssi, o.rnd, extra, isNew ? 1 : 0);
+        Serial.printf("WD {\"t\":\"ble\",\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"rnd\":%d%s%s,\"new\":%d}\n",
+                      mac, txt, o.rssi, o.rnd, extra, loc, isNew ? 1 : 0);
+#ifdef GPS_NODE
+        gpsNodeWigle(false, mac, o.txt, "", 0, o.rssi);
+#endif
     }
 }
 

@@ -76,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -335,14 +335,17 @@ bool icontains(const char *hay, const char *needle) {
     return false;
 }
 
-// Which firmware a node runs (its build stamp suffix): 0 detector, 1 Sky-Spy, 2 wardriver.
+// Which firmware a node runs (its build stamp suffix): 0 detector, 1 Sky-Spy, 2 wardriver,
+// 3 GPS node, 4 GPS wardriver (the last two: AtomS3 + GPS base).
 int node_kind(const Node &n) {
     size_t l = strlen(n.fw);
     char c = l ? n.fw[l - 1] : 0;
-    return c == 'S' ? 1 : c == 'W' ? 2 : 0;
+    return c == 'S' ? 1 : c == 'W' ? 2 : c == 'G' ? 3 : c == 'Y' ? 4 : 0;
 }
-const char *KIND_NAME[3] = {"DETECTOR", "SKY-SPY", "WARDRIVER"};
-uint16_t kind_color(int k) { return k == 1 ? PINK : k == 2 ? rgb(0xff2bd6) : SKY; }
+// Filters group them by what they do: a GPS node detects, a GPS wardriver wardrives.
+int node_group(const Node &n) { int k = node_kind(n); return k == 3 ? 0 : k == 4 ? 2 : k; }
+const char *KIND_NAME[5] = {"DETECTOR", "SKY-SPY", "WARDRIVER", "GPS NODE", "GPS WARDRIVE"};
+uint16_t kind_color(int k) { return k == 1 ? PINK : k == 2 ? rgb(0xff2bd6) : k >= 3 ? rgb(0x39ff88) : SKY; }
 
 // A little house: marks the home node next to its firmware type.
 void home_icon(int x, int y, uint16_t c) {   // x, y = bottom-left
@@ -418,10 +421,10 @@ bool det_match(const Det *d) {
     }
     if (A.kindFilter) {   // only what nodes of one firmware type heard
         const Node *dn = node_by_id(d->node);
-        bool by = dn && node_kind(*dn) == A.kindFilter - 1;
+        bool by = dn && node_group(*dn) == A.kindFilter - 1;
         for (int i = 0; i < d->nseen && !by; i++) {
             const Node *sn = node_by_id(d->seen[i].node);
-            by = sn && node_kind(*sn) == A.kindFilter - 1;
+            by = sn && node_group(*sn) == A.kindFilter - 1;
         }
         if (!by) return false;
     }
@@ -921,6 +924,7 @@ void draw_map() {
             C.drawCircle(x, y, r - 1, FAINT);
         }
         placed[np++] = {x - r - 6, y - r - 6, x + r + 6, y + r + 6};   // labels keep off the dots
+        hit(x - 24, y - 24, 48, 48, H_NODEPIN, order[k]);   // tap: its info card
     }
     font(F_SM);
     const int lh = 28;
@@ -1032,6 +1036,40 @@ void draw_map() {
             }
             font(F_SM);
             map_text(x + 18, y, "YOU", me);
+        }
+    }
+    // The tapped node's card: what it is, how it is doing, where it is; SETTINGS, MOVE.
+    if (A.mapPop[0]) {
+        const Node *pn = node_by_id(A.mapPop);
+        if (!pn || !pn->hasPos) A.mapPop[0] = 0;
+        else {
+            int px = sx(pn->lon), py = sy(pn->lat), cw = 380, chh = 236;
+            int cx = constrain(px + 30, MX + 8, MX + MW - cw - 8), cy = constrain(py - chh / 2, MY + 84, MY + MH - chh - 8);
+            if (cx < px + 30 && px + 30 + cw > MX + MW - 8) cx = constrain(px - 30 - cw, MX + 8, MX + MW - cw - 8);
+            uint16_t nc = node_color565(pn->id);
+            fast_round(cx, cy, cw, chh, 10, dim(BG, 0.95f));
+            glow_rect(cx, cy, cw, chh, 10, nc);
+            hit(cx, cy, cw, chh, H_NONE);
+            font(F_MD);
+            text(cx + 16, cy + 22, fit_name(pn->alias[0] ? pn->alias : pn->id, cw - 80), nc, middle_left);
+            chip(cx + cw - 52, cy + 8, "X", MUTED, false, nullptr, H_POPCLOSE);
+            font(F_SM);
+            int kw = kind_label(cx + 16, cy + 50, *pn);
+            text(cx + 16 + kw + 14, cy + 50, pn->id, FAINT, middle_left);
+            char l[64];
+            snprintf(l, sizeof l, "%s   seen %s ago", pn->online ? "ONLINE" : "OFFLINE", pn->age >= 0 ? age_str(server_now() - pn->age) : "-");
+            text(cx + 16, cy + 76, l, pn->online ? ACCENT : RED, middle_left);
+            int rs = pn->isHome ? pn->lrssi : pn->rssi;
+            snprintf(l, sizeof l, "link %s dBm   peers %d   ch %d", rs ? String(rs).c_str() : "--", pn->peers, pn->ch);
+            text(cx + 16, cy + 100, l, TEXT, middle_left);
+            snprintf(l, sizeof l, "fw %s   filters %d", pn->fw[0] ? pn->fw : "?", pn->filters);
+            text(cx + 16, cy + 124, l, MUTED, middle_left);
+            snprintf(l, sizeof l, "%.6f, %.6f%s", pn->lat, pn->lon, node_kind(*pn) >= 3 ? "  (its GPS)" : "");
+            text(cx + 16, cy + 148, l, MUTED, middle_left);
+            int bx = cx + 16, w2;
+            chip(bx, cy + 176, "SETTINGS", ACCENT, false, &w2, H_POPSET);
+            bx += w2 + 10;
+            chip(bx, cy + 176, A.mapMove ? "TAP THE MAP..." : "MOVE", AMBER, A.mapMove, &w2, net_online() ? H_POPMOVE : -1);
         }
     }
     C.clearClipRect();
@@ -1683,15 +1721,19 @@ void draw_node_editor() {
         font(F_SM);
         text(fx, yy, "FIRMWARE", dim(ACCENT, 0.9f));
         fx += C.textWidth("FIRMWARE") + 16;
-        static const char *FWK[] = {"DETECTOR", "SKY-SPY", "WARDRIVER"};
-        int cur = node_is_wardriver(*n) ? 2 : sky ? 1 : 0;
+        // The builds for this board: XIAO (detector, Sky-Spy, wardriver) or AtomS3 + GPS base
+        // (GPS node, GPS wardriver). Chip k is FW_KINDS[k + base].
+        bool atom = node_kind(*n) >= 3;
+        static const char *FWK[] = {"DETECTOR", "SKY-SPY", "WARDRIVER", "GPS NODE", "GPS WARDRIVE"};
+        int base = atom ? 3 : 0, nk = atom ? 2 : 3;
+        int cur = node_kind(*n) - base;
         bool armedFw = A.fwArm >= 0 && millis() - A.fwArmMs < 4000;
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < nk; k++) {
             char lbl[32];
-            if (armedFw && A.fwArm == k) snprintf(lbl, sizeof lbl, "TAP TO INSTALL %s", FWK[k]);
-            else strlcpy(lbl, FWK[k], sizeof lbl);
-            chip(fx, yy - 8, lbl, k == cur ? ACCENT : (armedFw && A.fwArm == k ? RED : SKY), k == cur || (armedFw && A.fwArm == k),
-                 &cw, can ? H_NFW : -1, k);
+            if (armedFw && A.fwArm == k + base) snprintf(lbl, sizeof lbl, "TAP TO INSTALL %s", FWK[k + base]);
+            else strlcpy(lbl, FWK[k + base], sizeof lbl);
+            bool arm = armedFw && A.fwArm == k + base;
+            chip(fx, yy - 8, lbl, k == cur ? ACCENT : (arm ? RED : SKY), k == cur || arm, &cw, can ? H_NFW : -1, k + base);
             fx += cw + 8;
         }
         yy += 48;
@@ -2358,9 +2400,16 @@ void draw_filter_row(int y, int shown, int total) {
     else C.drawRoundRect(x, y, sw, sh, 8, A.search[0] ? dim(ACCENT, 0.7f) : LINE2);
     font(F_MD);
     if (A.search[0] || A.searching) {
-        char b[40];
-        snprintf(b, sizeof b, "%s%s", A.search, A.searching && (millis() / 500) % 2 ? "_" : "");
-        text(x + 14, y + sh / 2, b, TEXT, middle_left);
+        // The text, its tail kept in view, then a thin blinking caret right after it.
+        const char *t = A.search;
+        while (*t && C.textWidth(t) > sw - 40) t++;
+        text(x + 14, y + sh / 2, t, TEXT, middle_left);
+        if (A.searching && (millis() / 450) % 2) {
+            int cx = x + 16 + C.textWidth(t);
+            C.fillRect(cx, y + 8, 2, sh - 16, ACCENT);
+            C.fillRect(cx - 1, y + 8, 4, 1, dim(ACCENT, 0.5f));
+            C.fillRect(cx - 1, y + sh - 9, 4, 1, dim(ACCENT, 0.5f));
+        }
     } else {
         text(x + 14, y + sh / 2, "/  search vendor, MAC, node", FAINT, middle_left);
     }
@@ -2407,6 +2456,40 @@ void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows)
 
 // ------------------------------------------------------------------ LIVE
 
+// On-screen keyboard for the search box when no keyboard is plugged in: letters, digits and
+// what MACs need, SPACE / DEL / CLEAR / DONE. It sits over the bottom of the page.
+void draw_osk() {
+    if (!A.searching || kb_present()) return;
+    static const char *ROWS[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL:", "ZXCVBNM-._"};
+    int kw = (W - 2 * PAD - 9 * 8) / 10, kh = 50, gap = 8;
+    int h = 5 * kh + 4 * gap + 24, y0 = CB - h;
+    fast_round(PAD - 6, y0 - 6, W - 2 * PAD + 12, h + 6, 12, dim(BG, 0.95f));
+    glow_rect(PAD - 6, y0 - 6, W - 2 * PAD + 12, h + 6, 12, dim(ACCENT, 0.7f));
+    hit(PAD - 6, y0 - 6, W - 2 * PAD + 12, h + 6, H_NONE);
+    font(F_MD);
+    for (int r = 0; r < 4; r++) {
+        int n = strlen(ROWS[r]), x = PAD + (W - 2 * PAD - (n * kw + (n - 1) * gap)) / 2, y = y0 + 6 + r * (kh + gap);
+        for (int i = 0; i < n; i++, x += kw + gap) {
+            fast_round(x, y, kw, kh, 8, PANEL2);
+            C.drawRoundRect(x, y, kw, kh, 8, LINE2);
+            char k[2] = {ROWS[r][i], 0};
+            text(x + kw / 2, y + kh / 2, k, TEXT, middle_center);
+            hit(x, y, kw, kh, H_OSK, ROWS[r][i]);
+        }
+    }
+    struct { const char *t; int code; int span; uint16_t c; } bot[] = {
+        {"CLEAR", 27, 2, AMBER}, {"SPACE", ' ', 4, TEXT}, {"DEL", 8, 2, PINK}, {"DONE", 13, 2, ACCENT}};
+    int x = PAD, y = y0 + 6 + 4 * (kh + gap);
+    for (auto &b : bot) {
+        int w = b.span * kw + (b.span - 1) * gap;
+        fast_round(x, y, w, kh, 8, PANEL2);
+        C.drawRoundRect(x, y, w, kh, 8, dim(b.c, 0.7f));
+        text(x + w / 2, y + kh / 2, b.t, b.c, middle_center);
+        hit(x, y, w, kh, H_OSK, b.code);
+        x += w + gap;
+    }
+}
+
 // A sortable column head: tap to sort by it, again to reverse.
 void sort_head(int x, int y, const char *label, int key) {
     font(F_SM);
@@ -2425,8 +2508,16 @@ void draw_live_wardrive() {
     if (!wdIdx) wdIdx = (int *)heap_caps_malloc(WD_MAX * sizeof(int), MALLOC_CAP_SPIRAM);
     if (!wdIdx) return;
     wdN = 0;
-    for (int i = 0, n = wd_count(); i < n; i++)
-        if (wd_at(i).session) wdIdx[wdN++] = i;
+    for (int i = 0, n = wd_count(); i < n; i++) {
+        const WdDev &d = wd_at(i);
+        if (!d.session) continue;
+        if (A.search[0]) {   // name / SSID or MAC
+            char m[18];
+            snprintf(m, sizeof m, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+            if (!icontains(d.name, A.search) && !icontains(m, A.search)) continue;
+        }
+        wdIdx[wdN++] = i;
+    }
     // Sort: last seen (default), name, MAC, type, security, closeness (strongest first).
     auto key = [](int a, int b) -> int {   // <0: a first
         const WdDev &x = wd_at(a), &y = wd_at(b);
@@ -3786,8 +3877,8 @@ static void dispatch(const Hit &h) {
             break;
         }
         case H_NFW: {
-            static const char *KIND[] = {"detector", "skyspy", "wardrive"};
-            int k = constrain((int)h.arg, 0, 2);
+            static const char *KIND[] = {"detector", "skyspy", "wardrive", "gps", "gpswd"};
+            int k = constrain((int)h.arg, 0, 4);
             if (A.fwArm == k && millis() - A.fwArmMs < 4000) {
                 char args[40];
                 snprintf(args, sizeof args, "{\"kind\":\"%s\"}", KIND[k]);
@@ -3930,6 +4021,29 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
+    case H_OSK: {
+        size_t n = strlen(A.search);
+        if (h.arg == 8) { if (n) A.search[n - 1] = 0; }
+        else if (h.arg == 27) A.search[0] = 0;
+        else if (h.arg == 13) A.searching = false;
+        else if (n + 1 < sizeof A.search) A.search[n] = (char)h.arg, A.search[n + 1] = 0;
+        A.top[V_LIVE] = A.sel[V_LIVE] = 0;
+        break;
+    }
+    case H_NODEPIN:
+        if (h.arg >= 0 && h.arg < M->nnodes) {
+            strlcpy(A.mapPop, M->nodes[h.arg].id, sizeof A.mapPop);
+            A.mapMove = false;
+        }
+        break;
+    case H_POPCLOSE: A.mapPop[0] = 0; A.mapMove = false; break;
+    case H_POPSET:
+        if (A.mapPop[0]) { strlcpy(A.nodeEdit, A.mapPop, sizeof A.nodeEdit); A.editNode = false; A.rebootArm = 0; }
+        break;
+    case H_POPMOVE:
+        A.mapMove = !A.mapMove;
+        if (A.mapMove) toast("tap the map where %s is", node_name(A.mapPop));
+        break;
     case H_ZLOCK: A.liveZoomLock = !A.liveZoomLock; toast(A.liveZoomLock ? "list zoom locked" : "pinch the list to zoom it"); break;
     case H_OVDET:
         if (h.arg >= 0 && h.arg < M->ndets) open_detail(det_at(h.arg)->mac);
@@ -4062,6 +4176,16 @@ void ui_release(int x, int y) {
     T.hasPressed = false;
     pressPaint = false;
     if (T.dragging && T.scroll >= 0 && T.area.list == L_MAP) maptiles_clear_requests();
+    // MOVE armed on a node's card: this tap is where it is.
+    if (A.mapMove && A.mapPop[0] && !T.dragging && !T.hasPressed && T.scroll >= 0 && T.area.list == L_MAP && A.view == V_MAP) {
+        double la, lo;
+        screen_to_ll(x, y, gZoomShown, la, lo);
+        char body[64];
+        snprintf(body, sizeof body, "{\"lat\":%.7f,\"lon\":%.7f}", la, lo);
+        node_set(A.mapPop, body);
+        toast("%s placed here", node_name(A.mapPop));
+        A.mapMove = false;
+    } else
     // Double tap on the map: zoom in around that spot.
     if (!T.dragging && !T.hasPressed && T.scroll >= 0 && T.area.list == L_MAP && A.view == V_MAP && !A.detail) {
         static uint32_t lastTap = 0;
@@ -4190,6 +4314,7 @@ void ui_frame() {
         default: break;
         }
         if (A.detail) draw_detail();
+        if (A.view == V_LIVE) draw_osk();
         if (A.wdOpen[0]) draw_wd_info();
         if (A.nodeEdit[0]) draw_node_editor();
         uint32_t p2 = micros();

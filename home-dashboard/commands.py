@@ -235,6 +235,14 @@ class Commander(threading.Thread):
             kind = (args or {}).get("kind")
             if kind not in fw.library():
                 raise PlanError(f"no {kind} build in this checkout (build it first)")
+            # Two boards: XIAO ESP32-S3 (detector, Sky-Spy, wardriver) and AtomS3 + GPS base
+            # (GPS node, GPS wardriver). Never put one board's firmware on the other.
+            node = (self.fleet.nodes.get(target) or {}) if hasattr(self.fleet, "nodes") else {}
+            have = fw.node_kind(((node.get("cfg") or {}).get("fw")))
+            atom = {"gps", "gpswd"}
+            if (node.get("cfg") or {}).get("fw") and (have in atom) != (kind in atom):
+                raise PlanError(f"{target} is {'an AtomS3 + GPS' if have in atom else 'a XIAO'} board: "
+                                f"the {kind} build is for {'an AtomS3 + GPS base' if kind in atom else 'a XIAO ESP32-S3'}")
             self.submit("fw_stage", home, {"kind": kind}, auto)
             if target == home:
                 return self.submit("fw_self", home, {"kind": kind, "convert": True}, auto)

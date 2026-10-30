@@ -38,6 +38,8 @@ struct App {
     bool liveZoomLock = false;  // ...unless locked
     char wdOpen[18] = "";       // wardriven device info open (MAC)
     uint8_t wdOpenKind = 0;     // 1 WiFi, 2 BLE
+    char mapPop[7] = "";       // map: the node whose info card is open
+    bool mapMove = false;       // map: the next tap places mapPop there
     bool gpsFollow = false;     // map: keep our own GPS position centred
     bool layerMenu = false;     // the map layer dropdown is open
     char nodeEdit[7] = "";      // node settings panel open for this node id (long press)

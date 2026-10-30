@@ -25,6 +25,7 @@
 #include "devinfo.h"
 #include "rid.h"
 #include "wardrive.h"
+#include "gpsnode.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <rom/crc.h>
@@ -47,12 +48,22 @@ typedef struct __attribute__((packed)) {
 // ================================
 // Pin and Buzzer Definitions - Xiao ESP32 S3
 // ================================
+#ifdef BOARD_ATOMS3
+// AtomS3 (the GPS node): no buzzer or status LED; these land on the unused Grove pins
+// (G21 is its display, G4 its IR LED). The screen is the button (G41).
+#define BUZZER_PIN 1
+#else
 #define BUZZER_PIN 3   // GPIO3 (D2) for buzzer - good PWM pin on Xiao ESP32 S3
+#endif
 #define BUZZER_FREQ 2000  // Frequency in Hz
 #define BUZZER_DUTY 127  // 50% duty cycle for good volume without excessive power draw
 #define BEEP_DURATION 200  // Duration of each beep in ms
 #define BEEP_PAUSE 50  // Pause between beeps in ms (faster sequence)
+#ifdef BOARD_ATOMS3
+#define LED_PIN 2
+#else
 #define LED_PIN 21   // GPIO21 for onboard LED (inverted logic)
+#endif
 
 // Boot sound: three ascending notes (C5 → E5 → G5), third held — a short
 // fanfare instead of a long melody.
@@ -60,7 +71,11 @@ typedef struct __attribute__((packed)) {
 // ================================
 // NeoPixel Definitions - Xiao ESP32 S3
 // ================================
+#ifdef BOARD_ATOMS3
+#define NEOPIXEL_PIN 39
+#else
 #define NEOPIXEL_PIN 4   // GPIO4 (D3) for NeoPixel - confirmed safe pin on Xiao ESP32 S3
+#endif
 #define NEOPIXEL_COUNT 1 // Number of NeoPixels (1 for single pixel)
 #define NEOPIXEL_BRIGHTNESS 50 // Brightness (0-255)
 #define NEOPIXEL_DETECTION_BRIGHTNESS 200 // Brightness during detection (0-255)
@@ -205,9 +220,15 @@ static inline bool isWifiDomain(FilterType t) { return t >= FT_WIFI_PROBE; }
 #ifdef SKYSPY_NODE
 #define FW_KIND_NAME "skyspy"
 bool ridEnabled = true;
+#elif defined(GPS_NODE) && defined(WARDRIVE_NODE)
+#define FW_KIND_NAME "gpswd"      // AtomS3 GPS wardriver: its own kind (other board, other pins)
+bool ridEnabled = true;
 #elif defined(WARDRIVE_NODE)
 #define FW_KIND_NAME "wardrive"
 bool ridEnabled = true;   // drones are part of what's in the air
+#elif defined(GPS_NODE)
+#define FW_KIND_NAME "gps"
+bool ridEnabled = true;
 #else
 #define FW_KIND_NAME "detector"
 bool ridEnabled = false;
@@ -1138,7 +1159,7 @@ void loadConfiguration() {
     preferences.begin("ouispy", true);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
-#if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE)
+#if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE) && !defined(GPS_NODE)
     ridEnabled = preferences.getBool("rid", false);
 #endif
     targetFilters.clear();
@@ -1835,8 +1856,12 @@ static uint8_t buildStatus(uint8_t* d) {
         memcpy(o + 6, b + 12, 8);
 #ifdef SKYSPY_NODE
         o[14] = 'S';    // a Sky-Spy node
+#elif defined(GPS_NODE) && defined(WARDRIVE_NODE)
+        o[14] = 'Y';    // a GPS wardriver (AtomS3)
 #elif defined(WARDRIVE_NODE)
         o[14] = 'W';    // a wardriver
+#elif defined(GPS_NODE)
+        o[14] = 'G';    // a GPS node
 #endif
     }
     n += 16;
@@ -2800,7 +2825,11 @@ bool presetInstalled(const PresetEntry* preset, size_t count) {
 // mode. Without this, burn-in is a one-way door: the AP never comes back, so
 // there is no way to reach the dashboard and no way to undo it short of
 // erasing flash.
+#ifdef BOARD_ATOMS3
+#define BOOT_BUTTON_PIN     41
+#else
 #define BOOT_BUTTON_PIN     0
+#endif
 #define BOOT_HOLD_TIME      1500
 
 static unsigned long bootBtnStart    = 0;
@@ -6537,6 +6566,7 @@ void setup() {
     // END of startScanningMode — after all checks — as the truthful signal.
     initializeBuzzer();
     playBoot();
+    gpsNodeBegin();   // GPS node only: screen, GPS, card (a no-op otherwise)
 
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);   // runtime BOOT-hold escape
     delay(400);
@@ -6796,6 +6826,7 @@ static void emitTelemetry() {
 }
 
 void loop() {
+    gpsNodeLoop();
     checkBootButtonLoop();   // BOOT hold -> clear lock, back to config mode
     meshOtaTick();
     otaRollbackTick();

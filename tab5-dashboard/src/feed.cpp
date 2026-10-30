@@ -326,7 +326,8 @@ void on_line(char *line) {
         static char out[2400];
         GpsFix f = gps_fix();
         int k = snprintf(out, sizeof out, "WD {\"node\":\"%s\",", localId);
-        if (f.valid) k += snprintf(out + k, sizeof out - k, "\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,", f.lat, f.lon, f.acc);
+        bool has = strstr(line, "\"lat\":") != nullptr;   // a GPS wardriver stamps its own fix
+        if (f.valid && !has) k += snprintf(out + k, sizeof out - k, "\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,", f.lat, f.lon, f.acc);
         strlcpy(out + k, line + 4, sizeof out - k);
         net_bridge_line(out);
         JsonDocument d(&psram);
@@ -338,6 +339,12 @@ void on_line(char *line) {
         return;
     }
     net_bridge_line(line);
+    if (!strncmp(line, "GPS {", 5)) {   // a GPS node on our USB: its fix is ours too
+        JsonDocument d(&psram);
+        if (!deserializeJson(d, line + 4) && d["lat"].is<double>())
+            gps_external(d["lat"], d["lon"], d["acc"] | 10.0f, d["alt"] | 0.0f, d["sats"] | 0, d["spd"] | 0.0f, d["crs"] | 0.0f);
+        return;
+    }
     if (!strncmp(line, "TLM ", 4)) on_tlm(line + 4);
     else if (!strncmp(line, "RST ", 4)) on_rst(line + 4);
     else if (!strncmp(line, "RID ", 4)) {   // a drone's Remote ID, from this node or relayed

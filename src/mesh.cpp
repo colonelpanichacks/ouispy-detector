@@ -70,6 +70,7 @@ extern bool isSerialConnected();
 #define MESH_T_OTA      9    // firmware update session (mesh_ota.cpp)
 #define MESH_T_NACK     10   // chunks a command transfer is missing (receiver -> sender)
 #define MESH_T_DRONE    11   // Remote ID drone report (rid.cpp wire body), best effort
+#define MESH_T_POS      12   // a GPS node's position: id(3) lat,lon i32 x1e7, acc dm u16, sats u8, spd dm/s u16, crs cdeg u16
 #define MESH_SEAL_NONCE 12
 #define MESH_SEAL_TAG   8
 #define MESH_SEAL_INNER 7      // len + u16 boot + u32 ctr ahead of the packet
@@ -1273,6 +1274,21 @@ void meshSelfId(uint8_t out[3]) { memcpy(out, selfId, 3); }
 
 // Drone reports are frequent position updates: best effort, no ack, and only
 // when a TX slot is free (detections and commands keep their reserve).
+void meshSendPos(double lat, double lon, float acc, uint8_t sats, float spd, float crs) {
+    if (!meshStarted || txCount >= MESH_TXQ_SIZE - MESH_TXQ_RESERVE) return;
+    uint8_t pkt[MESH_PKT_MAX];
+    uint8_t n = meshBuildHeader(pkt, MESH_T_POS, MESH_TTL);
+    memcpy(pkt + n, selfId, 3);
+    n += 3;
+    int32_t la = (int32_t)lround(lat * 1e7), lo = (int32_t)lround(lon * 1e7);
+    uint16_t a = (uint16_t)min(65535.0f, acc * 10), sp = (uint16_t)min(65535.0f, spd * 10), cr = (uint16_t)(crs * 100);
+    uint8_t b[18] = {(uint8_t)la, (uint8_t)(la >> 8), (uint8_t)(la >> 16), (uint8_t)(la >> 24),
+                     (uint8_t)lo, (uint8_t)(lo >> 8), (uint8_t)(lo >> 16), (uint8_t)(lo >> 24),
+                     (uint8_t)a, (uint8_t)(a >> 8), sats, (uint8_t)sp, (uint8_t)(sp >> 8), (uint8_t)cr, (uint8_t)(cr >> 8)};
+    memcpy(pkt + n, b, 15);
+    meshTxPush(pkt, n + 15);
+}
+
 void meshSendDrone(const uint8_t* body, uint8_t len) {
     if (!meshStarted || len > MESH_PKT_MAX - MESH_HDR_LEN) return;
     if (txCount >= MESH_TXQ_SIZE - MESH_TXQ_RESERVE) return;
@@ -1475,6 +1491,7 @@ static bool meshLenOk(uint8_t type, int len) {
         case MESH_T_NACK:     return len >= MESH_NACK_LEN;
         case MESH_T_OTA:      return len >= MESH_MIN_LEN + 6;
         case MESH_T_DRONE:    return len >= MESH_HDR_LEN + RID_BODY_LEN;
+        case MESH_T_POS:      return len >= MESH_HDR_LEN + 18;
         default:              return len >= MESH_MIN_LEN;
     }
 }
@@ -2025,6 +2042,17 @@ void meshTick() {
             ridFromMesh(pkt + MESH_HDR_LEN, len - MESH_HDR_LEN);
             meshRelay(pkt, len, rxHop);
             break;
+        case MESH_T_POS: {   // a GPS node says where it is: the dashboard moves it on the map
+            const uint8_t* b = pkt + MESH_HDR_LEN + 3;
+            int32_t la = (int32_t)(b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24);
+            int32_t lo = (int32_t)(b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24);
+            if (isSerialConnected())
+                Serial.printf("POS {\"node\":\"%02X%02X%02X\",\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f,\"sats\":%u,\"spd\":%.1f,\"crs\":%.1f}\n",
+                              nodeId[0], nodeId[1], nodeId[2], la / 1e7, lo / 1e7, (b[8] | b[9] << 8) / 10.0, b[10],
+                              (b[11] | b[12] << 8) / 10.0, (b[13] | b[14] << 8) / 100.0);
+            meshRelay(pkt, len, rxHop);
+            break;
+        }
         case MESH_T_BYE:
             // Controlled shutdown: drop the origin right now so the link
             // LED goes dark instantly instead of at the silence threshold.

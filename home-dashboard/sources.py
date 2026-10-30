@@ -321,7 +321,7 @@ class WardriveUsbSource(Source):
                         except ValueError:
                             pass
                         continue
-                    if proven and line.startswith(("TLM ", "RST ", "RID ")):
+                    if proven and line.startswith(("TLM ", "RST ", "RID ", "GPS ", "POS ")):
                         self.fleet.feed_line(line, "wardrive-usb")
                 if len(buf) > 65536:
                     buf = b""

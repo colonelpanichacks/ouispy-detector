@@ -11,3 +11,4 @@ void ui_pinch(int phase, int x, int y, int dist, uint32_t ms);   // phase 0 star
 void ui_dirty();
 void ui_screenshot(Stream &out);                   // raw RGB565 frame, for checking layouts over serial
 extern uint32_t ui_drawMs, ui_pushMs;   // last frame, for the serial log
+bool kb_present();   // main.cpp: the keyboard on ExtPort1 answers

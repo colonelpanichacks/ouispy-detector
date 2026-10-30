@@ -90,7 +90,7 @@ def node_kind(fw):
     """A node's kind from the build stamp it reports ("Oct28 20:37:51S" = Sky-Spy,
     "...W" = wardriver)."""
     end = (fw or "").rstrip()[-1:]
-    return {"S": "skyspy", "W": "wardrive"}.get(end, "detector")
+    return {"S": "skyspy", "W": "wardrive", "G": "gps", "Y": "gpswd"}.get(end, "detector")
 
 
 def save(img, filename=""):
@@ -129,7 +129,8 @@ def load():
 
 # The three node firmwares, from this checkout's own builds (pio run -e <env>): the
 # dashboard can put any of them on any node ("convert" a detector into a wardriver...).
-LIBRARY = {"detector": "seeed_xiao_esp32s3", "skyspy": "skyspy", "wardrive": "wardrive"}
+LIBRARY = {"detector": "seeed_xiao_esp32s3", "skyspy": "skyspy", "wardrive": "wardrive",
+           "gps": "atomgps", "gpswd": "atomgps-wd"}   # the last two are AtomS3 + GPS base builds
 REPO = os.path.dirname(HERE)
 
 

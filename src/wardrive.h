@@ -17,7 +17,7 @@
 #include <Arduino.h>
 
 #ifdef WARDRIVE_NODE
-constexpr bool wdOn() { return true; }   // this build is a wardriver
+constexpr bool wdOn() { return true; }   // this build is a wardriver (also the GPS wardriver)
 #else
 constexpr bool wdOn() { return false; }
 #endif

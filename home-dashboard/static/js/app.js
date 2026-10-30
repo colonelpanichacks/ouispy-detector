@@ -58,7 +58,8 @@ function lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private window */ } }
 // A dedicated Sky-Spy drone node reports its build stamp with an "S" suffix.
 function isSkySpy(n) { return !!(n && n.cfg && /S$/.test(String(n.cfg.fw || "").trim())); }
-function isWardriver(n) { return !!(n && n.cfg && /W$/.test(String(n.cfg.fw || "").trim())); }
+function isWardriver(n) { return !!(n && n.cfg && /[WY]$/.test(String(n.cfg.fw || "").trim())); }   // Y = GPS wardriver
+function isGpsNode(n) { return !!(n && n.cfg && /[GY]$/.test(String(n.cfg.fw || "").trim())); }
 function nodeById(id) { return S.fleet.nodes.find((n) => n.id === id); }
 function nodeName(id) {
     const n = nodeById(id);
@@ -303,6 +304,7 @@ function renderNodes() {
                     ${syncState(n) === "drift" ? `<span class="ntag drift" title="Filter list differs from the home node">DRIFT</span>` : ""}
                     ${isSkySpy(n) ? `<span class="ntag sky" title="Dedicated Sky-Spy drone node (Remote ID)">SKY-SPY</span>` : ""}
                     ${isWardriver(n) ? `<span class="ntag wd" title="Wardriver: every access point and Bluetooth device it hears">WARDRIVE</span>` : ""}
+                    ${isGpsNode(n) ? `<span class="ntag gps" title="Carries its own GPS: moves on the map">GPS</span>` : ""}
                 </span>
                 <span class="role ${role}">${role}</span>
             </div>
@@ -3571,8 +3573,12 @@ document.querySelectorAll('.tab[data-tab="devices"]').forEach((b) => b.addEventL
 setInterval(() => { if ($("tab-devices").classList.contains("active")) loadWdTab(); }, 15000);
 
 // Node drawer: find it by ear, and put any of the three firmwares on it.
-const FW_NAMES = { detector: "OUI-SPY detector", skyspy: "Sky-Spy", wardrive: "Wardriver" };
-function nodeKind(n) { return isSkySpy(n) ? "skyspy" : isWardriver(n) ? "wardrive" : "detector"; }
+const FW_NAMES = { detector: "OUI-SPY detector", skyspy: "Sky-Spy", wardrive: "Wardriver",
+                   gps: "GPS node (AtomS3)", gpswd: "GPS wardriver (AtomS3)" };
+function nodeKind(n) {
+    const end = n && n.cfg ? String(n.cfg.fw || "").trim().slice(-1) : "";
+    return { S: "skyspy", W: "wardrive", G: "gps", Y: "gpswd" }[end] || "detector";
+}
 $("dBeep3").onclick = () => command(S.selected, "locate", { mode: 1 });
 $("dLocate").onchange = () => command(S.selected, "locate", { mode: $("dLocate").checked ? 2 : 0 });
 async function showFw(n) {
@@ -3667,7 +3673,8 @@ showWardriver = function (n) { _showWardriverPrev(n); showFw(n); };
 // ------------------------------------------------------------------
 // Overview tab: the Tab5's overview on the web (KPIs, fleet, live feed, 24 h activity)
 // ------------------------------------------------------------------
-const OV_KIND = { detector: ["DETECTOR", "#7dd3fc"], skyspy: ["SKY-SPY", "#ff7ad9"], wardrive: ["WARDRIVER", "#ff2bd6"] };
+const OV_KIND = { detector: ["DETECTOR", "#7dd3fc"], skyspy: ["SKY-SPY", "#ff7ad9"], wardrive: ["WARDRIVER", "#ff2bd6"],
+                  gps: ["GPS NODE", "#39ff88"], gpswd: ["GPS WARDRIVER", "#39ff88"] };
 const HOUSE_SVG = `<svg class="ov-house" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8v10h-6v-6H9v6H3z"/></svg>`;
 function rssiTone(r) { return r == null ? "var(--muted)" : r >= -60 ? "#39ff88" : r >= -75 ? "#22d3ee" : r >= -85 ? "#ffb020" : "#ff4d6d"; }
 function renderOverview() {

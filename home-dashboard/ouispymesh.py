@@ -853,12 +853,26 @@ def api_node_gps(nid):
         return jsonify({"ok": False, "error": "lat/lon required"}), 400
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return jsonify({"ok": False, "error": "bad coordinates"}), 400
-    now = time.time()
-    store.update_node(nid, lat=lat, lon=lon)
-    store.add_track(nid, lat, lon, acc, now)
-    GPS_STATE[nid] = {"ts": now, "acc": acc}
-    emit("gps", {"node": nid, "lat": lat, "lon": lon, "acc": acc, "ts": now})
+    node_fix(nid, lat, lon, acc, "phone")
     return jsonify({"ok": True})
+
+
+def node_fix(nid, lat, lon, acc=None, by="gps"):
+    """A node's live position (a phone carrying it, or its own GPS: POS over the mesh, GPS
+    lines on USB): moves it on the maps and extends its trail."""
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return
+    now = time.time()
+    prev = GPS_STATE.get(nid) or {}
+    store.update_node(nid, lat=lat, lon=lon)
+    if now - prev.get("track_ts", 0) > 5:   # the trail at most every 5 s
+        store.add_track(nid, lat, lon, acc, now)
+        prev["track_ts"] = now
+    GPS_STATE[nid] = {**prev, "ts": now, "acc": acc, "by": by}
+    emit("gps", {"node": nid, "lat": lat, "lon": lon, "acc": acc, "ts": now, "by": by})
+
+
+fleet.on_fix = node_fix
 
 
 @app.route("/api/nodes/<nid>/gps", methods=["DELETE"])

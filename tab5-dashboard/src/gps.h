@@ -21,6 +21,9 @@ void gps_begin();
 GpsFix gps_fix();          // latest (valid false when none or stale)
 const char *gps_state();   // "no GPS", "GPS 9600: 4 sats, no fix", "GPS 3D 9 sats"
 bool gps_present();        // a module is talking
+// A fix from elsewhere: a GPS node on our USB ("GPS {...}" lines). Used while no module is
+// on the Grove port.
+void gps_external(double lat, double lon, float acc, float alt, uint8_t sats, float spd, float crs);
 
 // Where the Tab5 has been (the map's own trail): up to GPS_TRAIL points, one every
 // 3 m of movement.

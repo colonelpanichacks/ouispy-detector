@@ -357,6 +357,9 @@ static uint8_t* rxBits = nullptr;            // one bit per chunk received
 static esp_ota_handle_t rxHandle;
 static const esp_partition_t* rxPart = nullptr;
 static bool rxDirty = false;                 // got data since the last report
+// Boards without PSRAM (AtomS3): chunks go straight into the erased spare slot, and the
+// image is checked by reading it back from flash before it is marked bootable.
+static bool rxToFlash = false;
 
 static void rxFree() {
     if (rxImg) { free(rxImg); rxImg = nullptr; }
@@ -417,9 +420,15 @@ bool meshOtaOffer(const uint8_t* p, uint16_t len) {
     rxPart = esp_ota_get_next_update_partition(nullptr);
     if (!rxPart || size == 0 || size > rxPart->size) return false;
     uint32_t chunks = (size + OTA_CHUNK - 1) / OTA_CHUNK;
-    rxImg = (uint8_t*)ps_malloc(size);
+    rxImg = psramFound() ? (uint8_t*)ps_malloc(size) : nullptr;
     rxBits = (uint8_t*)calloc((chunks + 7) / 8, 1);
-    if (!rxImg || !rxBits) { rxFree(); return false; }
+    rxToFlash = !rxImg;
+    if (!rxBits) { rxFree(); return false; }
+    if (rxToFlash) {
+        // No room for the image in RAM: erase where it will go (a few seconds, once).
+        uint32_t span = (size + 0xFFF) & ~0xFFFu;
+        if (esp_partition_erase_range(rxPart, 0, span) != ESP_OK) { rxFree(); return false; }
+    }
     rxSession = session;
     rxSize = size;
     rxChunks = chunks;
@@ -444,11 +453,32 @@ static void rxOnData(const uint8_t* b, uint8_t len) {
     uint16_t n = len - (OTA_HDR + 2);
     uint32_t expect = (idx == rxChunks - 1) ? rxSize - idx * OTA_CHUNK : OTA_CHUNK;
     if (n != expect || rxHas(idx)) return;
-    memcpy(rxImg + idx * OTA_CHUNK, b + OTA_HDR + 2, n);
+    if (rxToFlash) {
+        if (esp_partition_write(rxPart, idx * OTA_CHUNK, b + OTA_HDR + 2, n) != ESP_OK) { rxFinish(OTA_E_WRITE); return; }
+    } else {
+        memcpy(rxImg + idx * OTA_CHUNK, b + OTA_HDR + 2, n);
+    }
     rxBits[idx >> 3] |= 1 << (idx & 7);
     rxCount++;
     rxDirty = true;
     if (rxCount < rxChunks) return;
+    if (rxToFlash) {   // already in flash: hash it there, then boot it
+        uint8_t got[32], buf[1024];
+        mbedtls_sha256_context ctx;
+        mbedtls_sha256_init(&ctx);
+        mbedtls_sha256_starts(&ctx, 0);
+        for (uint32_t off = 0; off < rxSize; off += sizeof buf) {
+            uint32_t w = rxSize - off < sizeof buf ? rxSize - off : sizeof buf;
+            if (esp_partition_read(rxPart, off, buf, w) != ESP_OK) { mbedtls_sha256_free(&ctx); rxFinish(OTA_E_WRITE); return; }
+            mbedtls_sha256_update(&ctx, buf, w);
+        }
+        mbedtls_sha256_finish(&ctx, got);
+        mbedtls_sha256_free(&ctx);
+        if (memcmp(got, rxSha, 32) != 0) { rxFinish(OTA_E_HASH); return; }
+        if (esp_ota_set_boot_partition(rxPart) != ESP_OK) { rxFinish(OTA_E_BOOT); return; }
+        rxFinish(OTA_E_NONE);
+        return;
+    }
     // Everything is here: check it in RAM, then write the flash in one pass.
     uint8_t got[32];
     mbedtls_sha256(rxImg, rxSize, got, 0);

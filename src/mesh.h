@@ -35,6 +35,8 @@ bool meshKeySet();
 void meshSetKey(const char* key);
 // Lost nodes: their packets are dropped (not relayed) and reported as "DENIED {...}".
 void meshSetDeny(const uint8_t* ids, uint8_t n);
+// A GPS node's position, flooded to the home (printed there as POS {...}).
+void meshSendPos(double lat, double lon, float acc, uint8_t sats, float spd, float crs);
 uint8_t meshDenyCount();
 uint32_t meshDeniedRx();
 
