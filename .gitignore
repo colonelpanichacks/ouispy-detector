@@ -2,3 +2,6 @@
 
 # TAK client certificate converted from the .p12 (tak.py)
 home-dashboard/tak-client.pem
+# Reticulum identity and LXMF store (reticulum.py): private
+home-dashboard/rns_identity
+home-dashboard/lxmf/

@@ -1121,7 +1121,7 @@ body.map-maxed .toasts { z-index: 1700; }
 /* Overview tab (like the Tab5's) */
 .ov-bar { margin-bottom: 12px; }
 .tak-send { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 4px 0 8px; }
-#tStatus.ok { color: #39ff88; } #tStatus.bad { color: #ff4d6d; }
+#tStatus.ok, #rStatus.ok { color: #39ff88; } #tStatus.bad, #rStatus.bad { color: #ff4d6d; }
 .ov-wdk { font-size: 10px; font-weight: 700; letter-spacing: 1px; }
 .ov-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
 .ov-kpi { border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 8px; padding: 10px 12px; background: var(--panel-2); min-width: 0; }

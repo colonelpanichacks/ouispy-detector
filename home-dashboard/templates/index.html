@@ -411,6 +411,25 @@
                     <div class="help-text" id="tStatus">Off.</div>
                 </div>
                 <div class="set-block">
+                    <h4>Reticulum (LXMF alerts)</h4>
+                    <div class="toggle-item"><input type="checkbox" id="rEn"><label for="rEn" class="toggle-label">Send alerts over Reticulum</label></div>
+                    <label>Our address <span class="lbl-hint">(add it as a contact in MeshChat / Sideband)</span></label>
+                    <input type="text" id="rAddr" class="field" readonly placeholder="appears once it is on">
+                    <label>Send to <span class="lbl-hint">(LXMF addresses, 32 hex characters, one per line)</span></label>
+                    <textarea id="rTo" class="field" rows="2" placeholder="a1b2c3..."></textarea>
+                    <label>Name</label><input type="text" id="rName" class="field" placeholder="OUI-SPY Mesh">
+                    <label>Send</label>
+                    <div class="tak-send">
+                        <label class="chk"><input type="checkbox" id="rsNew"> New devices (batched)</label>
+                        <label class="chk"><input type="checkbox" id="rsDrones"> Drones</label>
+                        <label class="chk"><input type="checkbox" id="rsLost"> Lost nodes</label>
+                        <label class="chk"><input type="checkbox" id="rsNodes"> Nodes on / off</label>
+                    </div>
+                    <div class="toggle-item"><input type="checkbox" id="rAnn"><label for="rAnn" class="toggle-label">Announce our address on the network (visible to everyone on it)</label></div>
+                    <div class="ctl-row"><button class="btn ghost" type="button" id="rTest">Send a test</button></div>
+                    <div class="help-text" id="rStatus">Off.</div>
+                </div>
+                <div class="set-block">
                     <h4>Map Tiles</h4>
                     <select id="sTiles" class="field"></select>
                     <input type="text" id="sTilesCustom" class="field" placeholder="http://localhost:8080/{z}/{x}/{y}.png">

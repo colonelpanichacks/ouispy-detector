@@ -2609,6 +2609,14 @@ async function loadSettingsForm() {
     $("tUser").value = t.user || "";
     $("tUpass").value = t.password || "";
     $("tAuthRow").style.display = $("tProto").value === "tcp" ? "" : "none";
+    const r = s.rns || {}, rs = r.send || {};
+    $("rEn").checked = !!r.enabled;
+    $("rTo").value = (r.recipients || "").split(/[\s,]+/).filter(Boolean).join("\n");
+    $("rName").value = r.name || "OUI-SPY Mesh";
+    $("rAnn").checked = !!r.announce;
+    $("rsNew").checked = rs.new_devices !== false; $("rsDrones").checked = rs.drones !== false;
+    $("rsLost").checked = rs.lost_nodes !== false; $("rsNodes").checked = !!rs.nodes;
+    rnsStatus();
     $("tsNodes").checked = ts.nodes !== false; $("tsDrones").checked = ts.drones !== false; $("tsPilots").checked = ts.pilots !== false;
     $("tsDevices").checked = !!ts.devices; $("tsWd").checked = !!ts.wardrive;
     $("tTlsRow").style.display = $("tProto").value === "tls" ? "" : "none";
@@ -2649,7 +2657,22 @@ async function takStatus() {
         : st.state === "connected" ? `Connected. ${st.items} markers each round, ${st.sent} events sent, last at ${when}.`
         : st.state === "connecting" ? "Connecting..." : `Not connected: ${st.error}`;
 }
-setInterval(() => { if ($("tab-settings").classList.contains("active")) takStatus(); }, 3000);
+async function rnsStatus() {
+    let st;
+    try { st = await api("/api/rns"); } catch (e) { return; }
+    $("rAddr").value = st.address || "";
+    const el = $("rStatus");
+    el.className = "help-text " + (st.state === "ready" ? "ok" : st.state === "error" ? "bad" : "");
+    el.textContent = st.state === "off" ? "Off. Nothing is sent and nothing is announced until this is on."
+        : st.state === "starting" ? "Starting Reticulum..."
+        : st.state === "error" ? `Error: ${st.error}`
+        : `On the network. ${st.sent} delivered, ${st.failed} failed, ${st.queued} waiting for a path.${st.error ? " " + st.error : ""}`;
+}
+$("rAnn").onchange = () => {
+    if ($("rAnn").checked && !confirm("Announce this dashboard's LXMF address? Announces travel the whole Reticulum network, public hubs included. Only needed so contacts can reply or find it.")) $("rAnn").checked = false;
+};
+$("rTest").onclick = async () => { await api("/api/rns/test", { method: "POST", body: {} }); toast("ok", "Test queued", "Delivered when a path to each address is known."); };
+setInterval(() => { if ($("tab-settings").classList.contains("active")) { takStatus(); rnsStatus(); } }, 3000);
 $("sTiles").onchange = () => { $("sTilesCustom").style.display = $("sTiles").value.startsWith("custom") ? "" : "none"; };
 $("saveSettings").onclick = async () => {
     const body = {
@@ -2668,6 +2691,10 @@ $("saveSettings").onclick = async () => {
                key: $("tKey").value.trim(), user: $("tUser").value.trim(), password: $("tUpass").value,
                send: { nodes: $("tsNodes").checked, drones: $("tsDrones").checked, pilots: $("tsPilots").checked,
                        devices: $("tsDevices").checked, wardrive: $("tsWd").checked } },
+        rns: { enabled: $("rEn").checked, recipients: $("rTo").value.split(/[\s,]+/).filter(Boolean).join(" "),
+               name: $("rName").value.trim() || "OUI-SPY Mesh", announce: $("rAnn").checked,
+               send: { new_devices: $("rsNew").checked, drones: $("rsDrones").checked, lost_nodes: $("rsLost").checked,
+                       nodes: $("rsNodes").checked } },
     };
     const res = await api("/api/settings", { method: "POST", body });
     if (res.ok === false) { toast("bad", "Settings not saved", res.error); return; }

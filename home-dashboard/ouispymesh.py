@@ -31,6 +31,7 @@ from sources import (DemoSource, MqttSource, ReplaySource, SerialSource, Source,
                      WardriveUsbSource, list_serial_ports)
 from store import Store
 import tak as tak_mod
+import reticulum as rns_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -61,6 +62,7 @@ DEFAULT_SETTINGS = {
     "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
              "topic": "+/detection"},
     "tak": dict(tak_mod.DEFAULTS),   # TAK server connector (tak.py): off until set up
+    "rns": dict(rns_mod.DEFAULTS),   # Reticulum / LXMF alerts (reticulum.py): off until set up
 }
 
 
@@ -241,6 +243,11 @@ WEB_ONLY = {"console"}
 
 def emit(event, payload):
     socketio.emit(event, payload, to="web" if event in WEB_ONLY else None)
+    if event in ("det", "drone", "lost_node", "node_event"):
+        try:
+            rns.notify(event, payload)   # Reticulum alerts (when enabled)
+        except NameError:
+            pass   # still starting up
 
 
 fleet = Fleet(store, emit)
@@ -263,6 +270,8 @@ fleet.tri = tri_mod.Tri(lambda: store.all_settings(), _node_pos)
 # TAK: the fleet on a TAK server's map (off until set up in Settings).
 tak = tak_mod.Tak(lambda: settings()["tak"], fleet, drones, wardrive,
                   lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, os.path.dirname(db_path))
+rns = rns_mod.Rns(lambda: settings()["rns"], lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid,
+                  os.path.dirname(db_path))
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread
@@ -296,6 +305,8 @@ def settings():
     s["mqtt"] = {**DEFAULT_SETTINGS["mqtt"], **(s.get("mqtt") or {})}
     t = s.get("tak") or {}
     s["tak"] = {**tak_mod.DEFAULTS, **t, "send": {**tak_mod.DEFAULTS["send"], **(t.get("send") or {})}}
+    r = s.get("rns") or {}
+    s["rns"] = {**rns_mod.DEFAULTS, **r, "send": {**rns_mod.DEFAULTS["send"], **(r.get("send") or {})}}
     return s
 
 
@@ -1185,6 +1196,19 @@ def api_settings_set():
             new[k] = os.path.expanduser(new.get(k) or "")
         store.set_setting("tak", new)
         tak.reload()
+    if "rns" in data and isinstance(data["rns"], dict):
+        cur = settings()["rns"]
+        r = data["rns"]
+        new = {**cur, **{k: r[k] for k in ("enabled", "recipients", "announce", "name") if k in r}}
+        if isinstance(r.get("send"), dict):
+            new["send"] = {**cur["send"], **{k: bool(v) for k, v in r["send"].items() if k in cur["send"]}}
+        bad = [t for t in str(new.get("recipients") or "").replace(",", " ").split()
+               if len(t.strip("<>")) != 32 or any(ch not in "0123456789abcdefABCDEF" for ch in t.strip("<>"))]
+        if bad:
+            return jsonify({"ok": False, "error": f"not an LXMF address (32 hex characters): {bad[0]}"}), 400
+        new["name"] = str(new.get("name") or "OUI-SPY Mesh")[:40]
+        store.set_setting("rns", new)
+        rns.reload()
     refresh_access()
     if restart and not offline_mode:
         start_sources()
@@ -1194,6 +1218,18 @@ def api_settings_set():
     if set(data) - {"map_view"}:
         emit("settings", public_settings())
     return jsonify(public_settings())
+
+
+@app.route("/api/rns")
+def api_rns():
+    """The Reticulum connector: state, our LXMF address, messages sent / failed / waiting."""
+    return jsonify({**rns.snapshot(), "config": settings()["rns"]})
+
+
+@app.route("/api/rns/test", methods=["POST"])
+def api_rns_test():
+    rns._queue("TEST", "OUI-SPY Mesh: test message from the dashboard.")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/tak")
