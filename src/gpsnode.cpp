@@ -1,29 +1,18 @@
 #include "gpsnode.h"
 #ifdef GPS_NODE
 #include <M5GFX.h>
-#include <SD.h>
-#include <SPI.h>
 #include <Preferences.h>
 #include "mesh.h"
 #include "wardrive.h"
 
-// Atomic GPS Base on an AtomS3: found on the hardware (GPS NMEA at 9600 on G5; the card
-// answers on the second SPI host with SCK 7, MISO 8, MOSI 6, CS 38).
+// Atomic GPS Base on an AtomS3: GPS NMEA at 9600 on G5. Its microSD slot is left unused.
 #define GPS_RX 5
-#define SD_SCK 7
-#define SD_MISO 8
-#define SD_MOSI 6
-#define SD_CS 38
 #define BTN 41
 
 namespace {
 
 M5GFX lcd;
 M5Canvas fb(&lcd);
-SPIClass sdSpi(HSPI);
-bool sdOk = false;
-File wlog;
-uint32_t logRows = 0, lastFlush = 0;
 
 struct Fix {
     bool valid;
@@ -123,27 +112,22 @@ void sentence(char* s) {
 
 bool haveFix() { return fix.valid && millis() - fix.ms < 3000; }
 
-void openLog() {
-    if (!sdOk) return;
-    // A new WiGLE file per boot: WigleWifi_<n>.csv, n counting up across boots.
-    Preferences p;
-    p.begin("gpsnode", false);
-    uint32_t n = p.getUInt("logn", 0) + 1;
-    p.putUInt("logn", n);
-    p.end();
-    char path[32];
-    snprintf(path, sizeof path, "/WigleWifi_%04lu.csv", (unsigned long)n);
-    wlog = SD.open(path, FILE_WRITE);
-    if (!wlog) return;
-    char id[7];
-    meshSelfIdHex(id);
-    wlog.printf("WigleWifi-1.4,appRelease=1.0,model=OUI-SPY GPS node,release=1.0,device=%s,display=,board=AtomS3,brand=colonelpanic.tech\n", id);
-    wlog.print("MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type\n");
-    wlog.flush();
-}
-
 // ---- screen: 128 x 128, redrawn into a sprite twice a second ----
 uint16_t c565(uint32_t rgb) { return lgfx::color565(rgb >> 16, (rgb >> 8) & 0xFF, rgb & 0xFF); }
+
+// Text that never runs past the border: trimmed (ending in "~") to what fits from x to 122.
+void put(const char* str, int x, int y) {
+    char t[48];
+    strlcpy(t, str, sizeof t);
+    size_t n = strlen(t);
+    if (fb.textWidth(t) <= 122 - x) { fb.drawString(t, x, y); return; }
+    while (n > 1) {
+        t[--n] = 0;
+        t[n - 1] = '~';
+        if (fb.textWidth(t) <= 122 - x) break;
+    }
+    fb.drawString(t, x, y);
+}
 
 void frame(bool fx) {   // the whole display edged green when locked, red when not
     uint16_t c = fx ? c565(0x39ff88) : c565(0xff4d6d);
@@ -163,15 +147,15 @@ void drawSats() {
     fb.setFont(&fonts::Font0);
     fb.setTextColor(c565(0xdbe4ee));
     if (fx) {
-        snprintf(b, sizeof b, "%.6f", fix.lat); fb.drawString(b, 6, 20);
-        snprintf(b, sizeof b, "%.6f", fix.lon); fb.drawString(b, 6, 30);
-        snprintf(b, sizeof b, "+/-%dm  alt %dm", (int)lroundf(fix.acc), (int)lroundf(fix.alt)); fb.drawString(b, 6, 40);
-        snprintf(b, sizeof b, "%.1f km/h  hdop %.1f", fix.spd * 3.6f, fix.hdop); fb.drawString(b, 6, 50);
+        snprintf(b, sizeof b, "%.6f", fix.lat); put(b, 6, 20);
+        snprintf(b, sizeof b, "%.6f", fix.lon); put(b, 6, 30);
+        snprintf(b, sizeof b, "+/-%dm alt %dm", (int)lroundf(fix.acc), (int)lroundf(fix.alt)); put(b, 6, 40);
+        snprintf(b, sizeof b, "%dkm/h HDOP %.1f", (int)lroundf(fix.spd * 3.6f), fix.hdop); put(b, 6, 50);
     } else {
         fb.setTextColor(nmeaGood ? c565(0xffb020) : c565(0xff4d6d));
-        fb.drawString(nmeaGood ? "searching the sky" : "no data from the GPS", 6, 24);
+        put(nmeaGood ? "searching the sky" : "GPS not talking", 6, 24);
         fb.setTextColor(c565(0x94a3b8));
-        fb.drawString("go outside, clear view", 6, 36);
+        put(nmeaGood ? "needs open sky" : "check the base", 6, 36);
     }
     // signal bars, strongest first: green tracked hard, amber weak, grey not tracked
     Sat v[24];
@@ -188,7 +172,7 @@ void drawSats() {
     }
     fb.setTextColor(c565(0x64748b));
     snprintf(b, sizeof b, "%u in view, %u used", nsats, fix.sats);
-    fb.drawString(b, 6, 60);
+    put(b, 6, 60);
 }
 
 void drawNode() {
@@ -197,36 +181,32 @@ void drawNode() {
     fb.setFont(&fonts::Font2);
     fb.setTextColor(c565(0x2dd4bf));
     snprintf(b, sizeof b, "NODE %s", id);
-    fb.drawString(b, 6, 18);
-    if (wdOn()) {   // the GPS wardriver: what it has found
+    put(b, 6, 18);
+    if (wdOn()) {   // the GPS wardriver: what it has found, one count per line
         fb.setTextColor(c565(0x22d3ee));
         snprintf(b, sizeof b, "AP  %lu", (unsigned long)wdWifiCount());
-        fb.drawString(b, 6, 36);
+        put(b, 6, 34);
         fb.setTextColor(c565(0xff2bd6));
         snprintf(b, sizeof b, "BLE %lu", (unsigned long)wdBleCount());
-        fb.drawString(b, 66, 36);
+        put(b, 6, 50);
     } else {   // the GPS node: a detector that knows where it is
         fb.setTextColor(c565(0x7dd3fc));
-        fb.drawString("DETECTOR + GPS", 6, 36);
+        put("DETECTOR+GPS", 6, 34);
     }
     fb.setFont(&fonts::Font0);
     uint8_t peers = meshNodeCount();
     fb.setTextColor(peers ? c565(0x2dd4bf) : c565(0x64748b));
     snprintf(b, sizeof b, "MESH %u node%s", peers, peers == 1 ? "" : "s");
-    fb.drawString(b, 6, 58);
-    fb.setTextColor(sdOk ? c565(0x39ff88) : c565(0x64748b));
-    if (sdOk) snprintf(b, sizeof b, "SD  %lu rows logged", (unsigned long)logRows);
-    else snprintf(b, sizeof b, "SD  no card");
-    fb.drawString(b, 6, 70);
+    put(b, 6, 70);
     char ch[24];
     wdChannelsText(ch, sizeof ch);
     fb.setTextColor(c565(0x94a3b8));
     snprintf(b, sizeof b, "CH  %s", ch);
-    fb.drawString(b, 6, 82);
+    put(b, 6, 82);
     snprintf(b, sizeof b, "UP  %lum", (unsigned long)(millis() / 60000));
-    fb.drawString(b, 6, 94);
-    int x = (millis() / 20) % 120;   // a sweep: alive
-    fb.drawFastHLine(4 + max(0, x - 20), 118, min(20, x), c565(0x2dd4bf));
+    put(b, 6, 94);
+    int x = (millis() / 20) % 120;   // a sweep: alive, clear of the hint below
+    fb.drawFastHLine(4 + max(0, x - 20), 108, min(20, x), c565(0x2dd4bf));
 }
 
 void draw() {
@@ -244,33 +224,6 @@ void draw() {
 
 }  // namespace
 
-// Called by wardrive.cpp for every printed sighting: a WiGLE row when we have a fix.
-void gpsNodeWigle(bool wifi, const char* mac, const char* name, const char* sec, int ch, int rssi) {
-    if (!wlog || !haveFix()) return;
-    time_t now = time(nullptr);
-    struct tm tmv;
-    gmtime_r(&now, &tmv);
-    char t[24];
-    strftime(t, sizeof t, "%Y-%m-%d %H:%M:%S", &tmv);
-    // SSIDs with commas or quotes are quoted the CSV way.
-    char nm[72];
-    bool q = strpbrk(name, ",\"") != nullptr;
-    size_t k = 0;
-    if (q) nm[k++] = '"';
-    for (const char* p = name; *p && k < sizeof nm - 3; p++) {
-        if (*p == '"') nm[k++] = '"';
-        nm[k++] = *p;
-    }
-    if (q) nm[k++] = '"';
-    nm[k] = 0;
-    const char* auth = !wifi ? "Misc [LE]" : !strcmp(sec, "open") ? "[ESS]" : !strcmp(sec, "WEP") ? "[WEP][ESS]"
-                     : !strcmp(sec, "WPA") ? "[WPA-PSK-CCMP][ESS]" : !strcmp(sec, "WPA3") ? "[WPA3-SAE-CCMP][ESS]"
-                     : !strcmp(sec, "WPA2/WPA3") ? "[WPA2-PSK-CCMP][WPA3-SAE-CCMP][ESS]" : "[WPA2-PSK-CCMP][ESS]";
-    wlog.printf("%s,%s,%s,%s,%d,%d,%.7f,%.7f,%.1f,%.1f,%s\n", mac, nm, auth, t, wifi ? ch : 0, rssi, fix.lat, fix.lon,
-                fix.alt, fix.acc, wifi ? "WIFI" : "BLE");
-    logRows++;
-}
-
 bool gpsNodeFix(double& lat, double& lon, float& acc) {
     if (!haveFix()) return false;
     lat = fix.lat, lon = fix.lon, acc = fix.acc;
@@ -280,7 +233,7 @@ bool gpsNodeFix(double& lat, double& lon, float& acc) {
 void gpsNodeBegin() {
     pinMode(BTN, INPUT_PULLUP);
     lcd.init();
-    lcd.setRotation(0);
+    lcd.setRotation(1);   // 90 degrees clockwise
     lcd.setBrightness(110);
     fb.setColorDepth(16);
     fb.createSprite(128, 128);
@@ -293,9 +246,6 @@ void gpsNodeBegin() {
         p.end();
         if (d) setDark(true);
     }
-    sdSpi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-    sdOk = SD.begin(SD_CS, sdSpi, 20000000);
-    openLog();
     if (!dark) draw();
 }
 
@@ -337,7 +287,6 @@ void gpsNodeLoop() {
         else
             Serial.printf("GPS {\"fix\":0,\"sats\":%u,\"talking\":%d}\n", satsSeen, nmeaGood ? 1 : 0);
     }
-    if (wlog && now - lastFlush > 5000) { lastFlush = now; wlog.flush(); }
 }
 
 #else

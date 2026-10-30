@@ -525,7 +525,10 @@ static void serialConsoleTick() {
         return;
     }
 
-    if (currentMode != CONFIG_MODE) return;
+    // A wardriver never sits in config mode, so it takes its mesh settings while scanning
+    // (provisiondone then saves them and restarts).
+    bool wdSetup = wdOn() && (line.startsWith("mesh ") || line == "provisiondone");
+    if (currentMode != CONFIG_MODE && !wdSetup) return;
 
     if (line.startsWith("mesh ")) {
         int s1 = line.indexOf(' ');
@@ -750,6 +753,12 @@ static void serialConsoleTick() {
         mesh_saveConfig();
         saveConfiguration();
         rebuildWifiOuiTable();
+        if (currentMode != CONFIG_MODE) {
+            Serial.println("OK saved — restarting");
+            Serial.flush();
+            delay(300);
+            ESP.restart();
+        }
         Serial.println("OK saved — switching to scanning");
         Serial.flush();
         delay(300);

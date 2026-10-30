@@ -2612,8 +2612,8 @@ void draw_live() {
         std::reverse(liveIdx, liveIdx + nLive);
     }
     draw_filter_row(CY, nLive, M->ndets);
-    // Rows follow the pinch zoom; the detail of the selected row keeps what is left (if any).
-    int ty = CY + 50, rh = (int)A.liveRh, rows = max(3, min(30, (int)(340 / A.liveRh))), th = 34 + rows * rh + 6;
+    // Rows follow the pinch zoom inside a fixed frame, so the SELECTED box below never moves.
+    int ty = CY + 50, rh = (int)A.liveRh, rows = max(3, min(30, 340 / rh)), th = 34 + 340 + 6;
     panel(PAD, ty, W - 2 * PAD, th, nullptr);
     clamp_sel(V_LIVE, rows);
     const int cAge = PAD + 18, cVen = PAD + 90, cMac = PAD + 400, cType = PAD + 640, cDom = PAD + 740,

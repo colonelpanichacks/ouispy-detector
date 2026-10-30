@@ -220,13 +220,10 @@ static const char* secName(uint8_t s) {
     }
 }
 
-#ifdef GPS_NODE
-void gpsNodeWigle(bool wifi, const char* mac, const char* name, const char* sec, int ch, int rssi);
-#endif
 
 static void printObs(const WdObs& o, bool isNew) {
     char mac[18], txt[200];
-    // A GPS node knows where it is: the sighting carries its own fix (and goes in its log).
+    // A GPS node knows where it is: the sighting carries its own fix.
     char loc[64] = "";
     double la, lo;
     float acc;
@@ -249,9 +246,6 @@ static void printObs(const WdObs& o, bool isNew) {
         Serial.printf("WD {\"t\":\"wifi\",\"mac\":\"%s\",\"ssid\":\"%s\",\"ch\":%u,\"rssi\":%d,\"sec\":\"%s\","
                       "\"hidden\":%d,\"wps\":%d%s%s,\"new\":%d}\n",
                       mac, txt, o.ch, o.rssi, secName(o.sec), (o.wcap & 16) ? 1 : 0, (o.wcap & 8) ? 1 : 0, extra, loc, isNew ? 1 : 0);
-#ifdef GPS_NODE
-        gpsNodeWigle(true, mac, o.txt, secName(o.sec), o.ch, o.rssi);
-#endif
     } else {
         char extra[140] = "";
         int n = 0;
@@ -266,9 +260,6 @@ static void printObs(const WdObs& o, bool isNew) {
         }
         Serial.printf("WD {\"t\":\"ble\",\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"rnd\":%d%s%s,\"new\":%d}\n",
                       mac, txt, o.rssi, o.rnd, extra, loc, isNew ? 1 : 0);
-#ifdef GPS_NODE
-        gpsNodeWigle(false, mac, o.txt, "", 0, o.rssi);
-#endif
     }
 }
 
