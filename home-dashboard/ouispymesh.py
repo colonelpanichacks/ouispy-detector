@@ -32,6 +32,7 @@ from sources import (DemoSource, MqttSource, ReplaySource, SerialSource, Source,
 from store import Store
 import tak as tak_mod
 import reticulum as rns_mod
+import mtastic as mesh_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -63,6 +64,7 @@ DEFAULT_SETTINGS = {
              "topic": "+/detection"},
     "tak": dict(tak_mod.DEFAULTS),   # TAK server connector (tak.py): off until set up
     "rns": dict(rns_mod.DEFAULTS),   # Reticulum / LXMF alerts (reticulum.py): off until set up
+    "meshtastic": dict(mesh_mod.DEFAULTS),   # Meshtastic alerts (mtastic.py): off until set up
 }
 
 
@@ -246,6 +248,7 @@ def emit(event, payload):
     if event in ("det", "drone", "lost_node", "node_event"):
         try:
             rns.notify(event, payload)   # Reticulum alerts (when enabled)
+            mesh.notify(event, payload)  # Meshtastic alerts (when enabled)
         except NameError:
             pass   # still starting up
 
@@ -272,6 +275,26 @@ tak = tak_mod.Tak(lambda: settings()["tak"], fleet, drones, wardrive,
                   lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, os.path.dirname(db_path))
 rns = rns_mod.Rns(lambda: settings()["rns"], lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid,
                   os.path.dirname(db_path))
+
+
+def _our_ports():
+    """Serial ports our own feeds hold: the Meshtastic connector never opens those."""
+    with src_lock:
+        return {v.status().get("port") for v in sources.values()} - {None}
+
+
+def _usb_ignore():
+    """Boards the home-node auto-detect never opens: the ignore list, plus the
+    Meshtastic radio while the connector holds it."""
+    ign = list(store.get_setting("usb_ignore", []) or [])
+    held = mesh.iface_port if mesh.iface is not None else None
+    if held:
+        ign += [p["serial"] for p in list_serial_ports() if p["device"] == held and p["serial"]]
+    return ign
+
+
+mesh = mesh_mod.Mesh(lambda: settings()["meshtastic"],
+                     lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, lambda: _our_ports())
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread
@@ -307,6 +330,8 @@ def settings():
     s["tak"] = {**tak_mod.DEFAULTS, **t, "send": {**tak_mod.DEFAULTS["send"], **(t.get("send") or {})}}
     r = s.get("rns") or {}
     s["rns"] = {**rns_mod.DEFAULTS, **r, "send": {**rns_mod.DEFAULTS["send"], **(r.get("send") or {})}}
+    m = s.get("meshtastic") or {}
+    s["meshtastic"] = {**mesh_mod.DEFAULTS, **m, "send": {**mesh_mod.DEFAULTS["send"], **(m.get("send") or {})}}
     return s
 
 
@@ -349,13 +374,13 @@ def start_sources():
             new["serial"] = SerialSource(fleet, on_source_status, port, record=args.record,
                                          get_pref=lambda: store.get_setting("home_usb_serial"),
                                          set_pref=lambda sn: store.set_setting("home_usb_serial", sn),
-                                         get_ignore=lambda: store.get_setting("usb_ignore", []))
+                                         get_ignore=_usb_ignore)
             # Wardrivers on this computer's USB, besides the home.
             new["wardrive-usb"] = WardriveUsbSource(
                 fleet, on_source_status,
                 busy=lambda: [s.cur_sn for s in sources.values() if isinstance(s, SerialSource) and s.ser and s.cur_sn]
                 + [store.get_setting("home_usb_serial")],
-                get_ignore=lambda: store.get_setting("usb_ignore", []), wardrive=wardrive)
+                get_ignore=_usb_ignore, wardrive=wardrive)
         m = s["mqtt"]
         if args.mqtt:
             host, _, p = args.mqtt.partition(":")
@@ -1223,6 +1248,27 @@ def api_settings_set():
         new["name"] = str(new.get("name") or "OUI-SPY Mesh")[:40]
         store.set_setting("rns", new)
         rns.reload()
+    if "meshtastic" in data and isinstance(data["meshtastic"], dict):
+        cur = settings()["meshtastic"]
+        m = data["meshtastic"]
+        new = {**cur, **{k: m[k] for k in ("enabled", "port", "channel", "recipients") if k in m}}
+        if isinstance(m.get("send"), dict):
+            new["send"] = {**cur["send"], **{k: bool(v) for k, v in m["send"].items() if k in cur["send"]}}
+        try:
+            new["channel"] = int(new.get("channel") or 0)
+        except (TypeError, ValueError):
+            new["channel"] = -1
+        if not 0 <= new["channel"] <= 7:
+            return jsonify({"ok": False, "error": "Meshtastic channel must be 0-7"}), 400
+        toks = str(new.get("recipients") or "").replace(",", " ").split()
+        bad = [t for t in toks if len(t.lstrip("!")) != 8 or any(c not in "0123456789abcdefABCDEF" for c in t.lstrip("!"))]
+        if bad:
+            return jsonify({"ok": False, "error": f"not a Meshtastic node ID (!a1b2c3d4): {bad[0]}"}), 400
+        new["port"] = str(new.get("port") or "").strip()
+        if new["port"] and new["port"] in _our_ports():
+            return jsonify({"ok": False, "error": f"{new['port']} is one of our own nodes, not a Meshtastic radio"}), 400
+        store.set_setting("meshtastic", new)
+        mesh.reload()
     refresh_access()
     if restart and not offline_mode:
         start_sources()
@@ -1243,6 +1289,18 @@ def api_rns():
 @app.route("/api/rns/test", methods=["POST"])
 def api_rns_test():
     rns._queue("TEST", "OUI-SPY Mesh: test message from the dashboard.")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/meshtastic")
+def api_meshtastic():
+    """The Meshtastic connector: radio, channel, messages sent / failed / waiting, what it heard."""
+    return jsonify({**mesh.snapshot(), "config": settings()["meshtastic"]})
+
+
+@app.route("/api/meshtastic/test", methods=["POST"])
+def api_meshtastic_test():
+    mesh.queue("OUI-SPY Mesh: test message from the dashboard.")
     return jsonify({"ok": True})
 
 

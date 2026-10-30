@@ -430,6 +430,28 @@
                     <div class="help-text" id="rStatus">Off.</div>
                 </div>
                 <div class="set-block">
+                    <h4>Meshtastic (mesh radio alerts)</h4>
+                    <div class="toggle-item"><input type="checkbox" id="mtEn"><label for="mtEn" class="toggle-label">Send alerts over Meshtastic</label></div>
+                    <label>Radio <span class="lbl-hint">(a Meshtastic radio on USB, or tcp:&lt;address&gt; for one on the network)</span></label>
+                    <input type="text" id="mtPort" class="field mono" list="mtPorts" placeholder="/dev/cu.usbserial-... or tcp:192.168.1.50">
+                    <datalist id="mtPorts"></datalist>
+                    <div class="two">
+                        <div><label>Channel <span class="lbl-hint">(0-7, must be private)</span></label><input type="number" id="mtCh" class="field" min="0" max="7" value="1"></div>
+                        <div><label>Or direct to <span class="lbl-hint">(node IDs)</span></label><input type="text" id="mtTo" class="field mono" placeholder="!a1b2c3d4 !e5f6a7b8"></div>
+                    </div>
+                    <label>Send</label>
+                    <div class="tak-send">
+                        <label class="chk"><input type="checkbox" id="mtsNew"> New devices (batched)</label>
+                        <label class="chk"><input type="checkbox" id="mtsDrones"> Drones</label>
+                        <label class="chk"><input type="checkbox" id="mtsLost"> Lost nodes</label>
+                        <label class="chk"><input type="checkbox" id="mtsNodes"> Nodes on / off</label>
+                    </div>
+                    <div class="help-text">Never sent on a public channel: a channel with no key or the default key (LongFast) is refused. One message per 15 s at most, to spare the mesh's airtime.</div>
+                    <div class="ctl-row"><button class="btn ghost" type="button" id="mtTest">Send a test</button></div>
+                    <div class="help-text" id="mtStatus">Off.</div>
+                    <div class="help-text mono" id="mtInbox"></div>
+                </div>
+                <div class="set-block">
                     <h4>Map Tiles</h4>
                     <select id="sTiles" class="field"></select>
                     <input type="text" id="sTilesCustom" class="field" placeholder="http://localhost:8080/{z}/{x}/{y}.png">

@@ -2617,6 +2617,15 @@ async function loadSettingsForm() {
     $("rsNew").checked = rs.new_devices !== false; $("rsDrones").checked = rs.drones !== false;
     $("rsLost").checked = rs.lost_nodes !== false; $("rsNodes").checked = !!rs.nodes;
     rnsStatus();
+    const mt = s.meshtastic || {}, mts = mt.send || {};
+    $("mtEn").checked = !!mt.enabled;
+    $("mtPort").value = mt.port || "";
+    $("mtPorts").innerHTML = ports.map((p) => `<option value="${esc(p.device)}">${esc(p.desc)}</option>`).join("");
+    $("mtCh").value = mt.channel ?? 1;
+    $("mtTo").value = mt.recipients || "";
+    $("mtsNew").checked = mts.new_devices !== false; $("mtsDrones").checked = mts.drones !== false;
+    $("mtsLost").checked = mts.lost_nodes !== false; $("mtsNodes").checked = !!mts.nodes;
+    meshStatus();
     $("tsNodes").checked = ts.nodes !== false; $("tsDrones").checked = ts.drones !== false; $("tsPilots").checked = ts.pilots !== false;
     $("tsDevices").checked = !!ts.devices; $("tsWd").checked = !!ts.wardrive;
     $("tTlsRow").style.display = $("tProto").value === "tls" ? "" : "none";
@@ -2671,8 +2680,21 @@ async function rnsStatus() {
 $("rAnn").onchange = () => {
     if ($("rAnn").checked && !confirm("Announce this dashboard's LXMF address? Announces travel the whole Reticulum network, public hubs included. Only needed so contacts can reply or find it.")) $("rAnn").checked = false;
 };
+async function meshStatus() {
+    let st;
+    try { st = await api("/api/meshtastic"); } catch (e) { return; }
+    const el = $("mtStatus");
+    el.className = "help-text " + (st.state === "ready" ? "ok" : st.state === "error" ? "bad" : "");
+    el.textContent = st.state === "off" ? "Off. Nothing is sent until this is on."
+        : st.state === "connecting" ? "Connecting to the radio..."
+        : st.state === "error" ? `Error: ${st.error}`
+        : `On ${st.radio}, sending to ${st.channel}. ${st.sent} sent, ${st.failed} failed, ${st.queued} waiting. ${st.heard} radios heard.`;
+    $("mtInbox").innerHTML = (st.inbox || []).slice(0, 5).map((m) =>
+        `${esc(new Date(m.ts * 1000).toLocaleTimeString([], { hour12: false }))}  ${esc(m.name || m.from)}: ${esc(m.text)}`).join("<br>");
+}
+$("mtTest").onclick = async () => { await api("/api/meshtastic/test", { method: "POST", body: {} }); toast("ok", "Test queued", "Goes out on the next free slot (one message per 15 s)."); };
 $("rTest").onclick = async () => { await api("/api/rns/test", { method: "POST", body: {} }); toast("ok", "Test queued", "Delivered when a path to each address is known."); };
-setInterval(() => { if ($("tab-settings").classList.contains("active")) { takStatus(); rnsStatus(); } }, 3000);
+setInterval(() => { if ($("tab-settings").classList.contains("active")) { takStatus(); rnsStatus(); meshStatus(); } }, 3000);
 $("sTiles").onchange = () => { $("sTilesCustom").style.display = $("sTiles").value.startsWith("custom") ? "" : "none"; };
 $("saveSettings").onclick = async () => {
     const body = {
@@ -2695,6 +2717,10 @@ $("saveSettings").onclick = async () => {
                name: $("rName").value.trim() || "OUI-SPY Mesh", announce: $("rAnn").checked,
                send: { new_devices: $("rsNew").checked, drones: $("rsDrones").checked, lost_nodes: $("rsLost").checked,
                        nodes: $("rsNodes").checked } },
+        meshtastic: { enabled: $("mtEn").checked, port: $("mtPort").value.trim(), channel: Number($("mtCh").value) || 0,
+                      recipients: $("mtTo").value.split(/[\s,]+/).filter(Boolean).join(" "),
+                      send: { new_devices: $("mtsNew").checked, drones: $("mtsDrones").checked, lost_nodes: $("mtsLost").checked,
+                              nodes: $("mtsNodes").checked } },
     };
     const res = await api("/api/settings", { method: "POST", body });
     if (res.ok === false) { toast("bad", "Settings not saved", res.error); return; }

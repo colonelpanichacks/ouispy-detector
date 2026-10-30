@@ -6,3 +6,4 @@ paho-mqtt>=2.0
 Pillow>=10.0
 rns
 lxmf
+meshtastic>=2.7
