@@ -19,6 +19,11 @@ void settings_load() {
     S.flip = p.getBool("flip", false);
     S.bright = p.getUChar("bright", 70);
     S.sound = p.getBool("sound", true);
+    S.sndDet = p.getBool("snddet", true);
+    S.sndDrone = p.getBool("snddrone", true);
+    S.sndNode = p.getBool("sndnode", true);
+    S.proxBeep = p.getBool("proxbeep", true);
+    S.vol = p.getUChar("vol", 55);
     S.muted = p.getString("muted", "");
     S.source = p.getUChar("source", SRC_AUTO);
     p.end();
@@ -38,6 +43,11 @@ void settings_save() {
     p.putBool("flip", S.flip);
     p.putUChar("bright", S.bright);
     p.putBool("sound", S.sound);
+    p.putBool("snddet", S.sndDet);
+    p.putBool("snddrone", S.sndDrone);
+    p.putBool("sndnode", S.sndNode);
+    p.putBool("proxbeep", S.proxBeep);
+    p.putUChar("vol", S.vol);
     p.putString("muted", S.muted);
     p.putUChar("source", S.source);
     p.end();
@@ -107,6 +117,7 @@ bool settings_serial_line(const String &raw) {
     else if (key == "flip") S.flip = val.toInt() != 0;
     else if (key == "bright") S.bright = constrain(val.toInt(), 5, 100);
     else if (key == "sound") S.sound = val.toInt() != 0;
+    else if (key == "vol") S.vol = constrain(val.toInt(), 0, 100);
     else if (key == "source") S.source = val == "usb" ? SRC_USB : val == "network" ? SRC_NETWORK : SRC_AUTO;
     else {
         Serial.printf("unknown key '%s' (ssid pass host port token otapass tz hostname flip bright sound source)\n",

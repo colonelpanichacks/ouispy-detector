@@ -15,6 +15,7 @@
 #include <esp_task_wdt.h>
 #include <esp_system.h>
 #include "settings.h"
+#include "sfx.h"
 #include "ui.h"
 #include "feed.h"
 #include "gps.h"
@@ -62,11 +63,17 @@ void kb_leds() {
     // 120 ms on, 90 ms off, three times; a new detection mid-pattern starts it over.
     uint32_t t = millis() - blinkAt;
     bool on = blinkAt && t < 3 * 210 && t % 210 < 120;
-    if (on != lit) {
-        lit = on;
-        if (on) kb.writeRgb(1, 0xFF, 0x00, 0x00);   // red
-        else kb.writeRgb(1, 0, 0, 0);
+    // Proximity mode owns the LED: a pulse per beat, red far .. green close.
+    static uint32_t lastRgb = 0xFFFFFFFF;
+    uint8_t r = 0, g = 0, b = 0;
+    if (A.prox[0]) on = prox_led(r, g, b);
+    else if (on) r = 0xFF;
+    uint32_t rgb = on ? (uint32_t)r << 16 | g << 8 | b : 0;
+    if (rgb != lastRgb) {
+        lastRgb = rgb;
+        kb.writeRgb(1, r, g, b);
     }
+    lit = on;
 }
 
 // RTC (UTC). Read at boot so USB-only mode has wall time; set from the dashboard's clock.
@@ -242,8 +249,8 @@ void setup() {
     auto cfg = M5.config();
     cfg.serial_baudrate = 115200;
     M5.begin(cfg);
-    M5.Speaker.setVolume(140);
     settings_load();
+    sfx_volume();
     model_init();
     double rtc = rtc_epoch();
     model_set_clock(rtc ? rtc : millis() / 1000.0, rtc != 0);

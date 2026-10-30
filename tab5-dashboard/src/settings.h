@@ -19,7 +19,12 @@ struct Settings {
     String hostname = "ouispy-tab5";
     bool flip = false;
     uint8_t bright = 70;  // %
-    bool sound = true;
+    bool sound = true;    // master switch for every sound
+    bool sndDet = true;   // a detection (new alert)
+    bool sndDrone = true; // a drone shows up
+    bool sndNode = true;  // a node drops off / comes back
+    bool proxBeep = true; // proximity mode beeps (the keyboard LED pulses either way)
+    uint8_t vol = 55;     // %
     String muted;         // comma-separated MACs whose alerts are silenced
 };
 

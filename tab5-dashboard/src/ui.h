@@ -12,3 +12,5 @@ void ui_dirty();
 void ui_screenshot(Stream &out);                   // raw RGB565 frame, for checking layouts over serial
 extern uint32_t ui_drawMs, ui_pushMs;   // last frame, for the serial log
 bool kb_present();   // main.cpp: the keyboard on ExtPort1 answers
+// Proximity mode (one device): the keyboard's right LED color while a pulse is lit.
+bool prox_led(uint8_t &r, uint8_t &g, uint8_t &b);

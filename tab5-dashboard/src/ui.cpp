@@ -11,6 +11,7 @@
 #include "gfx.h"
 #include "gps.h"
 #include "wd.h"
+#include "sfx.h"
 #include "usbhost.h"
 #include "eye_art.h"
 #include "boards_art.h"
@@ -76,7 +77,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -1437,6 +1438,12 @@ void draw_detail() {
     font(F_SM);
     int cw;
     chip(x + w - 20 - (C.textWidth("CLOSE  ESC") + 28), y + 16, "CLOSE  ESC", ACCENT, false, &cw, H_DCLOSE);
+    {   // proximity mode for this device: the keyboard LED (and a beep) by its signal
+        bool pon = !strcasecmp(A.prox, dd.mac);
+        const char *pl = pon ? "PROXIMITY ON" : "PROXIMITY";
+        int pw = C.textWidth(pl) + 28;
+        chip(x + w - 20 - cw - 12 - pw, y + 16, pl, rgb(0x39ff88), pon, nullptr, H_DPROX);
+    }
 
     // Left: everything it said over the air.
     int lx = x + 20, ly = y + 92, lw = 720;
@@ -1917,6 +1924,7 @@ void cached_band(Band &b, uint32_t key, void (*draw)()) {
 
 void draw_top();
 void draw_bottom();
+int prox_rssi(const char **by = nullptr);   // proximity mode: the device's signal (below)
 
 uint32_t top_key() {
     char k[160];
@@ -2068,6 +2076,19 @@ void draw_bottom() {
                         : A.view == V_DRONES  ? "UP DN select   ENTER show on map   tap a tag to label it"
                         : A.searching         ? "type to filter   ENTER keep   ESC clear"
                                               : "/ search   ENTER details   D domain   N node   X mute   A ack";
+    if (A.prox[0]) {   // proximity mode: who, how strong, by whom; STOP
+        const char *by = nullptr;
+        int r = prox_rssi(&by);
+        const Target *t = target_by_mac(A.prox);
+        const char *nm = t ? (t->alias[0] ? t->alias : t->name[0] ? t->name : t->descr[0] ? t->descr : A.prox) : A.prox;
+        char l[96];
+        if (r == INT16_MIN) snprintf(l, sizeof l, "PROXIMITY  %s   not heard for 20 s", nm);
+        else snprintf(l, sizeof l, "PROXIMITY  %s   %d dBm at %s", nm, r, node_name(by));
+        int cw;
+        chip(PAD, y + BOT / 2 - 15, "STOP", RED, true, &cw, H_PROXSTOP);
+        font(F_SM);
+        text(PAD + cw + 12, y + BOT / 2, fit(l, 560), r == INT16_MIN ? AMBER : rgb(0x39ff88), middle_left);
+    } else
     text(PAD, y + BOT / 2, hints, FAINT, middle_left);
     // SETUP / HELP buttons at the far right; status sits left of them.
     int bx = W - PAD, w;
@@ -3500,6 +3521,7 @@ int fsel = 0;
 bool inList = false;
 int listSel = 0, netTop = 0;
 bool reveal = false;
+bool soundPage = false;   // setup: the SOUND page instead of the network list
 String scanNames[16];
 int scanRssi[16];
 static const char *SRC_NAMES[] = {"AUTO", "NETWORK", "USB ONLY"};
@@ -3532,6 +3554,87 @@ constexpr int SF_X = PAD + 20, SF_Y = 92, SF_H = 56, SF_W = 700;
 constexpr int SL_X = SF_X + SF_W + 40, SL_W = W - PAD - 20 - SL_X;
 constexpr int NET_Y = SF_Y + 40, NET_RH = 40, NET_ROWS = 10;
 
+// ------------------------------------------------------------------ proximity
+
+// The device's signal as heard by our own USB node when it heard it (we carry that one),
+// else by the closest node; INT16_MIN when it has gone quiet (20 s).
+int prox_rssi(const char **by) {
+    const Target *t = target_by_mac(A.prox);
+    if (!t || !t->nseen || server_now() - t->last > 20) return INT16_MIN;
+    const char *us = usb_node_id();
+    int k = 0;
+    for (int i = 0; us[0] && i < t->nseen; i++)
+        if (!strcmp(t->seen[i].node, us)) { k = i; break; }
+    if (by) *by = t->seen[k].node;
+    return t->seen[k].rssi;
+}
+namespace {
+uint32_t proxPulse = 0;   // millis() of the last pulse
+uint8_t proxR, proxG, proxB;
+}
+// Pulse rate and pitch from the signal: -95 dBm slow and low, -35 dBm fast and high.
+void prox_loop() {
+    if (!A.prox[0]) return;
+    int r = prox_rssi();
+    float c = r == INT16_MIN ? 0 : constrain((r + 95) / 60.0f, 0.0f, 1.0f);   // 0 far .. 1 close
+    uint32_t every = r == INT16_MIN ? 2500 : (uint32_t)(1400 - 1250 * c);
+    if (millis() - proxPulse < every) return;
+    proxPulse = millis();
+    // far red, then amber, close green: always bright enough to see
+    proxR = c < 0.5f ? 255 : (uint8_t)(255 * (1 - c) * 2);
+    proxG = r == INT16_MIN ? 0 : c < 0.5f ? (uint8_t)(255 * c * 2) : 255;
+    proxB = 0;
+    if (S.proxBeep && r != INT16_MIN) sfx_tick(500 + (int)(2000 * c), 30);
+}
+bool prox_led_now(uint8_t &r, uint8_t &g, uint8_t &b) {
+    if (!A.prox[0] || millis() - proxPulse > 90) return false;
+    r = proxR, g = proxG, b = proxB;
+    return true;
+}
+
+// Setup, SOUND page: which events make a sound, the volume, and a test of each.
+void draw_sound_page(int x, int y, int w, int h) {
+    panel(x, y, w, h, "SOUND");
+    struct Row { const char *label; bool *v; int test; };
+    Row rows[] = {
+        {"ALL SOUNDS", &S.sound, -1},
+        {"DETECTIONS", &S.sndDet, SFX_DETECT},
+        {"DRONES", &S.sndDrone, SFX_DRONE},
+        {"NODES DOWN / BACK", &S.sndNode, SFX_NODE_DOWN},
+        {"PROXIMITY BEEP", &S.proxBeep, -1},
+    };
+    int ry = y + 44;
+    for (int i = 0; i < 5; i++, ry += 54) {
+        bool on = *rows[i].v;
+        font(F_MD);
+        text(x + 18, ry + 15, rows[i].label, i && !S.sound ? FAINT : TEXT, middle_left);
+        int cw;
+        font(F_SM);
+        int bx = x + w - 18 - (C.textWidth(on ? "ON" : "OFF") + 28);
+        chip(bx, ry, on ? "ON" : "OFF", on ? rgb(0x39ff88) : FAINT, on, &cw, H_SND, i);
+        if (rows[i].test >= 0) {
+            int tw2 = C.textWidth("TEST") + 28;
+            chip(bx - 10 - tw2, ry, "TEST", ACCENT, false, &cw, H_SND, 100 + rows[i].test);
+        }
+    }
+    font(F_MD);
+    text(x + 18, ry + 15, "VOLUME", TEXT, middle_left);
+    static const uint8_t vols[] = {20, 40, 60, 80, 100};
+    font(F_SM);
+    int bx = x + w - 18;
+    for (int i = 4; i >= 0; i--) {
+        char v[8];
+        snprintf(v, sizeof v, "%u", vols[i]);
+        int cw = C.textWidth(v) + 28;
+        bx -= cw;
+        chip(bx, ry, v, AMBER, S.vol == vols[i], nullptr, H_SND, 200 + vols[i]);
+        bx -= 8;
+    }
+    font(F_SM);
+    text(x + 18, y + h - 20, "Proximity: open a device's details and tap PROXIMITY. The keyboard's right LED", FAINT, middle_left);
+    text(x + 18, y + h - 2, "pulses faster and greener as it gets closer.", FAINT, middle_left);
+}
+
 void draw_settings() {
     C.fillScreen(BG);
     font(F_BRAND_L);
@@ -3548,6 +3651,10 @@ void draw_settings() {
     w = C.textWidth(reveal ? "HIDE SECRETS" : "SHOW SECRETS") + 28;
     bx -= w;
     chip(bx, 28, reveal ? "HIDE SECRETS" : "SHOW SECRETS", AMBER, reveal, nullptr, H_REVEAL);
+    font(F_SM);
+    w = C.textWidth("SOUND") + 28;
+    bx -= w + 10;
+    chip(bx, 28, "SOUND", rgb(0x39ff88), soundPage, nullptr, H_SOUNDPG);
     font(F_SM);
     text(bx - 20, 43, "tap a field or UP DN TAB   ENTER next   ESC back", FAINT, middle_right);
 
@@ -3599,8 +3706,12 @@ void draw_settings() {
         text(SF_X + 12, y + 36, fit(shown.c_str(), SF_W - 24), TEXT, middle_left);
     }
 
-    // Networks: tap to use, drag to scroll.
+    // Networks: tap to use, drag to scroll. (Or the SOUND page in their place.)
     int ph = NF * SF_H + 40;
+    if (soundPage) {
+        draw_sound_page(SL_X, SF_Y, SL_W, ph);
+        return;
+    }
     panel(SL_X, SF_Y, SL_W, ph, "NETWORKS NEARBY");
     font(F_SM);
     w = C.textWidth("RESCAN") + 28;
@@ -3784,6 +3895,8 @@ void paint_pressed(const Hit &h) {
 }  // namespace
 
 // ------------------------------------------------------------------ public
+
+bool prox_led(uint8_t &r, uint8_t &g, uint8_t &b) { return prox_led_now(r, g, b); }
 
 uint32_t ui_drawMs = 0, ui_pushMs = 0;
 uint32_t ui_prof[12] = {};   // last frame, us: clear, view, top, bottom, -, view id, map: -, tiles, rings, targets+nodes, drones, chrome
@@ -4054,6 +4167,15 @@ static void dispatch(const Hit &h) {
         case H_SAVE: settings_commit(); break;
         case H_BACK: if (settings_ready()) A.settings = false; break;
         case H_REVEAL: reveal = !reveal; break;
+        case H_SOUNDPG: soundPage = !soundPage; break;
+        case H_SND: {
+            bool *vs[] = {&S.sound, &S.sndDet, &S.sndDrone, &S.sndNode, &S.proxBeep};
+            if (h.arg >= 200) S.vol = h.arg - 200, sfx_volume(), sfx_play(SFX_DETECT);
+            else if (h.arg >= 100) { bool m = S.sound; S.sound = true; sfx_play((Sfx)(h.arg - 100)); S.sound = m; }
+            else if (h.arg < 5) *vs[h.arg] = !*vs[h.arg];
+            settings_save();
+            break;
+        }
         case H_RESCAN: net_request_scan(); break;
         }
         return;
@@ -4158,6 +4280,10 @@ static void dispatch(const Hit &h) {
     if (A.detail) {
         switch (h.act) {
         case H_DCLOSE: A.detail = false; A.editAlias = A.newGroup = false; break;
+        case H_DPROX:
+            if (!strcasecmp(A.prox, M->detail.mac)) A.prox[0] = 0, toast("proximity off");
+            else strlcpy(A.prox, M->detail.mac, sizeof A.prox), toast("proximity: watch the keyboard LED");
+            break;
         case H_DALIAS:
             A.editAlias = true, A.newGroup = false;
             strlcpy(A.editBuf, M->detail.alias, sizeof A.editBuf);
@@ -4292,6 +4418,7 @@ static void dispatch(const Hit &h) {
         A.mapMove = !A.mapMove;
         if (A.mapMove) toast("tap the map where %s is", node_name(A.mapPop));
         break;
+    case H_PROXSTOP: A.prox[0] = 0; toast("proximity off"); break;
     case H_ZLOCK: A.liveZoomLock = !A.liveZoomLock; toast(A.liveZoomLock ? "list zoom locked" : "pinch the list to zoom it"); break;
     case H_OVDET:
         if (A.ovWd) {   // a wardriven device (its index in the store): its info page
@@ -4467,6 +4594,28 @@ void ui_release(int x, int y) {
 
 void ui_frame() {
     uint32_t now = millis();
+    sfx_loop();
+    prox_loop();
+    {   // a node dropping off the mesh or coming back: a falling / rising jingle
+        static char was[MAX_NODES][7];
+        static bool wasOn[MAX_NODES];
+        static int nwas = -1;
+        if (M->stateLoaded && nwas >= 0 && S.sndNode && !M->muteAll) {
+            for (int i = 0; i < M->nnodes; i++) {
+                const Node &n = M->nodes[i];
+                for (int k = 0; k < nwas; k++)
+                    if (!strcmp(was[k], n.id) && wasOn[k] != n.online) {
+                        static uint32_t lastNodeSnd = 0;   // a flapping link: once per 30 s at most
+                        if (!lastNodeSnd || now - lastNodeSnd > 30000) lastNodeSnd = now, sfx_play(n.online ? SFX_NODE_UP : SFX_NODE_DOWN);
+                        break;
+                    }
+            }
+        }
+        if (M->stateLoaded) {
+            nwas = min(M->nnodes, (int)MAX_NODES);
+            for (int i = 0; i < nwas; i++) strlcpy(was[i], M->nodes[i].id, 7), wasOn[i] = M->nodes[i].online;
+        }
+    }
     bool alertShown = M->alertsUnacked && M->hasAlert && !M->muteAll;
     static uint32_t lastDroneSeq = 0;
     if (M->droneSeq != lastDroneSeq) {
@@ -4474,16 +4623,14 @@ void ui_frame() {
         lastDroneSeq = M->droneSeq;
         if (!boot && M->ndrones) {
             toast("DRONE DETECTED  %d live", live_drones());
-            if (S.sound && !M->muteAll) M5.Speaker.tone(1800, 160);
+            if (S.sndDrone && !M->muteAll) sfx_play(SFX_DRONE);
             dirty = true;
         }
     }
     if (M->alertSeq != lastAlertSeq) {
         lastAlertSeq = M->alertSeq;
         alertFlashUntil = now + 1500;
-        if (S.sound && !M->muteAll && M->alertsUnacked) {
-            M5.Speaker.tone(3200, 110);
-        }
+        if (S.sndDet && !M->muteAll && M->alertsUnacked) sfx_play(SFX_DETECT);
     }
     // Redraw on change, every second (ages, clock), faster while text cursors blink or an
     // alert pulses: never more than ~12 fps.
