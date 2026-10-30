@@ -30,6 +30,7 @@ from fleet import Fleet
 from sources import (DemoSource, MqttSource, ReplaySource, SerialSource, Source,
                      WardriveUsbSource, list_serial_ports)
 from store import Store
+import tak as tak_mod
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -59,6 +60,7 @@ DEFAULT_SETTINGS = {
     "serial_port": "auto",          # auto | off | a port: COM5, /dev/ttyACM0, /dev/cu.usbmodemXXXX
     "mqtt": {"enabled": False, "host": "", "port": 1883, "user": "", "password": "",
              "topic": "+/detection"},
+    "tak": dict(tak_mod.DEFAULTS),   # TAK server connector (tak.py): off until set up
 }
 
 
@@ -258,6 +260,9 @@ def _node_pos(nid):
 
 
 fleet.tri = tri_mod.Tri(lambda: store.all_settings(), _node_pos)
+# TAK: the fleet on a TAK server's map (off until set up in Settings).
+tak = tak_mod.Tak(lambda: settings()["tak"], fleet, drones, wardrive,
+                  lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, os.path.dirname(db_path))
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread
@@ -289,12 +294,16 @@ def settings():
     s = dict(DEFAULT_SETTINGS)
     s.update(store.all_settings())
     s["mqtt"] = {**DEFAULT_SETTINGS["mqtt"], **(s.get("mqtt") or {})}
+    t = s.get("tak") or {}
+    s["tak"] = {**tak_mod.DEFAULTS, **t, "send": {**tak_mod.DEFAULTS["send"], **(t.get("send") or {})}}
     return s
 
 
 def public_settings():
     s = settings()
     s["mqtt"] = {**s["mqtt"], "password": "********" if s["mqtt"].get("password") else ""}
+    s["tak"] = {**s["tak"], "cert_pass": "********" if s["tak"].get("cert_pass") else "",
+                "password": "********" if s["tak"].get("password") else ""}
     return s
 
 
@@ -1156,6 +1165,26 @@ def api_settings_set():
         new["port"] = int(new.get("port") or 1883)
         store.set_setting("mqtt", new)
         restart = True
+    if "tak" in data and isinstance(data["tak"], dict):
+        cur = settings()["tak"]
+        t = data["tak"]
+        new = {**cur, **{k: t[k] for k in ("enabled", "proto", "host", "port", "cert", "cert_pass", "key",
+                                            "user", "password", "callsign", "interval") if k in t}}
+        if isinstance(t.get("send"), dict):
+            new["send"] = {**cur["send"], **{k: bool(v) for k, v in t["send"].items() if k in cur["send"]}}
+        for k in ("cert_pass", "password"):
+            if new.get(k) == "********":
+                new[k] = cur.get(k, "")
+        if new.get("proto") not in ("tcp", "tls", "udp"):
+            return jsonify({"ok": False, "error": "TAK transport must be tcp, tls or udp"}), 400
+        new["port"] = int(new.get("port") or 8087)
+        new["interval"] = max(2, min(60, int(new.get("interval") or 5)))
+        for k in ("cert", "key"):
+            if new.get(k) and not os.path.exists(os.path.expanduser(new[k])):
+                return jsonify({"ok": False, "error": f"TAK {k} file not found: {new[k]}"}), 400
+            new[k] = os.path.expanduser(new.get(k) or "")
+        store.set_setting("tak", new)
+        tak.reload()
     refresh_access()
     if restart and not offline_mode:
         start_sources()
@@ -1165,6 +1194,12 @@ def api_settings_set():
     if set(data) - {"map_view"}:
         emit("settings", public_settings())
     return jsonify(public_settings())
+
+
+@app.route("/api/tak")
+def api_tak():
+    """The TAK connector's state: off / connecting / connected / error, events sent."""
+    return jsonify({**tak.snapshot(), "config": public_settings()["tak"]})
 
 
 @app.route("/api/ports")

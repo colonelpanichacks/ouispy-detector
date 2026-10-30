@@ -1,1 +1,4 @@
 .pio/
+
+# TAK client certificate converted from the .p12 (tak.py)
+home-dashboard/tak-client.pem

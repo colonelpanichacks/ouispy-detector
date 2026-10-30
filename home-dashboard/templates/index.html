@@ -376,6 +376,41 @@
                     <label>Topic filter</label><input type="text" id="mTopic" class="field" placeholder="+/detection">
                 </div>
                 <div class="set-block">
+                    <h4>TAK server</h4>
+                    <div class="toggle-item"><input type="checkbox" id="tEn"><label for="tEn" class="toggle-label">Send the picture to TAK</label></div>
+                    <div class="two">
+                        <div><label>Transport</label><select id="tProto" class="field">
+                            <option value="tcp">TCP (streaming, 8087)</option><option value="tls">TLS (8089, client cert)</option>
+                            <option value="udp">UDP (input or SA multicast)</option></select></div>
+                        <div><label>Port</label><input type="number" id="tPort" class="field" value="8087"></div>
+                    </div>
+                    <label>Server</label><input type="text" id="tHost" class="field" placeholder="127.0.0.1 or tak.example.lan">
+                    <div class="two">
+                        <div><label>Callsign prefix</label><input type="text" id="tCall" class="field" placeholder="OUI-SPY"></div>
+                        <div><label>Every (s)</label><input type="number" id="tEvery" class="field" min="2" max="60" value="5"></div>
+                    </div>
+                    <div class="two" id="tAuthRow">
+                        <div><label>User (TCP auth="file")</label><input type="text" id="tUser" class="field" autocomplete="off"></div>
+                        <div><label>Password</label><input type="password" id="tUpass" class="field" autocomplete="new-password"></div>
+                    </div>
+                    <div id="tTlsRow">
+                        <label>Client certificate (.p12, or PEM cert)</label><input type="text" id="tCert" class="field" placeholder="~/Desktop/mactak/myclient.p12">
+                        <div class="two">
+                            <div><label>Certificate password</label><input type="password" id="tPass" class="field" autocomplete="new-password"></div>
+                            <div><label>PEM key (if separate)</label><input type="text" id="tKey" class="field"></div>
+                        </div>
+                    </div>
+                    <label>Send</label>
+                    <div class="tak-send">
+                        <label class="chk"><input type="checkbox" id="tsNodes"> Nodes</label>
+                        <label class="chk"><input type="checkbox" id="tsDrones"> Drones</label>
+                        <label class="chk"><input type="checkbox" id="tsPilots"> Pilots</label>
+                        <label class="chk"><input type="checkbox" id="tsDevices"> Located devices</label>
+                        <label class="chk"><input type="checkbox" id="tsWd"> Wardriving (last 5 min)</label>
+                    </div>
+                    <div class="help-text" id="tStatus">Off.</div>
+                </div>
+                <div class="set-block">
                     <h4>Map Tiles</h4>
                     <select id="sTiles" class="field"></select>
                     <input type="text" id="sTilesCustom" class="field" placeholder="http://localhost:8080/{z}/{x}/{y}.png">

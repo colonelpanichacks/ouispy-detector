@@ -2596,6 +2596,23 @@ async function loadSettingsForm() {
     $("mUser").value = m.user || "";
     $("mPass").value = m.password || "";
     $("mTopic").value = m.topic || "+/detection";
+    const t = s.tak || {}, ts = t.send || {};
+    $("tEn").checked = !!t.enabled;
+    $("tProto").value = t.proto || "tcp";
+    $("tHost").value = t.host || "";
+    $("tPort").value = t.port || 8087;
+    $("tCall").value = t.callsign || "OUI-SPY";
+    $("tEvery").value = t.interval || 5;
+    $("tCert").value = t.cert || "";
+    $("tPass").value = t.cert_pass || "";
+    $("tKey").value = t.key || "";
+    $("tUser").value = t.user || "";
+    $("tUpass").value = t.password || "";
+    $("tAuthRow").style.display = $("tProto").value === "tcp" ? "" : "none";
+    $("tsNodes").checked = ts.nodes !== false; $("tsDrones").checked = ts.drones !== false; $("tsPilots").checked = ts.pilots !== false;
+    $("tsDevices").checked = !!ts.devices; $("tsWd").checked = !!ts.wardrive;
+    $("tTlsRow").style.display = $("tProto").value === "tls" ? "" : "none";
+    takStatus();
     $("sTiles").value = s.tiles || "osm-dark";
     $("sNotify").checked = !!s.notify;
     $("sLinks").checked = linkMode() !== "off";
@@ -2615,6 +2632,24 @@ $("sNotify").onchange = async () => {
         }
     }
 };
+// TAK: the transport picks the usual port; the status line follows the connector.
+$("tProto").onchange = () => {
+    const p = $("tProto").value;
+    $("tTlsRow").style.display = p === "tls" ? "" : "none";
+    $("tAuthRow").style.display = p === "tcp" ? "" : "none";
+    $("tPort").value = { tcp: 8087, tls: 8089, udp: 6969 }[p];
+};
+async function takStatus() {
+    let st;
+    try { st = await api("/api/tak"); } catch (e) { return; }
+    const el = $("tStatus");
+    const when = st.last ? new Date(st.last * 1000).toLocaleTimeString([], { hour12: false }) : "";
+    el.className = "help-text " + (st.state === "connected" ? "ok" : st.state === "error" ? "bad" : "");
+    el.textContent = st.state === "off" ? "Off. Nothing is sent until this is on and a server is set."
+        : st.state === "connected" ? `Connected. ${st.items} markers each round, ${st.sent} events sent, last at ${when}.`
+        : st.state === "connecting" ? "Connecting..." : `Not connected: ${st.error}`;
+}
+setInterval(() => { if ($("tab-settings").classList.contains("active")) takStatus(); }, 3000);
 $("sTiles").onchange = () => { $("sTilesCustom").style.display = $("sTiles").value.startsWith("custom") ? "" : "none"; };
 $("saveSettings").onclick = async () => {
     const body = {
@@ -2627,6 +2662,12 @@ $("saveSettings").onclick = async () => {
         key_nets: $("sKeyNets").value.trim(),
         mqtt: { enabled: $("mEn").checked, host: $("mHost").value.trim(), port: Number($("mPort").value) || 1883,
                 user: $("mUser").value, password: $("mPass").value, topic: $("mTopic").value.trim() || "+/detection" },
+        tak: { enabled: $("tEn").checked, proto: $("tProto").value, host: $("tHost").value.trim(),
+               port: Number($("tPort").value) || 8087, callsign: $("tCall").value.trim() || "OUI-SPY",
+               interval: Number($("tEvery").value) || 5, cert: $("tCert").value.trim(), cert_pass: $("tPass").value,
+               key: $("tKey").value.trim(), user: $("tUser").value.trim(), password: $("tUpass").value,
+               send: { nodes: $("tsNodes").checked, drones: $("tsDrones").checked, pilots: $("tsPilots").checked,
+                       devices: $("tsDevices").checked, wardrive: $("tsWd").checked } },
     };
     const res = await api("/api/settings", { method: "POST", body });
     if (res.ok === false) { toast("bad", "Settings not saved", res.error); return; }
