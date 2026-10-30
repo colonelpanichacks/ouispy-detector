@@ -469,8 +469,11 @@ void debug_poll() {
         };
         String f = arg("f=");
         if (req.startsWith("PUT /sd/put")) {
-            long sz = sd_put(f.c_str(), arg("off=").toInt(), c, clen);
-            c.printf("HTTP/1.0 %s\r\n\r\n%ld\n", sz >= 0 ? "200 OK" : "400 Bad Request", sz);
+            // Pushing data in crashed the Tab5: it arrives faster than the card takes it, the
+            // 64 KB TCP window fills internal RAM and the Wi-Fi driver asserts. Load big files
+            // with the card in a computer; small ones will come by the Tab5 pulling them.
+            (void)clen;
+            c.print("HTTP/1.0 501 Not Implemented\r\n\r\nput the card in a computer\n");
         } else if (req.startsWith("GET /sd/size")) {
             c.printf("HTTP/1.0 200 OK\r\n\r\n%ld\n", sd_part_size(f.c_str()));
         } else if (req.startsWith("GET /sd/done")) {

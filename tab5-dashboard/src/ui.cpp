@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "feed.h"
 #include "maptiles.h"
+#include "sdcard.h"
 #include "gfx.h"
 #include "gps.h"
 #include "wd.h"
@@ -321,7 +322,24 @@ const char *clock_str(double ts, bool secs) {
 
 // The name to show for a detection: dashboard alias, else what it calls itself, else the vendor.
 const char *vendor_of(const Det *d) {
-    return d->alias[0] ? d->alias : d->name[0] ? d->name : (d->descr[0] ? d->descr : d->type);
+    if (d->alias[0]) return d->alias;
+    if (d->name[0]) return d->name;
+    if (d->descr[0]) return d->descr;
+    const char *v = sd_vendor(d->mac);   // the card's OUI table: no dashboard needed
+    return v[0] ? v : d->type;
+}
+
+// An intel value with its registry name from the card: "0x004C" -> "0x004C  Apple, Inc.".
+void intel_named(const char *key, char *v, size_t cap) {
+    char nm[48];
+    auto num = [](const char *s) { return (uint32_t)strtoul(s, nullptr, 16); };
+    if (!strcmp(key, "cid") && v[0] && sd_lookup(LK_CID, num(v), nm, sizeof nm)) {
+        strlcat(v, "  ", cap), strlcat(v, nm, cap);
+    } else if (!strcmp(key, "app") && v[0]) {
+        uint32_t a = (uint32_t)atoi(v);
+        if (sd_lookup(LK_APPEAR, a, nm, sizeof nm) || sd_lookup(LK_APPEAR, a & ~0x3Fu, nm, sizeof nm))
+            strlcat(v, "  ", cap), strlcat(v, nm, cap);
+    }
 }
 
 // ------------------------------------------------------------------ filtering
@@ -1463,6 +1481,7 @@ void draw_detail() {
     const char *vend = t && t->descr[0] ? t->descr : "";
     for (int i = 0; !vend[0] && i < M->ndets; i++)
         if (!strcasecmp(det_at(i)->mac, dd.mac) && det_at(i)->descr[0]) vend = det_at(i)->descr;
+    if (!vend[0]) vend = sd_vendor(dd.mac);
     const char *title = alias[0] ? alias : name[0] ? name : vend[0] ? vend : dd.mac;
     font(F_BRAND);
     glow(x + 20, y + 30, fit(title, w - 360), alias[0] ? PINK : ACCENT, middle_left);
@@ -1502,7 +1521,22 @@ void draw_detail() {
             bool hl = !strcmp(dd.rows[i][0], "Broadcast name") || !strcmp(dd.rows[i][0], "SSID") || !strcmp(dd.rows[i][0], "Looks for");
             text(lx + 190, ry + 4, fit(dd.rows[i][1], lw - 190), hl ? SKY : TEXT);
         }
-    } else if (t && t->info[0]) {
+    } else {
+        if (const char *ov = sd_vendor(dd.mac); ov[0]) {   // offline: the card's OUI table
+            font(F_SM);
+            text(lx, ry + 8, "Vendor (OUI)", MUTED);
+            font(F_MD);
+            text(lx + 190, ry + 4, fit(ov, lw - 190), TEXT);
+            ry += rowH, shown++;
+        } else if (strlen(dd.mac) > 1 && strtoul(dd.mac, nullptr, 16) & 0x02) {
+            font(F_SM);
+            text(lx, ry + 8, "Address", MUTED);
+            font(F_MD);
+            text(lx + 190, ry + 4, "random (changes; no vendor in it)", TEXT);
+            ry += rowH, shown++;
+        }
+    }
+    if (!dd.valid && t && t->info[0]) {
         JsonDocument doc;
         if (!deserializeJson(doc, t->info)) {
             for (JsonPairConst kv : doc.as<JsonObjectConst>()) {
@@ -1510,9 +1544,12 @@ void draw_detail() {
                 char v[120];
                 if (kv.value().is<JsonArrayConst>()) {
                     v[0] = 0;
+                    bool uu = !strcmp(kv.key().c_str(), "uuids");
                     for (JsonVariantConst e : kv.value().as<JsonArrayConst>()) {
-                        char one[40];
+                        char one[56], nm[40];
                         if (e.is<JsonObjectConst>()) snprintf(one, sizeof one, "%s=%s", (const char *)(e["uuid"] | ""), (const char *)(e["data"] | ""));
+                        else if (uu && e.as<const char *>() && sd_lookup(LK_UUID, strtoul(e.as<const char *>(), nullptr, 16), nm, sizeof nm))
+                            snprintf(one, sizeof one, "%s", nm);   // a 16-bit service by its name
                         else snprintf(one, sizeof one, "%s", e.as<const char *>() ? e.as<const char *>() : "");
                         if (v[0]) strlcat(v, ", ", sizeof v);
                         strlcat(v, one, sizeof v);
@@ -1522,6 +1559,7 @@ void draw_detail() {
                 } else {
                     snprintf(v, sizeof v, "%g", kv.value().as<double>());
                 }
+                intel_named(kv.key().c_str(), v, sizeof v);
                 font(F_SM);
                 text(lx, ry + 8, info_label(kv.key().c_str()), MUTED);
                 font(F_MD);

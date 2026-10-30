@@ -3,8 +3,7 @@
     python tilepack.py --out /Volumes/TAB5SD/maps --name buncombe \
         --bbox 35.42,-82.89,35.83,-82.25 --zmin 0 --zmax 19
     python tilepack.py --out ... --name nc --bbox 33.75,-84.33,36.6,-75.4 --zmax 13
-    python tilepack.py --out /tmp/packs --tab5 192.168.68.117 ...   straight onto the Tab5's
-        card over Wi-Fi, one pack at a time (this computer only ever holds one)
+    Write straight onto the Tab5's card in a card reader: --out /Volumes/<card>/maps
 
 Imagery, both public and free to keep offline:
   z0-16   USGS The National Map, USGSImageryOnly tiles (public domain)
@@ -34,7 +33,6 @@ import struct
 import sys
 import threading
 import time
-import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -185,41 +183,6 @@ def write_pack(work, path):
     return len(rows), os.path.getsize(path)
 
 
-def to_tab5(host, key, path, piece=1 << 20):
-    """Send a finished pack to the Tab5's card in resumable pieces, then mount it there."""
-    import http.client
-    name = os.path.basename(path)
-    total = os.path.getsize(path)
-    q = urllib.parse.quote(key)
-    def call(method, url, body=None):
-        for i in range(30):
-            try:
-                c = http.client.HTTPConnection(host, 8081, timeout=60)
-                c.request(method, url, body=body, headers={"Content-Length": str(len(body or b""))})
-                r = c.getresponse()
-                out = r.read().decode().strip()
-                c.close()
-                return r.status, out
-            except OSError:
-                time.sleep(min(30, 2 * (i + 1)))   # the Tab5 rebooted or dropped Wi-Fi: wait, resume
-        raise OSError(f"the Tab5 at {host} stopped answering")
-    st, have = call("GET", f"/sd/size?k={q}&f={name}")
-    off, t0 = int(have), time.time()
-    with open(path, "rb") as f:
-        while off < total:
-            f.seek(off)
-            st, have = call("PUT", f"/sd/put?k={q}&f={name}&off={off}", f.read(piece))
-            if st != 200:
-                raise OSError(f"the Tab5 refused {name} at {off}: {have}")
-            off = int(have)
-            mb = (off / 1e6) / max(1, time.time() - t0)
-            print(f"  -> Tab5 {name}: {off / 1e6:.0f}/{total / 1e6:.0f} MB, {mb:.2f} MB/s", flush=True)
-    st, out = call("GET", f"/sd/done?k={q}&f={name}")
-    if st != 200:
-        raise OSError(f"the Tab5 could not mount {name}: {out}")
-    print(f"  on the Tab5: {out}", flush=True)
-
-
 def fetch(work, z, xr, yr, threads):
     t0, got = time.time(), 0
     with ThreadPoolExecutor(threads) as ex:
@@ -247,16 +210,10 @@ def main():
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--keep", action="store_true", help="keep the work file")
     ap.add_argument("--work", help="where the work file goes (default: --out)")
-    ap.add_argument("--tab5", help="send each pack to this Tab5 over Wi-Fi as it is finished, "
-                                   "then delete it here (OTA password from ~/.config/ouispy/tab5_ota_pass)")
     a = ap.parse_args()
     s, w, n, e = (float(v) for v in a.bbox.split(","))
     os.makedirs(a.out, exist_ok=True)
     wdir = a.work or a.out
-    key = ""
-    if a.tab5:
-        with open(os.path.expanduser("~/.config/ouispy/tab5_ota_pass")) as f:
-            key = f.read().strip()
     # Pack groups, each fetched into its own work file, written out, then the work file
     # deleted: the card never holds more than one group's scratch copy. Shallow zooms
     # share one pack; a deep zoom is cut into column strips of about PACK_MAX each.
@@ -276,10 +233,7 @@ def main():
             groups.append((f"{a.name}-z{z}" + (f"-{i + 1}" if len(cuts) > 1 else ""), [(z, xr)]))
     for label, parts in groups:
         path = os.path.join(a.out, label + ".pak")
-        if os.path.exists(path + ".sent"):
-            print(f"{label}.pak already on the Tab5, skipped", flush=True)
-            continue
-        if os.path.exists(path) and not a.tab5:
+        if os.path.exists(path):
             print(f"{label}.pak already there, skipped", flush=True)
             continue
         wpath = os.path.join(wdir, f"{label}.work.sqlite")
@@ -294,10 +248,6 @@ def main():
         if not cnt and os.path.exists(path):
             os.remove(path)
         print(f"wrote {label}.pak: {cnt} tiles, {sz / 1e6:.0f} MB", flush=True)
-        if a.tab5 and cnt:
-            to_tab5(a.tab5, key, path)
-            os.remove(path)
-            open(path + ".sent", "w").close()   # a marker, so a re-run skips it
     print("done", flush=True)
 
 
