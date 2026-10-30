@@ -11,6 +11,7 @@
 #include "model.h"
 #include "net.h"
 #include "maptiles.h"
+#include "sdcard.h"
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
@@ -264,6 +265,7 @@ void setup() {
     gps_begin();   // any GPS unit on Grove port A: our own position, wardrive stamping
     if (S.source != SRC_NETWORK) feed_start();
     net_start();
+    sd_begin();
     maptiles_start();
 }
 

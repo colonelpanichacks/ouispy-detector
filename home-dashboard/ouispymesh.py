@@ -475,6 +475,20 @@ def _filters():
 def api_state():
     total, recent = store.query_detections(limit=150)
     store.annotate_seen_by(recent)
+    if request.args.get("for") == "tab5":
+        # Only what the Tab5 reads (~a quarter of the full state). Every byte of a reply
+        # lands in its Wi-Fi driver's internal RAM first; the full 235 KB drained it and
+        # crashed the Tab5 on every connect.
+        keep = ("id", "alias", "role", "online", "is_home", "rssi", "age", "since", "color",
+                "filters_fresh", "cfg", "ota", "lat", "lon", "tlm")
+        snap = fleet.snapshot()
+        return jsonify({"fleet": {"home": snap.get("home"), "ts": snap.get("ts"),
+                                  "nodes": [{k: n[k] for k in keep if k in n} for n in snap["nodes"]]},
+                        "stats": store.detection_stats(), "hourly": store.hourly(),
+                        "mac_aliases": store.mac_aliases(), "device_names": store.device_names(),
+                        "drones": drones.snapshot(), "tri": list(fleet.tri_fixes.values()),
+                        "group_of": store.group_of(), "recent": recent,
+                        "mode": "demo" if args.demo else ("replay" if args.replay else "live")})
     return jsonify({"fleet": fleet.snapshot(), "sources": sources_status(),
                     "settings": public_settings(), "stats": store.detection_stats(),
                     "hourly": store.hourly(), "mac_aliases": store.mac_aliases(),

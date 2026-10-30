@@ -446,15 +446,57 @@ bool target_match(const Target *t) {
            icontains(t->type, A.search);
 }
 
-// Filtered views, rebuilt per frame (cheap: a few hundred rows).
-int liveIdx[MAX_DETS], nLive = 0;
+// Filtered views, rebuilt per frame (cheap: a few thousand rows).
+// Live, all nodes: detections AND this session's wardriven networks/devices, one list
+// newest first. An entry >= 0 is a detection (det_at), < 0 a wardriven one (wd_at(-e - 1)).
+int *liveIdx = nullptr, nLive = 0;
+
+// One Live entry, either kind, as the table shows it.
+struct LiveRow {
+    const char *name, *type, *dom, *node, *closest;
+    char mac[18];
+    int rssi;
+    double ts;
+    bool isNew, wd;
+};
+void live_row(int e, LiveRow &r) {
+    if (e >= 0) {
+        const Det *d = det_at(e);
+        r = {vendor_of(d), d->type, d->dom, d->node, d->closest, {}, d->rssi, d->ts, d->isNew, false};
+        strlcpy(r.mac, d->mac, sizeof r.mac);
+        return;
+    }
+    const WdDev &w = wd_at(-e - 1);
+    r = {w.name[0] ? w.name : w.kind == 1 ? "(hidden network)" : "BLE device", w.kind == 1 ? "WIFI AP" : "BLE",
+         w.kind == 1 ? "wifi" : "ble", w.node, "", {}, w.rssi, w.last, false, true};
+    snprintf(r.mac, sizeof r.mac, "%02X:%02X:%02X:%02X:%02X:%02X", w.mac[0], w.mac[1], w.mac[2], w.mac[3], w.mac[4], w.mac[5]);
+}
 int tgtIdx[MAX_TARGETS], nTgt = 0;
 extern int nDrone;
 
 void build_lists() {
+    if (!liveIdx) liveIdx = (int *)heap_caps_malloc((MAX_DETS + WD_MAX) * sizeof(int), MALLOC_CAP_SPIRAM);
     nLive = 0;
+    if (!liveIdx) return;
     for (int i = 0; i < M->ndets; i++)
         if (det_match(det_at(i))) liveIdx[nLive++] = i;
+    if (!A.node[0] && !A.kindFilter) {   // every node: the wardrivers' finds belong here too
+        int nd = nLive;
+        for (int i = 0, n = wd_count(); i < n && nLive < MAX_DETS + WD_MAX; i++) {
+            const WdDev &w = wd_at(i);
+            if (!w.session || (A.dom == 1 && w.kind != 2) || (A.dom == 2 && w.kind != 1)) continue;
+            if (A.search[0]) {
+                char m[18];
+                snprintf(m, sizeof m, "%02X:%02X:%02X:%02X:%02X:%02X", w.mac[0], w.mac[1], w.mac[2], w.mac[3], w.mac[4], w.mac[5]);
+                if (!icontains(w.name, A.search) && !icontains(m, A.search) && !icontains(node_name(w.node), A.search)) continue;
+            }
+            liveIdx[nLive++] = -i - 1;
+        }
+        if (nLive > nd) {   // one timeline: newest first, whichever kind
+            auto ts = [](int e) { return e >= 0 ? det_at(e)->ts : wd_at(-e - 1).last; };
+            std::stable_sort(liveIdx, liveIdx + nLive, [&](int a, int b) { return ts(a) > ts(b); });
+        }
+    }
     nTgt = 0;
     for (int i = 0; i < M->ntargets; i++)
         if (target_match(&M->targets[i])) tgtIdx[nTgt++] = i;
@@ -1650,6 +1692,21 @@ void draw_wd_info() {
     }
 }
 
+void open_wd_dev(int i) {
+    if (i < 0 || i >= wd_count()) return;
+    const WdDev &d = wd_at(i);
+    snprintf(A.wdOpen, sizeof A.wdOpen, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+    A.wdOpenKind = d.kind;
+}
+
+// A Live row, either kind: its full info.
+void open_live_row(int li) {
+    if (li < 0 || li >= nLive) return;
+    int e = liveIdx[li];
+    if (e < 0) open_wd_dev(-e - 1);
+    else open_detail(det_at(e)->mac);
+}
+
 void open_wd_info(int li) {
     if (!wdIdx || li < 0 || li >= wdN) return;
     const WdDev &d = wd_at(wdIdx[li]);
@@ -2739,13 +2796,14 @@ void draw_live() {
     if (live_is_wardrive()) { draw_live_wardrive(); return; }
     if (A.liveSort) {   // newest first otherwise (the ring order)
         auto key = [](int a, int b) -> int {
-            const Det *x = det_at(a), *y = det_at(b);
+            LiveRow x, y;
+            live_row(a, x), live_row(b, y);
             switch (A.liveSort) {
-            case 1: return strcasecmp(vendor_of(x), vendor_of(y));
-            case 2: return strcmp(x->mac, y->mac);
-            case 3: return strcmp(x->type, y->type);
-            case 4: return strcmp(x->dom, y->dom);
-            case 5: return (int)y->rssi - (int)x->rssi;
+            case 1: return strcasecmp(x.name, y.name);
+            case 2: return strcmp(x.mac, y.mac);
+            case 3: return strcmp(x.type, y.type);
+            case 4: return strcmp(x.dom, y.dom);
+            case 5: return y.rssi - x.rssi;
             default: return 0;
             }
         };
@@ -2774,10 +2832,11 @@ void draw_live() {
     for (int k = 0; k < rows; k++, ry += rh) {
         int li = A.top[V_LIVE] + k;
         if (li >= nLive) break;
-        const Det *d = det_at(liveIdx[li]);
+        LiveRow d;
+        live_row(liveIdx[li], d);
         bool sel = li == A.sel[V_LIVE];
         hit(PAD, ry, W - 2 * PAD, rh, H_ROW, li);
-        bool muted = mac_muted(d->mac);
+        bool muted = !d.wd && mac_muted(d.mac);
         if (sel) {
             C.fillRect(PAD + 4, ry, W - 2 * PAD - 8, rh - 2, dim(ACCENT, 0.12f));
             C.fillRect(PAD + 4, ry, 3, rh - 2, ACCENT);
@@ -2787,34 +2846,53 @@ void draw_live() {
         int my = ry + rh / 2;
         const lgfx::IFont *rf = rh < 30 ? F_SM : rh < 48 ? F_MD : F_LG;
         font(rf);
-        text(cAge, my, age_str(d->ts), MUTED, middle_left);
-        text(cVen, my, fit_name(vendor_of(d), 290), muted ? FAINT : (d->isNew ? PINK : TEXT), middle_left);
+        text(cAge, my, age_str(d.ts), MUTED, middle_left);
+        text(cVen, my, fit_name(d.name, 290), muted ? FAINT : (d.isNew ? PINK : TEXT), middle_left);
         if (muted) {
             font(F_SM);
             text(cMac - 14, my, "MUTED", AMBER, middle_right);
         }
         font(F_MONO_S);
-        text(cMac, my, d->mac, muted ? FAINT : SOFT, middle_left);
+        text(cMac, my, d.mac, muted ? FAINT : SOFT, middle_left);
         font(F_MD);
-        text(cType, my, d->type, MUTED, middle_left);
-        text(cDom, my, d->dom, !strcmp(d->dom, "ble") ? PURPLE : SKY, middle_left);
-        rssi_bar(cRssi, my - 4, 90, 8, d->rssi, rssi_color(d->rssi));
+        text(cType, my, d.wd ? (d.dom[0] == 'w' ? "AP" : "BLE") : d.type, d.wd ? rgb(0x22d3ee) : MUTED, middle_left);
+        text(cDom, my, d.wd ? "WD" : d.dom, d.wd ? rgb(0x22d3ee) : !strcmp(d.dom, "ble") ? PURPLE : SKY, middle_left);
+        rssi_bar(cRssi, my - 4, 90, 8, d.rssi, rssi_color(d.rssi));
         char r[8];
-        snprintf(r, sizeof r, "%d", d->rssi);
-        text(cRssi + 100, my, r, rssi_color(d->rssi), middle_left);
-        text(cNode, my, fit_name(node_name(d->node), 120), node_color565(d->node), middle_left);
-        text(cClose, my, d->closest[0] ? fit_name(node_name(d->closest), 130) : "-",
-             d->closest[0] ? node_color565(d->closest) : FAINT, middle_left);
+        snprintf(r, sizeof r, "%d", d.rssi);
+        text(cRssi + 100, my, r, rssi_color(d.rssi), middle_left);
+        text(cNode, my, fit_name(node_name(d.node), 120), node_color565(d.node), middle_left);
+        text(cClose, my, d.closest[0] ? fit_name(node_name(d.closest), 130) : "-",
+             d.closest[0] ? node_color565(d.closest) : FAINT, middle_left);
     }
     if (!nLive) {
         font(F_MD);
-        text(W / 2, ty + th / 2, M->ndets ? "nothing matches the filter" : "no detections yet", FAINT, middle_center);
+        text(W / 2, ty + th / 2, M->ndets || wd_count() ? "nothing matches the filter" : "no detections yet", FAINT, middle_center);
     }
 
     // Detail of the selected row.
     int dy = ty + th + 12, dh = CB - dy;
     panel(PAD, dy, W - 2 * PAD, dh, "SELECTED");
     if (!nLive) return;
+    if (int e = liveIdx[A.sel[V_LIVE]]; e < 0) {   // a wardriven network / device
+        const WdDev &w = wd_at(-e - 1);
+        LiveRow r;
+        live_row(e, r);
+        font(F_LG);
+        glow(PAD + 16, dy + 32, fit_name(r.name, 420), TEXT);
+        font(F_SM);
+        chip(PAD + 440, dy + 28, "DETAILS  ENTER", ACCENT, true, nullptr, H_DETAIL);
+        font(F_MONO);
+        text(PAD + 16, dy + 68, r.mac, SOFT);
+        font(F_SM);
+        static const char *SEC[] = {"open", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
+        char l[128];
+        snprintf(l, sizeof l, "WARDRIVEN %s%s%s   by %s   first %s   %s", w.kind == 1 ? "WIFI AP " : "BLE",
+                 w.kind == 1 && w.sec < 6 ? SEC[w.sec] : "", w.kind == 1 && w.ch ? (String("  ch ") + w.ch).c_str() : "",
+                 node_name(w.node), clock_str(w.first ? w.first : w.last, true), w.placed ? "on the map" : "no GPS fix");
+        text(PAD + 16, dy + 100, fit(l, 1180), MUTED);
+        return;
+    }
     const Det *d = det_at(liveIdx[A.sel[V_LIVE]]);
     font(F_LG);
     glow(PAD + 16, dy + 32, fit_name(vendor_of(d), 420), d->isNew ? PINK : TEXT);
@@ -3821,7 +3899,7 @@ void dispatch_drone_map() {
 }
 
 const char *selected_mac() {
-    if (A.view == V_LIVE && nLive) return det_at(liveIdx[A.sel[V_LIVE]])->mac;
+    if (A.view == V_LIVE && nLive && liveIdx[A.sel[V_LIVE]] >= 0) return det_at(liveIdx[A.sel[V_LIVE]])->mac;
     if (A.view == V_TARGETS && nTgt) return M->targets[tgtIdx[A.sel[V_TARGETS]]].mac;
     if (M->hasAlert) return M->lastAlert.mac;
     return nullptr;
@@ -4311,7 +4389,7 @@ static void dispatch(const Hit &h) {
         // Tap a row to select it, tap it again for everything about it.
         if (A.view == V_LIVE && A.sel[V_LIVE] == h.arg) {
             if (live_is_wardrive()) open_wd_info(h.arg);
-            else if (nLive) open_detail(det_at(liveIdx[h.arg])->mac);
+            else open_live_row(h.arg);
         }
         A.sel[A.view] = h.arg;
         break;
@@ -4324,6 +4402,10 @@ static void dispatch(const Hit &h) {
         A.sel[V_FLEET] = h.arg;
         break;
     case H_DETAIL: {
+        if (A.view == V_LIVE && !live_is_wardrive() && nLive && liveIdx[A.sel[V_LIVE]] < 0) {
+            open_live_row(A.sel[V_LIVE]);
+            break;
+        }
         const char *mac = selected_mac();
         if (mac) open_detail(mac);
         break;
@@ -4652,7 +4734,7 @@ void ui_frame() {
         int li = T.pressed.arg;
         A.sel[V_LIVE] = li;
         if (live_is_wardrive()) open_wd_info(li);
-        else if (li >= 0 && li < nLive) open_detail(det_at(liveIdx[li])->mac);
+        else open_live_row(li);
         if (S.sound) M5.Speaker.tone(2400, 40);
         T.hasPressed = false;
         dirty = true;

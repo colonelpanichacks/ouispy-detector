@@ -3,6 +3,7 @@
 #include "app.h"
 #include "net.h"
 #include "gfx.h"
+#include "sdcard.h"
 #include <HTTPClient.h>
 #include <WiFi.h>
 
@@ -97,8 +98,15 @@ void loader(void *) {
         }
         // Internal RAM is small (Wi-Fi, TCP and every task stack live there) and running
         // it dry crashes the whole device: wait for room instead of downloading into it.
-        while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HEAP_FLOOR) vTaskDelay(pdMS_TO_TICKS(100));
-        size_t n = download(w, buf);
+        // The card first (no Wi-Fi needed, and no internal RAM: SD DMA reads into PSRAM),
+        // the dashboard for what it doesn't have.
+        size_t n = sd_tile(LAYER_IDS[w.layer], w.z, w.x, w.y, buf, BUF_N);
+        if (!n) {
+            net_bulk_begin();
+            while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HEAP_FLOOR) vTaskDelay(pdMS_TO_TICKS(100));
+            n = download(w, buf);
+            net_bulk_end();
+        }
         if (!n) {
             vTaskDelay(pdMS_TO_TICKS(150));
             continue;

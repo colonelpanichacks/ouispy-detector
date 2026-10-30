@@ -7,6 +7,8 @@ int net_rssi();
 String net_target();            // "host:port" as resolved
 bool net_ota_enabled();
 bool net_online();                       // talking to the dashboard (not USB-only)
+void net_bulk_begin();                   // around any big HTTP download (see net.cpp)
+void net_bulk_end();
 String net_base();                       // "http://ip:port" of the dashboard, or ""
 bool net_post(const char *path, const char *body);   // queue a JSON POST to the dashboard
 // Wi-Fi scan for the Settings screen (runs on the net task; results read under model lock).

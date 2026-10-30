@@ -14,6 +14,7 @@
 #include "gfx.h"
 #include <Preferences.h>
 #include "maptiles.h"
+#include "sdcard.h"
 #include "wd.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
@@ -391,9 +392,11 @@ void debug_poll() {
     if (!c) return;
     c.setTimeout(2000);
     String req = c.readStringUntil('\n');
+    long clen = 0;
     while (c.connected()) {   // drain the headers
         String h = c.readStringUntil('\n');
         if (h.length() <= 1) break;
+        if (h.startsWith("Content-Length:") || h.startsWith("content-length:")) clen = h.substring(15).toInt();
     }
     String key = "k=" + S.otaPass;
     if (req.indexOf(key) < 0) {
@@ -406,12 +409,12 @@ void debug_poll() {
         p.begin("tab5diag", true);
         uint32_t crashes = p.getUInt("crashes", 0);
         p.end();
-        char b[900];
+        char b[1000];
         snprintf(b, sizeof b,
                  "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
                  "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
                  "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
-                 "\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
+                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
                  "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
                  "\"sync\":%lu,\"ppa_push\":%lu,\"m_unused\":%lu,\"m_tiles\":%lu,\"m_rings\":%lu,\"m_tgt_nodes\":%lu,\"m_drones\":%lu,\"m_chrome\":%lu}}\n",
                  (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
@@ -420,7 +423,7 @@ void debug_poll() {
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                  (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,
-                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(),
+                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(),
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0,
                  (unsigned long)ui_prof[0], (unsigned long)ui_prof[1], (unsigned long)ui_prof[2], (unsigned long)ui_prof[3],
                  (unsigned long)ui_prof[5], (unsigned long)ui_prof[4], (unsigned long)ui_prof[6], 0UL, (unsigned long)ui_prof[7], (unsigned long)ui_prof[8],
@@ -453,6 +456,30 @@ void debug_poll() {
             c.print("]}\n");
         }
         free(cs);
+    } else if (req.indexOf(" /sd/") > 0) {
+        // Map packs onto the card over Wi-Fi: PUT /sd/put?f=<name.pak>&off=<bytes> (body =
+        // the next piece), GET /sd/done?f=<name.pak> mounts it, GET /sd/ls lists the folder.
+        auto arg = [&](const char *k) {
+            int i = req.indexOf(k);
+            if (i < 0) return String();
+            int e = req.indexOf('&', i);
+            int sp = req.indexOf(' ', i);
+            if (e < 0 || (sp >= 0 && sp < e)) e = sp;
+            return req.substring(i + strlen(k), e);
+        };
+        String f = arg("f=");
+        if (req.startsWith("PUT /sd/put")) {
+            long sz = sd_put(f.c_str(), arg("off=").toInt(), c, clen);
+            c.printf("HTTP/1.0 %s\r\n\r\n%ld\n", sz >= 0 ? "200 OK" : "400 Bad Request", sz);
+        } else if (req.startsWith("GET /sd/size")) {
+            c.printf("HTTP/1.0 200 OK\r\n\r\n%ld\n", sd_part_size(f.c_str()));
+        } else if (req.startsWith("GET /sd/done")) {
+            bool ok = sd_finish(f.c_str());
+            c.printf("HTTP/1.0 %s\r\n\r\n%s\n", ok ? "200 OK" : "400 Bad Request", sd_state());
+        } else {
+            c.print("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+            sd_list(c);
+        }
     } else if (req.startsWith("GET /key")) {
         int i = req.indexOf("c=");
         uint8_t kc = i >= 0 ? (uint8_t)strtol(req.c_str() + i + 2, nullptr, 16) : 0;
@@ -526,7 +553,19 @@ void link_task(void *) {
 
 // ------------------------------------------------------------------ poll task
 
+bool http_json_once(const String &path, JsonDocument &doc, JsonDocument *filter);
+
+// One bulk download at a time (dashboard JSON or a map tile), and only with internal RAM
+// to spare: every byte arrives through the Wi-Fi driver's internal-RAM buffers, and two
+// replies at once (or one into a nearly full heap) starved it until it asserted.
 bool http_json(const String &path, JsonDocument &doc, JsonDocument *filter) {
+    net_bulk_begin();
+    bool ok = http_json_once(path, doc, filter);
+    net_bulk_end();
+    return ok;
+}
+
+bool http_json_once(const String &path, JsonDocument &doc, JsonDocument *filter) {
     if (!addr.length()) return false;
     WiFiClient c;
     HTTPClient h;
@@ -601,7 +640,7 @@ void fetch_state() {
                           "filters_fresh", "cfg", "ota", "lat", "lon", "tlm"})
         nf[k] = true;
     JsonDocument doc(&psram);
-    if (http_json("/api/state", doc, &filter)) ingest_state(doc);
+    if (http_json("/api/state?for=tab5", doc, &filter)) ingest_state(doc);
     else wantState = true;
 }
 
@@ -787,6 +826,13 @@ void poll_task(void *) {
 }
 
 }  // namespace
+
+static SemaphoreHandle_t bulkLock = xSemaphoreCreateMutex();
+void net_bulk_begin() {
+    xSemaphoreTake(bulkLock, portMAX_DELAY);
+    for (int i = 0; i < 100 && heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 48 * 1024; i++) delay(50);
+}
+void net_bulk_end() { xSemaphoreGive(bulkLock); }
 
 void net_bridge_line(const char *line) {
     if (!bridging || !bridgeBuf) return;
