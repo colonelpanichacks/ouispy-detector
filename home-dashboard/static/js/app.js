@@ -2913,7 +2913,7 @@ function mxTimeChart(el, d, series, opts = {}) {
 }
 // Horizontal bars: label, bar from a shared zero, value; tooltip per row.
 function mxBars(el, items, opts = {}) {
-    if (!items.length) { el.innerHTML = `<div class="mx-empty">No detections in this range.</div>`; return; }
+    if (!items.length) { el.innerHTML = `<div class="mx-empty">${opts.empty || "No detections in this range."}</div>`; return; }
     const max = Math.max(...items.map((x) => x.value));
     el.innerHTML = `<div class="mx-bars">${items.map((it, i) => `
         <div class="mx-row" data-i="${i}"><span class="mx-lbl" title="${esc(it.label)}">${esc(it.label)}</span>
@@ -2991,7 +2991,37 @@ function mxRender() {
         tip: `<div class="mx-tr"><span>Detections</span><b>${t.count}</b></div>` })));
     mxHeat($("mxHeat"), d.heat);
     mxHist($("mxRssi"), d.rssi);
+    mxRenderWd(d);
     $("mxUpd").textContent = `updated ${new Date().toLocaleTimeString([], { hour12: false })}`;
+}
+// Wardriving: every device the wardriver nodes heard in the range, on the same buckets.
+const MX_WIFI = "#22d3ee", MX_BLE = "#ff2bd6";
+function mxRenderWd(d) {
+    const w = d.wd;
+    if (!w) return;
+    const none = "Nothing wardriven in this range.";
+    const kpi = (k, v, sub, cls = "") => `<div class="mx-kpi"><div class="k">${k}</div><div class="v ${cls}">${v}</div><div class="s">${sub}</div></div>`;
+    const pct = (a) => (w.total ? Math.round((a / w.total) * 100) : 0);
+    $("mxWdSub").textContent = w.nodes ? `${w.nodes} wardriver${w.nodes === 1 ? "" : "s"}` : "";
+    $("mxWdKpis").innerHTML =
+        kpi("Devices heard", mxFmt(w.total), "WiFi networks + BLE devices") +
+        kpi("New", mxFmt(w.new), "first ever heard in range", w.new ? "alert" : "") +
+        kpi("WiFi networks", mxFmt(w.wifi), `${w.open} open`) +
+        kpi("BLE devices", mxFmt(w.ble), `${pct(w.ble)}% of everything`) +
+        kpi("On the map", mxFmt(w.placed), `${pct(w.placed)}% have a GPS fix`) +
+        kpi("Top maker", w.by_maker[0] ? esc(w.by_maker[0].name) : "-", w.by_maker[0] ? `${w.by_maker[0].count} devices` : "", "txt");
+    $("mxWdBucket").textContent = `new per ${d.bucket >= 3600 ? d.bucket / 3600 + " h" : d.bucket / 60 + " min"}`;
+    const series = [{ name: "WiFi", values: w.new_series.wifi, color: MX_WIFI }, { name: "BLE", values: w.new_series.ble, color: MX_BLE }];
+    $("mxWdLegend").innerHTML = series.map((s) => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join("");
+    if (w.new) mxTimeChart($("mxWdArea"), d, series);
+    else $("mxWdArea").innerHTML = `<div class="mx-empty">${none}</div>`;
+    const tip = (n, what = "Devices") => `<div class="mx-tr"><span>${what}</span><b>${n}</b></div>`;
+    mxBars($("mxWdNodes"), w.by_node.map((n) => { const nd = nodeById(n.id);
+        return { label: nodeName(n.id), value: n.count, color: nd && nd.color != null ? nodeColor(nd) : MX_WIFI, tip: tip(n.count) }; }), { empty: none });
+    mxBars($("mxWdMakers"), w.by_maker.map((m) => ({ label: m.name, value: m.count, color: MX_BLE, tip: tip(m.count) })), { empty: none });
+    mxBars($("mxWdSec"), w.by_sec.map((x) => ({ label: x.name, value: x.count,
+        color: x.name === "open" || x.name === "WEP" ? "#ff4d6d" : MX_WIFI, tip: tip(x.count, "Networks") })), { empty: "No WiFi networks in this range." });
+    mxBars($("mxWdCh"), w.by_ch.map((x) => ({ label: `ch ${x.ch}`, value: x.count, color: MX_WIFI, tip: tip(x.count, "Networks") })), { empty: "No WiFi networks in this range." });
 }
 async function mxLoad() {
     if (!$("tab-metrics").classList.contains("active")) return;

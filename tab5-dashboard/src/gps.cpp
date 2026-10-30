@@ -42,11 +42,14 @@ double coord(const char *v, const char *hemi) {   // ddmm.mmmm -> degrees
     return d;
 }
 
-void add_trail(double la, double lo) {
+// A point once we have really moved: 3 m, or the fix's own accuracy when that is worse,
+// so a GPS standing still (its fix wanders by its accuracy) draws no scribble.
+void add_trail(double la, double lo, float acc) {
     if (ntrail) {
         double dy = (la - trail[ntrail - 1][0]) * 111320.0;
         double dx = (lo - trail[ntrail - 1][1]) * 111320.0 * cos(la * M_PI / 180);
-        if (dx * dx + dy * dy < 9) return;   // < 3 m
+        double step = max(3.0, (double)acc);
+        if (dx * dx + dy * dy < step * step) return;
     }
     if (ntrail == GPS_TRAIL) memmove(trail[0], trail[1], sizeof trail[0] * (GPS_TRAIL - 1)), ntrail--;
     trail[ntrail][0] = la, trail[ntrail][1] = lo;
@@ -77,7 +80,7 @@ void sentence(char *s) {
             float sp = fix.speed, co = fix.course;
             fix = pending;
             fix.speed = sp, fix.course = co;
-            add_trail(fix.lat, fix.lon);
+            add_trail(fix.lat, fix.lon, fix.acc);
             portEXIT_CRITICAL(&mux);
         }
     } else if (!strcmp(t, "RMC") && n >= 9) {
@@ -189,7 +192,7 @@ void gps_external(double lat, double lon, float acc, float alt, uint8_t sats, fl
     fix.valid = true;
     fix.lat = lat, fix.lon = lon, fix.acc = acc, fix.alt = alt, fix.sats = sats, fix.speed = spd, fix.course = crs;
     fix.ms = millis();
-    add_trail(lat, lon);
+    add_trail(lat, lon, acc);
     portEXIT_CRITICAL(&mux);
     snprintf(state, sizeof state, "GPS from the node on USB  %u sats", sats);
 }

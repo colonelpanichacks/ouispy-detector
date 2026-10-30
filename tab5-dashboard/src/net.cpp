@@ -693,7 +693,7 @@ void fetch_metrics() {
     JsonDocument filter;
     for (const char *k : {"bucket", "start", "until", "total", "prev_total", "unique", "new_devices",
                           "nodes_active", "n", "peak", "series", "unique_series", "by_vendor", "by_node",
-                          "by_type", "by_dom", "rssi"})
+                          "by_type", "by_dom", "rssi", "wd"})
         filter[k] = true;   // everything but the 7x24 heat grid
     JsonDocument doc(&psram);
     if (http_json(path, doc, &filter)) ingest_metrics(doc, range);

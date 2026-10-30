@@ -28,7 +28,8 @@ struct App {
     bool mapInit = false;       // centred once on the fleet
     bool mapFollow = false;     // keep the newest live drone centred
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
-    bool droneTracks = true;    // map: drone flight tracks
+    bool droneTracks = true;    // map: every track (drones, pilots, our own trail)
+    bool mxWd = false;          // metrics: wardriving instead of detections
     bool pilotOn = true;        // map: pilots, their track and the line to their drone
     uint8_t wdScope = 0;        // map: wardriven devices 0 off, 1 this session, 2 all history
     uint8_t kindFilter = 0;     // Live: 0 all, 1 detectors, 2 Sky-Spy, 3 wardrivers

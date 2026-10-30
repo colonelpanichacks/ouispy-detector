@@ -168,6 +168,15 @@ struct Metrics {
     uint8_t nrssi;
     uint16_t rssi[24];
     uint32_t fetchedMs;
+    // Wardriving on the same buckets (the dashboard's "wd"): devices heard in range.
+    struct {
+        uint32_t total, fresh, wifi, ble, placed, open, nodes;
+        uint16_t wifiNew[MAX_BUCKETS], bleNew[MAX_BUCKETS];   // first heard, per bucket
+        uint8_t nmaker, nnode, nsec, nch;
+        Bar maker[10], node[MAX_BARS], sec[8];
+        uint8_t ch[16];
+        uint16_t chCount[16];
+    } wd;
 };
 
 struct Stats {

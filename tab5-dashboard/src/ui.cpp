@@ -76,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -1013,19 +1013,20 @@ void draw_map() {
             drawn++;
         }
     }
-    // Us: where the Tab5 is (GPS), its trail, the fix's accuracy and which way we move.
+    // Us: where the Tab5 is (GPS), its trail, a pulse around the dot and which way we move.
     {
         GpsFix gf = gps_fix();
         static float tr[GPS_TRAIL][2];
         int nt = gps_trail(tr, GPS_TRAIL);
         uint16_t me = rgb(0x4da3ff);
-        for (int p = 1; p < nt; p++)
+        for (int p = 1; A.droneTracks && p < nt; p++)   // TRACKS hides every track, ours too
             C.drawLine(sx(tr[p - 1][1]), sy(tr[p - 1][0]), sx(tr[p][1]), sy(tr[p][0]), dim(me, 0.3f + 0.6f * p / nt));
         if (gf.valid) {
             int x = sx(gf.lon), y = sy(gf.lat);
-            double mpp = 156543.03392 * cos(gf.lat * M_PI / 180) / pow(2.0, zf);
-            int r = (int)(gf.acc / mpp);
-            if (r > 12 && r < 1400) C.drawCircle(x, y, r, dim(me, 0.6f));
+            float ph = (millis() % 1800) / 1800.0f;   // one ring out every 1.8 s, fading
+            int pr = 13 + (int)(ph * 20);
+            C.drawCircle(x, y, pr, dim(me, 0.8f * (1 - ph)));
+            C.drawCircle(x, y, pr + 1, dim(me, 0.5f * (1 - ph)));
             C.fillCircle(x, y, 11, BG);
             C.fillCircle(x, y, 9, me);
             C.drawCircle(x, y, 12, TEXT);
@@ -2796,6 +2797,119 @@ void hbars(int x, int y, int w, int h, const char *title, const Bar *bars, int n
     }
 }
 
+// Metrics, wardriving: what the wardriver nodes heard in the range (same filters).
+void draw_metrics_wd(int y) {
+    const Metrics &m = M->metrics;
+    const auto &w = m.wd;
+    const uint16_t CWIFI = rgb(0x22d3ee), CBLE = rgb(0xff2bd6);
+    int tw = (W - 2 * PAD - 4 * 12) / 5, th = 88;
+    char v[24], sub[40];
+    snprintf(v, sizeof v, "%u", (unsigned)w.total);
+    snprintf(sub, sizeof sub, "%u wardriver%s", (unsigned)w.nodes, w.nodes == 1 ? "" : "s");
+    kpi(PAD, y, tw, th, "DEVICES HEARD", v, CWIFI, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)w.fresh);
+    kpi(PAD + (tw + 12), y, tw, th, "NEW", v, PINK, "first heard in range");
+    snprintf(v, sizeof v, "%u", (unsigned)w.wifi);
+    snprintf(sub, sizeof sub, "%u open", (unsigned)w.open);
+    kpi(PAD + 2 * (tw + 12), y, tw, th, "WIFI NETWORKS", v, CWIFI, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)w.ble);
+    kpi(PAD + 3 * (tw + 12), y, tw, th, "BLE DEVICES", v, CBLE);
+    snprintf(v, sizeof v, "%u", (unsigned)w.placed);
+    snprintf(sub, sizeof sub, "%u%% with a GPS fix", w.total ? (unsigned)(w.placed * 100 / w.total) : 0);
+    kpi(PAD + 4 * (tw + 12), y, tw, th, "ON THE MAP", v, ACCENT, sub);
+
+    // Discovered over time: WiFi and BLE stacked.
+    y += th + 12;
+    int chH = 214;
+    panel(PAD, y, W - 2 * PAD, chH, "DEVICES DISCOVERED OVER TIME");
+    font(F_SM);
+    text(W - PAD - 16, y + 10, "new per bucket", FAINT, top_right);
+    text(W - PAD - 150, y + 10, "BLE", CBLE, top_right);
+    text(W - PAD - 190, y + 10, "WIFI", CWIFI, top_right);
+    if (m.valid && m.nbuckets && w.fresh) {
+        int n = m.nbuckets;
+        uint32_t mx = 1;
+        for (int i = 0; i < n; i++) mx = max(mx, (uint32_t)w.wifiNew[i] + w.bleNew[i]);
+        int px = PAD + 56, pw = W - 2 * PAD - 72, py = y + 36, ph = chH - 64;
+        float bw = (float)pw / n;
+        C.drawFastHLine(px, py + ph, pw, LINE2);
+        for (int g = 1; g <= 2; g++) C.drawFastHLine(px, py + ph - ph * g / 2, pw, LINE);
+        char lab[12];
+        snprintf(lab, sizeof lab, "%u", (unsigned)mx);
+        text(px - 8, py, lab, FAINT, top_right);
+        text(px - 8, py + ph, "0", FAINT, bottom_right);
+        for (int i = 0; i < n; i++) {
+            int hw = (int)((uint64_t)w.wifiNew[i] * ph / mx), hb = (int)((uint64_t)w.bleNew[i] * ph / mx);
+            if (w.wifiNew[i] && hw < 2) hw = 2;
+            if (w.bleNew[i] && hb < 2) hb = 2;
+            int bx = px + (int)(i * bw), bwi = max(1, (int)bw - 1);
+            if (hw) C.fillRect(bx, py + ph - hw, bwi, hw, dim(CWIFI, 0.75f));
+            if (hb) C.fillRect(bx, py + ph - hw - hb, bwi, hb, dim(CBLE, 0.75f));
+            if (hw + hb) C.drawFastHLine(bx, py + ph - hw - hb, bwi, hb ? CBLE : CWIFI);
+        }
+        text(px, py + ph + 6, clock_str(m.start, false), FAINT);
+        text(px + pw / 2, py + ph + 6, clock_str((m.start + m.until) / 2, false), FAINT, top_center);
+        text(px + pw, py + ph + 6, "now", FAINT, top_right);
+    } else {
+        font(F_MD);
+        text(W / 2, y + chH / 2, !m.valid ? (M->sockUp ? "loading metrics" : waiting_text()) : "nothing wardriven in this range",
+             FAINT, middle_center);
+    }
+
+    // Breakdown: makers, wardrivers, WiFi security, WiFi channels.
+    y += chH + 12;
+    int bh = CB - y;
+    int w1 = 420, w2 = 300, w3 = 260, w4 = W - 2 * PAD - w1 - w2 - w3 - 36;
+    hbars(PAD, y, w1, bh, "TOP MAKERS", w.maker, w.nmaker, false);
+    hbars(PAD + w1 + 12, y, w2, bh, "BY WARDRIVER", w.node, w.nnode, true);
+    int sx0 = PAD + w1 + w2 + 24;
+    panel(sx0, y, w3, bh, "WIFI SECURITY");
+    {
+        uint32_t mx = 1;
+        for (int i = 0; i < w.nsec; i++) mx = max(mx, w.sec[i].count);
+        int rh = 28, yy = y + 34;
+        for (int i = 0; i < w.nsec && yy + rh <= y + bh - 4; i++, yy += rh) {
+            bool weak = !strcmp(w.sec[i].name, "open") || !strcmp(w.sec[i].name, "WEP");
+            uint16_t col = weak ? rgb(0xff4d6d) : CWIFI;
+            font(F_SM);
+            text(sx0 + 14, yy + rh / 2, fit(w.sec[i].name, 82), weak ? col : TEXT, middle_left);
+            int bx = sx0 + 100, bwd = w3 - 100 - 50;
+            int fw = max(2, (int)((uint64_t)w.sec[i].count * bwd / mx));
+            C.fillRoundRect(bx, yy + 9, bwd, rh - 18, 3, PANEL2);
+            C.fillRoundRect(bx, yy + 9, fw, rh - 18, 3, dim(col, 0.8f));
+            char c[12];
+            snprintf(c, sizeof c, "%u", (unsigned)w.sec[i].count);
+            text(sx0 + w3 - 12, yy + rh / 2, c, MUTED, middle_right);
+        }
+        if (!w.nsec) {
+            font(F_MD);
+            text(sx0 + w3 / 2, y + bh / 2, "-", FAINT, middle_center);
+        }
+    }
+    int cx0 = sx0 + w3 + 12;
+    panel(cx0, y, w4, bh, "WIFI CHANNELS");
+    if (w.nch) {
+        uint32_t mx = 1;
+        for (int i = 0; i < w.nch; i++) mx = max(mx, (uint32_t)w.chCount[i]);
+        int px = cx0 + 14, pw = w4 - 28, py = y + 36, ph = bh - 66;
+        int bwd = pw / w.nch;
+        font(F_SM);
+        for (int i = 0; i < w.nch; i++) {
+            int h = (int)((uint64_t)w.chCount[i] * ph / mx);
+            if (w.chCount[i] && h < 2) h = 2;
+            C.fillRect(px + i * bwd + 1, py + ph - h, max(1, bwd - 2), h, dim(CWIFI, 0.75f));
+            C.drawFastHLine(px + i * bwd + 1, py + ph - h, max(1, bwd - 2), CWIFI);
+            char c[6];
+            snprintf(c, sizeof c, "%u", w.ch[i]);
+            if (bwd >= 14) text(px + i * bwd + bwd / 2, py + ph + 6, c, FAINT, top_center);
+        }
+        C.drawFastHLine(px, py + ph, bwd * w.nch, LINE2);
+    } else {
+        font(F_MD);
+        text(cx0 + w4 / 2, y + bh / 2, "-", FAINT, middle_center);
+    }
+}
+
 void draw_metrics() {
     const Metrics &m = M->metrics;
     int x = PAD, y = CY, w;
@@ -2811,6 +2925,8 @@ void draw_metrics() {
     chip(x, y, doms[A.dom], A.dom == 2 ? SKY : A.dom == 1 ? PURPLE : ACCENT, A.dom != 0, &w, H_DOM, -1);
     x += w + 8;
     chip(x, y, A.node[0] ? node_name(A.node) : "ALL NODES", A.node[0] ? node_color565(A.node) : ACCENT, A.node[0] != 0, &w, H_NODE);
+    x += w + 20;
+    chip(x, y, A.mxWd ? "WARDRIVE" : "DETECTIONS", A.mxWd ? rgb(0x22d3ee) : ACCENT, true, &w, H_MXWD);
     if (m.valid) {
         char u[48];
         snprintf(u, sizeof u, "updated %us ago", (unsigned)((millis() - m.fetchedMs) / 1000));
@@ -2822,6 +2938,10 @@ void draw_metrics() {
         text(W - PAD, y + 15, "local history since boot", AMBER, middle_right);
     }
     y += 42;
+    if (A.mxWd) {
+        draw_metrics_wd(y);
+        return;
+    }
     int tw = (W - 2 * PAD - 4 * 12) / 5, th = 88;
     char v[24], sub[40];
     snprintf(v, sizeof v, "%u", (unsigned)m.total);
@@ -4013,7 +4133,7 @@ static void dispatch(const Hit &h) {
         else toast("follow off");
         break;
     }
-    case H_TRACKS: A.droneTracks = !A.droneTracks; toast(A.droneTracks ? "drone tracks on" : "drone tracks off"); break;
+    case H_TRACKS: A.droneTracks = !A.droneTracks; toast(A.droneTracks ? "tracks on" : "tracks off"); break;
     case H_PILOT: A.pilotOn = !A.pilotOn; toast(A.pilotOn ? "pilots on" : "pilots off"); break;
     case H_TRI: A.triOn = !A.triOn; toast(A.triOn ? "triangulation on: devices at their fix" : "triangulation off"); break;
     case H_DOM:
@@ -4021,6 +4141,7 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
+    case H_MXWD: A.mxWd = !A.mxWd; break;
     case H_OSK: {
         size_t n = strlen(A.search);
         if (h.arg == 8) { if (n) A.search[n - 1] = 0; }
@@ -4269,7 +4390,7 @@ void ui_frame() {
         model_unlock();
     }
     bool anim = (T.down && T.dragging) || millis() < flashUntil || (mapAnimating && A.view == V_MAP);
-    bool pulse = live_drones() && (A.view == V_MAP || A.view == V_DRONES);
+    bool pulse = (live_drones() && (A.view == V_MAP || A.view == V_DRONES)) || (A.view == V_MAP && gps_fix().valid);
     uint32_t period = anim ? 16 : A.otaActive ? 180 : alertShown ? 120 : pulse ? 150
                     : (A.searching || A.settings || A.editAlias || A.newGroup) ? 500 : 1000;
     if (A.settings && A.autoSetup && M->usbLive) {   // a node got plugged in: no setup needed

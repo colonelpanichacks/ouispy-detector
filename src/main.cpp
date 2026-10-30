@@ -525,6 +525,19 @@ static void serialConsoleTick() {
         return;
     }
 
+    // "txlow 1": a Tab5 sends this to the node on its USB. That node draws its power from
+    // the Tab5's port, and full-power transmit peaks reset the Tab5's Wi-Fi chip; the Tab5
+    // relays everything the node hears, so 10 dBm is plenty. Not saved: unplugged and on
+    // its own power it boots at full power again. The home keeps full power regardless.
+    if (line.startsWith("txlow ")) {
+        bool low = line.substring(6).toInt() != 0 && !meshCfg.home;
+        esp_err_t e = esp_wifi_set_max_tx_power(low ? 40 : 80);   // units of 0.25 dBm
+        int8_t q = 0;
+        esp_wifi_get_max_tx_power(&q);
+        Serial.printf("%s txlow %d: %.1f dBm\n", e == ESP_OK ? "OK" : "ERR", low ? 1 : 0, q * 0.25f);
+        return;
+    }
+
     // A wardriver never sits in config mode, so it takes its mesh settings while scanning
     // (provisiondone then saves them and restarts).
     bool wdSetup = wdOn() && (line.startsWith("mesh ") || line == "provisiondone");

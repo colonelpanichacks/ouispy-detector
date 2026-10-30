@@ -267,6 +267,59 @@ class Wardrive:
                 "history": {r["kind"]: {"n": r["n"], "placed": r["p"] or 0} for r in tot},
                 "this_session": {r["kind"]: r["n"] for r in ses}}
 
+    def metrics(self, since, until, node=None, dom=None, bucket=3600, start=None, nb=1):
+        """The wardriving half of the Metrics tab, on the detections' time buckets:
+        devices discovered over time (by kind), what was heard in range, by node, makers,
+        WiFi security and channels."""
+        start = since if start is None else start
+        where, args = ["last >= ?", "first <= ?"], [since, until]
+        if node:
+            where.append("node = ?"); args.append(node)
+        if dom in ("ble", "wifi"):
+            where.append("kind = ?"); args.append(dom)
+        with self.store.lock:
+            rows = self.store.db.execute(
+                "SELECT mac, kind, sec, ch, mfr, rnd, lat, first, node FROM wd_devices WHERE " + " AND ".join(where),
+                args).fetchall()
+        new_series = {"wifi": [0] * nb, "ble": [0] * nb}
+        kinds = {"wifi": 0, "ble": 0}
+        per_node, per_maker, per_sec, per_ch = {}, {}, {}, {}
+        new = placed = open_nets = 0
+        for r in rows:
+            k = r["kind"]
+            kinds[k] = kinds.get(k, 0) + 1
+            if r["first"] >= since:
+                new += 1
+                i = min(nb - 1, max(0, int((r["first"] - start) // bucket)))
+                new_series.setdefault(k, [0] * nb)[i] += 1
+            if r["lat"] is not None:
+                placed += 1
+            if r["node"]:
+                per_node[r["node"]] = per_node.get(r["node"], 0) + 1
+            if k == "wifi":
+                sec = r["sec"] or "unknown"
+                per_sec[sec] = per_sec.get(sec, 0) + 1
+                if sec == "open":
+                    open_nets += 1
+                if r["ch"]:
+                    per_ch[int(r["ch"])] = per_ch.get(int(r["ch"]), 0) + 1
+            maker = None
+            if k == "ble" and r["mfr"] is not None:
+                maker = lookups.company(f"{int(r['mfr']):04x}")
+            if not maker and not r["rnd"]:
+                maker = oui_vendor(r["mac"])
+            maker = maker or ("Random address" if r["rnd"] else "Unknown")
+            per_maker[maker] = per_maker.get(maker, 0) + 1
+        top = lambda d, n: [{"name": str(a), "count": b} for a, b in sorted(d.items(), key=lambda kv: -kv[1])[:n]]
+        return {
+            "total": len(rows), "new": new, "wifi": kinds.get("wifi", 0), "ble": kinds.get("ble", 0),
+            "placed": placed, "open": open_nets, "nodes": len(per_node),
+            "new_series": new_series,
+            "by_node": [{"id": a, "count": b} for a, b in sorted(per_node.items(), key=lambda kv: -kv[1])],
+            "by_maker": top(per_maker, 10), "by_sec": top(per_sec, 8),
+            "by_ch": [{"ch": c, "count": per_ch[c]} for c in sorted(per_ch)],
+        }
+
     def wigle_csv(self, scope="session"):
         """WiGLE CSV (format 1.4): one row per positioned sighting."""
         head = ("WigleWifi-1.4,appRelease=1.0,model=OUI-SPY Mesh,release=1.0,device=OUI-SPY wardriver,"

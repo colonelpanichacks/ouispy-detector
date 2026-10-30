@@ -682,10 +682,10 @@ void ingest_metrics(JsonDocument &doc, uint32_t range) {
             i++;
         }
     }
-    auto bars = [](JsonArrayConst arr, const char *key, Bar *out, uint8_t &n) {
+    auto bars = [](JsonArrayConst arr, const char *key, Bar *out, uint8_t &n, uint8_t cap = MAX_BARS) {
         n = 0;
         for (JsonObjectConst o : arr) {
-            if (n == MAX_BARS) break;
+            if (n == cap) break;
             cpy(out[n].name, sizeof out[n].name, o[key]);
             out[n].count = o["count"] | 0;
             out[n].devices = o["devices"] | 0;
@@ -703,6 +703,30 @@ void ingest_metrics(JsonDocument &doc, uint32_t range) {
     for (JsonVariantConst v : doc["rssi"]["counts"].as<JsonArrayConst>()) {
         if (m.nrssi == 24) break;
         m.rssi[m.nrssi++] = v | 0;
+    }
+    // Wardriving: same bucket window as the detections (the same skip keeps them aligned).
+    JsonObjectConst wd = doc["wd"];
+    auto &w = m.wd;
+    w.total = wd["total"] | 0, w.fresh = wd["new"] | 0, w.wifi = wd["wifi"] | 0, w.ble = wd["ble"] | 0;
+    w.placed = wd["placed"] | 0, w.open = wd["open"] | 0, w.nodes = wd["nodes"] | 0;
+    auto wdSeries = [&](JsonArrayConst a, uint16_t *out) {
+        memset(out, 0, sizeof(uint16_t) * MAX_BUCKETS);
+        size_t i = 0;
+        for (JsonVariantConst v : a) {
+            if (i >= skip && i - skip < MAX_BUCKETS) out[i - skip] = v | 0;
+            i++;
+        }
+    };
+    wdSeries(wd["new_series"]["wifi"], w.wifiNew);
+    wdSeries(wd["new_series"]["ble"], w.bleNew);
+    bars(wd["by_maker"], "name", w.maker, w.nmaker, 10);
+    bars(wd["by_node"], "id", w.node, w.nnode);
+    bars(wd["by_sec"], "name", w.sec, w.nsec, 8);
+    w.nch = 0;
+    for (JsonObjectConst c : wd["by_ch"].as<JsonArrayConst>()) {
+        if (w.nch == 16) break;
+        w.ch[w.nch] = c["ch"] | 0;
+        w.chCount[w.nch++] = c["count"] | 0;
     }
     m.fetchedMs = millis();
     clock_from(m.until);

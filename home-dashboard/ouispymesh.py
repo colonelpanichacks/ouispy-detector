@@ -511,8 +511,11 @@ def api_clear():
 def api_metrics():
     rng = max(300, min(90 * 86400, int(request.args.get("range") or 86400)))
     until = time.time()
-    return jsonify(store.metrics(until - rng, until, request.args.get("node") or None,
-                                 request.args.get("dom") or None))
+    node, dom = request.args.get("node") or None, request.args.get("dom") or None
+    m = store.metrics(until - rng, until, node, dom)
+    # Wardriving on the same buckets, so the two read side by side.
+    m["wd"] = wardrive.metrics(until - rng, until, node, dom, m["bucket"], m["start"], m["n"])
+    return jsonify(m)
 
 
 @app.route("/api/stats")
