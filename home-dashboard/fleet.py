@@ -102,6 +102,11 @@ class Fleet:
         for nid, rec in (store.get_setting("ota_last") or {}).items():
             if nid in self.nodes:
                 self.nodes[nid]["ota"] = rec
+        # Last status each node gave (firmware, kind, role...): a node that is offline when
+        # the dashboard starts still shows what it is. Marked old by cfg_ts.
+        for nid, rec in (store.get_setting("node_cfg") or {}).items():
+            if nid in self.nodes and isinstance(rec.get("cfg"), dict) and not self.nodes[nid].get("cfg"):
+                self.nodes[nid].update(cfg=rec["cfg"], cfg_ts=rec.get("ts"))
         # Last filter list read from each node, so a restart doesn't blank
         # every drawer (fcrc in the next RST says whether it is still current).
         for nid, rec in (store.get_setting("filter_lists") or {}).items():
@@ -475,8 +480,13 @@ class Fleet:
                     last = self.store.get_setting("ota_last") or {}
                     last[nid] = ota
                     self.store.set_setting("ota_last", last)
+            old = st.get("cfg") or {}
             st["cfg"] = cfg
             st["cfg_ts"] = now
+            if any(old.get(k) != cfg.get(k) for k in ("fw", "role", "kind", "ch", "alias")):   # saved on change only
+                saved = self.store.get_setting("node_cfg") or {}
+                saved[nid] = {"cfg": cfg, "ts": now}
+                self.store.set_setting("node_cfg", saved)
             if cfg.get("role") == "home" and not self.home_id:
                 # The home's own status (it answers on USB even when quiet,
                 # e.g. no filters, no telemetry yet) names it as the home.

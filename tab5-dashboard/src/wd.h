@@ -17,7 +17,8 @@ struct WdDev {
     bool session;          // heard this session
     bool placed;           // has a position
     float lat, lon;        // where it was loudest
-    double last;           // server time (s)
+    double first, last;    // server time (s)
+    char node[7];          // the wardriver that heard it (last)
     uint32_t seen;
     char name[24];         // SSID / BLE name
 };

@@ -403,6 +403,7 @@ void feed_task(void *) {
         if (!lastStatus || ms - lastStatus > 60000) {
             lastStatus = ms;
             usb_send("status");
+            usb_send("txlow 1");   // it runs on our port's power: full-power transmit peaks reset our Wi-Fi chip
         }
         // Every node's status (name, firmware, filters) over the mesh, through whichever node
         // is on USB: commands are signed with the fleet key, so a remote can ask as well as

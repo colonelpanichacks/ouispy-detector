@@ -76,7 +76,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -902,6 +902,16 @@ void draw_map() {
             if (b.x0 < placed[k].x1 && b.x1 > placed[k].x0 && b.y0 < placed[k].y1 && b.y1 > placed[k].y0) return false;
         return true;
     };
+    if (A.droneTracks) {   // GPS nodes' tracks, under the markers (TRACKS hides them; each its own in its card)
+        static float (*ntp)[2] = (float (*)[2])heap_caps_malloc(NODE_TRAIL * sizeof(float[2]), MALLOC_CAP_SPIRAM);
+        for (int i = 0; ntp && i < M->nnodes; i++) {
+            const Node &nd = M->nodes[i];
+            int k = node_trail(nd.id, ntp, NODE_TRAIL);
+            uint16_t c = node_color565(nd.id);
+            for (int p = 1; p < k; p++)
+                C.drawLine(sx(ntp[p - 1][1]), sy(ntp[p - 1][0]), sx(ntp[p][1]), sy(ntp[p][0]), dim(c, 0.3f + 0.6f * p / k));
+        }
+    }
     int order[MAX_NODES], no = 0;
     for (int i = 0; i < M->nnodes; i++)
         if (M->nodes[i].hasPos) order[no++] = i;
@@ -1071,6 +1081,11 @@ void draw_map() {
             chip(bx, cy + 176, "SETTINGS", ACCENT, false, &w2, H_POPSET);
             bx += w2 + 10;
             chip(bx, cy + 176, A.mapMove ? "TAP THE MAP..." : "MOVE", AMBER, A.mapMove, &w2, net_online() ? H_POPMOVE : -1);
+            if (node_kind(*pn) >= 3) {   // a GPS node: its own track on or off
+                bx += w2 + 10;
+                bool tk = node_track_on(pn->id);
+                chip(bx, cy + 176, tk ? "TRACK ON" : "TRACK OFF", rgb(0x39ff88), tk, &w2, H_POPTRACK);
+            }
         }
     }
     C.clearClipRect();
@@ -2114,10 +2129,17 @@ void kpi(int x, int y, int w, int h, const char *label, const char *value, uint1
     font(F_SM);
     text(x + 18, y + 12, label, MUTED);
     font(F_XL);
+    int vw = C.textWidth(value);
     glow(x + 18, y + h - 14, value, col, bottom_left);
-    if (sub) {
+    if (sub) {   // beside the value when it fits; else up on the label line, trimmed to fit
         font(F_SM);
-        text(x + w - 14, y + h - 16, sub, FAINT, bottom_right);
+        int room = w - 14 - (18 + vw + 14);
+        if (C.textWidth(sub) <= room) {
+            text(x + w - 14, y + h - 16, sub, FAINT, bottom_right);
+        } else {
+            int lw = C.textWidth(label);
+            text(x + w - 14, y + 12, fit(sub, w - 14 - (18 + lw + 14)), FAINT, top_right);
+        }
     }
 }
 
@@ -2145,9 +2167,63 @@ void filters_cell(int x, int y, const Node &n, bool compact) {
 void draw_overview() {
     int tw = (W - 2 * PAD - 4 * 12) / 5, th = 104, y = CY;
     char v[24], sub[32];
-    int on = online_count();
-    snprintf(v, sizeof v, "%d/%d", on, M->nnodes);
-    kpi(PAD, y, tw, th, "NODES ONLINE", v, on == M->nnodes && on ? ACCENT : AMBER,
+    const bool wdm = A.ovWd;
+    const double nowS = server_now();
+    // What the filters keep: nodes (wardrivers only in WARDRIVE mode, unless one is picked),
+    // detections, wardriven devices (newest first).
+    static int nIdx[64], dIdx[300], wIdx[200];
+    int nn = 0, nd = 0, nw = 0;
+    for (int i = 0; i < M->nnodes && nn < 64; i++) {
+        const Node &n = M->nodes[i];
+        if (A.node[0] && strcmp(n.id, A.node)) continue;
+        if (wdm && !A.node[0] && !node_is_wardriver(n)) continue;
+        nIdx[nn++] = i;
+    }
+    for (int i = 0; i < M->ndets && nd < 300; i++) {
+        const Det *d = det_at(i);
+        if (A.node[0] && strcmp(d->node, A.node) && strcmp(d->closest, A.node)) continue;
+        if (A.dom && strcmp(d->dom, A.dom == 1 ? "ble" : "wifi")) continue;
+        dIdx[nd++] = i;
+    }
+    uint32_t wLive = 0, wWifi = 0, wBle = 0, wOpen = 0, wPlaced = 0, wSess = 0;
+    uint16_t wHour[24] = {0};
+    if (wdm) {
+        static int *all = (int *)heap_caps_malloc(WD_MAX * sizeof(int), MALLOC_CAP_SPIRAM);   // 32 KB: PSRAM, not internal RAM
+        int na = 0;
+        for (int i = 0; all && i < wd_count(); i++) {
+            const WdDev &d = wd_at(i);
+            if (A.node[0] && strcmp(d.node, A.node)) continue;
+            if (A.dom && d.kind != (A.dom == 1 ? 2 : 1)) continue;
+            if (d.first && nowS - d.first < 86400) wHour[min(23, (int)((86400 - (nowS - d.first)) / 3600))]++;
+            if (!d.session) continue;
+            wSess++;
+            if (nowS - d.last < 60) wLive++;
+            if (d.kind == 1) wWifi++, wOpen += d.sec == 0; else wBle++;
+            if (d.placed) wPlaced++;
+            all[na++] = i;
+        }
+        nw = min(na, 200);
+        if (all) std::partial_sort(all, all + nw, all + na, [](int a, int b) { return wd_at(a).last > wd_at(b).last; });
+        if (all) memcpy(wIdx, all, nw * sizeof(int));
+    }
+    int on = 0;
+    for (int k = 0; k < nn; k++) on += M->nodes[nIdx[k]].online;
+    if (wdm) {
+        snprintf(v, sizeof v, "%d/%d", on, nn);
+        kpi(PAD, y, tw, th, "WARDRIVERS ONLINE", v, on ? rgb(0x22d3ee) : FAINT, nn ? "wardriving now" : "no wardriver nodes");
+        snprintf(v, sizeof v, "%u", (unsigned)wSess);
+        kpi(PAD + (tw + 12), y, tw, th, "THIS SESSION", v, rgb(0x22d3ee), "devices heard");
+        snprintf(v, sizeof v, "%u", (unsigned)wLive);
+        kpi(PAD + 2 * (tw + 12), y, tw, th, "IN RANGE NOW", v, AMBER, "last minute");
+        snprintf(v, sizeof v, "%u / %u", (unsigned)wWifi, (unsigned)wBle);
+        snprintf(sub, sizeof sub, "%u open", (unsigned)wOpen);
+        kpi(PAD + 3 * (tw + 12), y, tw, th, "WIFI / BLE", v, rgb(0xff2bd6), sub);
+        snprintf(v, sizeof v, "%u", (unsigned)wPlaced);
+        snprintf(sub, sizeof sub, "%u in memory", (unsigned)wd_count());
+        kpi(PAD + 4 * (tw + 12), y, tw, th, "ON THE MAP", v, rgb(0x39ff88), sub);
+    } else {
+    snprintf(v, sizeof v, "%d/%d", on, nn);
+    kpi(PAD, y, tw, th, "NODES ONLINE", v, on == nn && on ? ACCENT : AMBER,
         M->home.alive ? "home up" : "home down");
     snprintf(v, sizeof v, "%u", (unsigned)M->stats.day);
     snprintf(sub, sizeof sub, "%u all time", (unsigned)M->stats.total);
@@ -2161,17 +2237,18 @@ void draw_overview() {
     snprintf(v, sizeof v, "%u", (unsigned)M->alertsUnacked);
     kpi(PAD + 4 * (tw + 12), y, tw, th, M->muteAll ? "ALERTS (SILENCED)" : "UNACKED ALERTS", v,
         M->alertsUnacked ? PINK : FAINT, M->nmuted ? "devices muted" : nullptr);
+    }
 
     // Fleet column.
     int fy = y + th + 12, fw = 500, fh = CB - fy;
     panel(PAD, fy, fw, fh, "FLEET");
     // Three lines a node: name | status; type + id | link; filters + firmware. Drag to scroll.
     int rh = 86, ry = fy + 34, vis = max(1, (fh - 40) / rh);
-    ovFleetTop = constrain(ovFleetTop, 0, max(0, M->nnodes - vis));
+    ovFleetTop = constrain(ovFleetTop, 0, max(0, nn - vis));
     scroll_area(PAD, ry, fw, vis * rh, L_OVF, rh, vis);
     for (int k = 0; k < vis; k++, ry += rh) {
-        int i = ovFleetTop + k;
-        if (i >= M->nnodes) break;
+        if (ovFleetTop + k >= nn) break;
+        int i = nIdx[ovFleetTop + k];
         const Node &n = M->nodes[i];
         uint16_t nc = node_color565(n.id);
         hit(PAD + 8, ry, fw - 16, rh - 2, H_NODEROW, i);   // tap: to Fleet; hold: its settings
@@ -2201,36 +2278,77 @@ void draw_overview() {
         char fwb[32];
         snprintf(fwb, sizeof fwb, "fw %s", n.fw[0] ? n.fw : "?");
         text(rx, ry + 70, fwb, FAINT, middle_right);
-        if (k + 1 < vis && i + 1 < M->nnodes) C.drawFastHLine(PAD + 12, ry + rh - 1, fw - 24, LINE);
+        if (k + 1 < vis && ovFleetTop + k + 1 < nn) C.drawFastHLine(PAD + 12, ry + rh - 1, fw - 24, LINE);
     }
-    if (M->nnodes > vis) {   // more than fit: a slim scroll bar
-        int th = fh - 40, bh = max(24, th * vis / M->nnodes), by = fy + 34 + (th - bh) * ovFleetTop / max(1, M->nnodes - vis);
+    if (nn > vis) {   // more than fit: a slim scroll bar
+        int th = fh - 40, bh = max(24, th * vis / nn), by = fy + 34 + (th - bh) * ovFleetTop / max(1, nn - vis);
         C.fillRoundRect(PAD + fw - 6, by, 3, bh, 1, dim(ACCENT, 0.6f));
     }
-    if (!M->nnodes) {
+    if (!nn) {
         font(F_MD);
-        text(PAD + fw / 2, fy + fh / 2, waiting_text(), FAINT, middle_center);
+        text(PAD + fw / 2, fy + fh / 2, !M->nnodes ? waiting_text() : wdm ? "no wardriver nodes" : "no node matches", FAINT, middle_center);
     }
 
     // Live feed.
     int lx = PAD + fw + 12, lw = W - PAD - lx, lh = 340;
-    panel(lx, fy, lw, lh, "LIVE FEED");
-    int hy = fy + 34;
+    panel(lx, fy, lw, lh, wdm ? "WARDRIVE FEED" : "LIVE FEED");
+    {   // mode, node and radio: the same switch and filters as Metrics
+        static const char *doms[] = {"BLE + WIFI", "BLE", "WIFI"};
+        int cw, cx = lx + lw - 14;
+        font(F_SM);
+        cx -= C.textWidth(doms[A.dom]) + 28;
+        chip(cx, fy + 4, doms[A.dom], A.dom == 2 ? SKY : A.dom == 1 ? PURPLE : ACCENT, A.dom != 0, &cw, H_DOM, -1);
+        const char *nl = A.node[0] ? node_name(A.node) : "ALL NODES";
+        cx -= C.textWidth(fit_name(nl, 150)) + 28 + 8;
+        chip(cx, fy + 4, fit_name(nl, 150), A.node[0] ? node_color565(A.node) : ACCENT, A.node[0] != 0, &cw, H_NODE);
+        const char *ml = wdm ? "WARDRIVE" : "DETECTIONS";
+        cx -= C.textWidth(ml) + 28 + 8;
+        chip(cx, fy + 4, ml, wdm ? rgb(0x22d3ee) : ACCENT, true, &cw, H_OVWD);
+    }
+    int hy = fy + 44;
     font(F_SM);
     const int cAge = lx + 16, cVen = lx + 76, cMac = lx + 290, cRssi = lx + 508, cNode = lx + 566;
     text(cAge, hy, "AGE", FAINT);
     text(cVen, hy, "DEVICE", FAINT);
     text(cMac, hy, "MAC", FAINT);
     text(cRssi, hy, "RSSI", FAINT);
-    text(cNode, hy, "NODE / CLOSEST", FAINT);
+    text(cNode, hy, wdm ? "NODE" : "NODE / CLOSEST", FAINT);
     int row = 30, yy = hy + 20, lvis = max(1, (fy + lh - 4 - yy) / row);
-    ovLiveTop = constrain(ovLiveTop, 0, max(0, M->ndets - lvis));
+    int total = wdm ? nw : nd;
+    ovLiveTop = constrain(ovLiveTop, 0, max(0, total - lvis));
     scroll_area(lx, yy, lw, lvis * row, L_OVL, row, lvis);
-    if (M->ndets > lvis) {
-        int th = lvis * row, bh = max(20, th * lvis / M->ndets), by = yy + (th - bh) * ovLiveTop / max(1, M->ndets - lvis);
+    if (total > lvis) {
+        int th = lvis * row, bh = max(20, th * lvis / total), by = yy + (th - bh) * ovLiveTop / max(1, total - lvis);
         C.fillRoundRect(lx + lw - 6, by, 3, bh, 1, dim(ACCENT, 0.6f));
     }
-    for (int i = ovLiveTop; i < M->ndets && yy + row <= fy + lh - 4; i++, yy += row) {
+    for (int k = ovLiveTop; wdm && k < nw && yy + row <= fy + lh - 4; k++, yy += row) {
+        const WdDev &d = wd_at(wIdx[k]);
+        bool wifi = d.kind == 1;
+        if (nowS - d.first < 60) C.fillRect(lx + 4, yy, lw - 8, row - 2, dim(PINK, 0.08f));
+        hit(lx + 4, yy, lw - 12, row, H_OVDET, wIdx[k]);   // tap: its info page
+        font(F_MD);
+        text(cAge, yy + row / 2, age_str(d.last), MUTED, middle_left);
+        const char *nm = d.name[0] ? d.name : wifi ? "(hidden network)" : "BLE device";
+        font(F_SM);
+        static const char *secs[] = {"OPEN", "WEP", "WPA", "WPA2", "WPA3", "WPA2/3"};
+        const char *tag = wifi ? (d.sec < 6 ? secs[d.sec] : "WIFI") : "BLE";
+        int tgw = C.textWidth(tag);
+        text(cMac - 14, yy + row / 2, tag, wifi ? (d.sec <= 1 ? RED : rgb(0x22d3ee)) : rgb(0xff2bd6), middle_right);
+        font(F_MD);
+        text(cVen, yy + row / 2, fit_name(nm, cMac - cVen - tgw - 26), nowS - d.first < 60 ? PINK : TEXT, middle_left);
+        char m[18];
+        snprintf(m, sizeof m, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+        font(F_MONO_S);
+        text(cMac, yy + row / 2, m, SOFT, middle_left);
+        font(F_MD);
+        char r[8];
+        snprintf(r, sizeof r, "%d", d.rssi);
+        text(cRssi, yy + row / 2, r, rssi_color(d.rssi), middle_left);
+        text(cNode, yy + row / 2, fit_name(d.node[0] ? node_name(d.node) : "-", lx + lw - cNode - 12),
+             d.node[0] ? node_color565(d.node) : FAINT, middle_left);
+    }
+    for (int k = ovLiveTop; !wdm && k < nd && yy + row <= fy + lh - 4; k++, yy += row) {
+        int i = dIdx[k];
         const Det *d = det_at(i);
         bool muted = mac_muted(d->mac);
         if (i == 0 && server_now() - d->ts < 10) C.fillRect(lx + 4, yy, lw - 8, row - 2, dim(PINK, 0.08f));
@@ -2249,23 +2367,25 @@ void draw_overview() {
         else snprintf(nb, sizeof nb, "%s", node_name(d->node));
         text(cNode, yy + row / 2, fit_name(nb, lx + lw - cNode - 12), node_color565(d->closest[0] ? d->closest : d->node), middle_left);
     }
-    if (!M->ndets) {
+    if (!total) {
         font(F_MD);
-        text(lx + lw / 2, fy + lh / 2, "no detections yet", FAINT, middle_center);
+        text(lx + lw / 2, fy + lh / 2 + 20, wdm ? "nothing wardriven this session" : M->ndets ? "nothing matches the filter" : "no detections yet",
+             FAINT, middle_center);
     }
 
     // 24 h activity.
     int ay = fy + lh + 12, ah = CB - ay;
-    panel(lx, ay, lw, ah, "ACTIVITY  LAST 24 H");
-    int n = M->stats.nhourly;
+    panel(lx, ay, lw, ah, wdm ? "NEW DEVICES  LAST 24 H" : "ACTIVITY  LAST 24 H");
+    const uint16_t *hours = wdm ? wHour : M->stats.hourly;
+    int n = wdm ? 24 : M->stats.nhourly;
     if (n) {
         uint16_t mx = 1;
-        for (int i = 0; i < n; i++) mx = max(mx, M->stats.hourly[i]);
+        for (int i = 0; i < n; i++) mx = max(mx, hours[i]);
         int bx = lx + 16, bw = (lw - 32) / n, by = ay + ah - 26, bh = ah - 64;
         for (int i = 0; i < n; i++) {
-            int h = M->stats.hourly[i] * bh / mx;
-            if (M->stats.hourly[i] && h < 2) h = 2;
-            uint16_t col = i == n - 1 ? PINK : ACCENT;
+            int h = hours[i] * bh / mx;
+            if (hours[i] && h < 2) h = 2;
+            uint16_t col = i == n - 1 ? PINK : wdm ? rgb(0x22d3ee) : ACCENT;
             C.fillRect(bx + i * bw + 2, by - h, bw - 4, h, dim(col, 0.75f));
             if (h) C.drawFastHLine(bx + i * bw + 2, by - h, bw - 4, col);
         }
@@ -4161,14 +4281,30 @@ static void dispatch(const Hit &h) {
     case H_POPSET:
         if (A.mapPop[0]) { strlcpy(A.nodeEdit, A.mapPop, sizeof A.nodeEdit); A.editNode = false; A.rebootArm = 0; }
         break;
+    case H_POPTRACK:
+        if (A.mapPop[0]) {
+            bool on = !node_track_on(A.mapPop);
+            node_track_set(A.mapPop, on);
+            toast(on ? "%s track on" : "%s track off", node_name(A.mapPop));
+        }
+        break;
     case H_POPMOVE:
         A.mapMove = !A.mapMove;
         if (A.mapMove) toast("tap the map where %s is", node_name(A.mapPop));
         break;
     case H_ZLOCK: A.liveZoomLock = !A.liveZoomLock; toast(A.liveZoomLock ? "list zoom locked" : "pinch the list to zoom it"); break;
     case H_OVDET:
-        if (h.arg >= 0 && h.arg < M->ndets) open_detail(det_at(h.arg)->mac);
+        if (A.ovWd) {   // a wardriven device (its index in the store): its info page
+            if (h.arg >= 0 && h.arg < wd_count()) {
+                const WdDev &d = wd_at(h.arg);
+                snprintf(A.wdOpen, sizeof A.wdOpen, "%02X:%02X:%02X:%02X:%02X:%02X", d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5]);
+                A.wdOpenKind = d.kind;
+            }
+        } else if (h.arg >= 0 && h.arg < M->ndets) {
+            open_detail(det_at(h.arg)->mac);
+        }
         break;
+    case H_OVWD: A.ovWd = !A.ovWd; ovLiveTop = ovFleetTop = 0; break;
     case H_SORT:
         if (A.liveSort == h.arg) A.liveSortRev = !A.liveSortRev;
         else A.liveSort = h.arg, A.liveSortRev = false;

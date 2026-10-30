@@ -63,6 +63,10 @@
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
                 <span>Targets: on</span>
             </button>
+            <button class="icon-btn map-traffic-btn map-tgt-btn" id="mapTracks" aria-pressed="true" title="Tracks: node GPS trails and drone flight paths">
+                <svg viewBox="0 0 24 24"><path d="M4 19c3-1 3-6 6-7s5 2 8-1 2-5 2-5" stroke-dasharray="2 3"/><circle cx="4" cy="19" r="1.6"/></svg>
+                <span>Tracks: on</span>
+            </button>
             <button class="icon-btn map-traffic-btn map-tri-btn" id="mapTri" aria-pressed="false" title="Triangulate: position from 3+ nodes' signal (inside the nodes' area only)">
                 <svg viewBox="0 0 24 24"><path d="M12 3 3 20h18z"/><circle cx="12" cy="14" r="2"/></svg>
                 <span>Triangulate: off</span>
@@ -128,6 +132,11 @@
         <div class="dock-body">
 
         <div class="tab-body active" id="tab-overview">
+            <div class="mx-bar ov-bar">
+                <div class="mx-seg" id="ovMode"><button data-m="det" class="on">Detections</button><button data-m="wd">Wardrive</button></div>
+                <select id="ovNode" class="field"><option value="">All nodes</option></select>
+                <select id="ovDom" class="field"><option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option></select>
+            </div>
             <div class="ov-kpis" id="ovKpis"></div>
             <div class="ov-grid">
                 <div class="fa ov-fleet"><h4><span>Fleet</span><span class="fa-count" id="ovFleetN"></span></h4><div class="ov-scroll" id="ovFleet"></div></div>

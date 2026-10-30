@@ -1174,13 +1174,16 @@ def api_ports():
 
 @app.route("/api/console", methods=["POST"])
 def api_console():
-    line = str((request.get_json(silent=True) or {}).get("line", "")).strip()
+    data = request.get_json(silent=True) or {}
+    line = str(data.get("line", "")).strip()
     if not line:
         return jsonify({"ok": False, "error": "empty"}), 400
+    # "to": "bridge" sends it to the node on a Tab5's USB instead of the home.
+    to = "bridge" if data.get("to") == "bridge" else "serial"
     with src_lock:
-        ser = sources.get("serial")
-    if not ser or not ser.send(line):
-        return jsonify({"ok": False, "error": "serial not connected"}), 409
+        ser = sources.get(to)
+    if not ser or ser.send(line) is False:
+        return jsonify({"ok": False, "error": f"{to} not connected"}), 409
     fleet.feed_line(f"> {line}", "you")
     return jsonify({"ok": True})
 

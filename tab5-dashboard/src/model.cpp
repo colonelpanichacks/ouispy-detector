@@ -2,6 +2,7 @@
 #include "settings.h"
 #include <M5GFX.h>
 #include <Preferences.h>
+void node_trail_add(const char *id, double la, double lo);
 
 Model *M = nullptr;
 static SemaphoreHandle_t lock_;
@@ -260,6 +261,8 @@ static void parse_node(Node &n, JsonObjectConst o) {
         n.dev = cfg["dev"] | 0;
         n.up = cfg["up"] | 0;
         n.heap = cfg["heap"] | 0;
+        size_t fl = strlen(n.fw);
+        if (n.hasPos && fl && (n.fw[fl - 1] == 'G' || n.fw[fl - 1] == 'Y')) node_trail_add(n.id, n.lat, n.lon);
         n.nnbr = parse_seen(cfg["nbr"], n.nbr);
     }
     JsonObjectConst ota = o["ota"];
@@ -765,6 +768,53 @@ static double hav_m(double a1, double o1, double a2, double o2) {
     double r = M_PI / 180, dl = (a2 - a1) * r, dn = (o2 - o1) * r;
     double h = sin(dl / 2) * sin(dl / 2) + cos(a1 * r) * cos(a2 * r) * sin(dn / 2) * sin(dn / 2);
     return 6371000.0 * 2 * asin(sqrt(h));
+}
+
+// ---------------------------------------------------------------- GPS node trails
+
+namespace {
+struct NTrail {
+    char id[7];
+    bool off;
+    uint16_t n;
+    float pt[NODE_TRAIL][2];
+};
+NTrail *ntr = nullptr;   // PSRAM, MAX_NODES of them
+int nntr = 0;
+NTrail *ntrail_find(const char *id, bool create) {
+    for (int i = 0; i < nntr; i++)
+        if (!strcmp(ntr[i].id, id)) return &ntr[i];
+    if (!create) return nullptr;
+    if (!ntr) ntr = (NTrail *)heap_caps_calloc(MAX_NODES, sizeof(NTrail), MALLOC_CAP_SPIRAM);
+    if (!ntr || nntr >= MAX_NODES) return nullptr;
+    NTrail *t = &ntr[nntr++];
+    strlcpy(t->id, id, sizeof t->id);
+    return t;
+}
+}  // namespace
+
+void node_trail_add(const char *id, double la, double lo) {
+    NTrail *t = ntrail_find(id, true);
+    if (!t) return;
+    if (t->n) {
+        double dy = (la - t->pt[t->n - 1][0]) * 111320.0, dx = (lo - t->pt[t->n - 1][1]) * 111320.0 * cos(la * M_PI / 180);
+        if (dx * dx + dy * dy < 16) return;   // < 4 m: standing still
+    }
+    if (t->n == NODE_TRAIL) memmove(t->pt[0], t->pt[1], sizeof t->pt[0] * (NODE_TRAIL - 1)), t->n--;
+    t->pt[t->n][0] = la, t->pt[t->n][1] = lo;
+    t->n++;
+}
+int node_trail(const char *id, float (*out)[2], int max) {
+    NTrail *t = ntrail_find(id, false);
+    if (!t || t->off) return 0;
+    int k = min((int)t->n, max);
+    memcpy(out, t->pt[t->n - k], sizeof t->pt[0] * k);
+    return k;
+}
+bool node_track_on(const char *id) { NTrail *t = ntrail_find(id, false); return !t || !t->off; }
+void node_track_set(const char *id, bool on) {
+    NTrail *t = ntrail_find(id, true);
+    if (t) t->off = !on;
 }
 
 static void track_add(float (*tr)[2], uint8_t &n, double la, double lo) {

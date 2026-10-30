@@ -746,6 +746,7 @@ $("dTrail").onchange = () => {
 function renderTrails() {
     if (!S.trailLayer) S.trailLayer = L.layerGroup().addTo(map);
     S.trailLayer.clearLayers();
+    if (S.tracksOn === false) return;   // the map's Tracks button
     for (const [nid, pts] of Object.entries(S.trails)) {
         const secs = trailFor(nid);
         if (!secs) continue;
@@ -1087,6 +1088,22 @@ function syncTargetBtn() {
     b.querySelector("span").textContent = S.tgtOn ? "Targets: on" : "Targets: off";
 }
 $("mapTargets").onclick = () => { S.tgtOn = !S.tgtOn; lsSet("ouispy.targetsOn", S.tgtOn); syncTargetBtn(); renderTargets(); };
+// Tracks: every node trail and drone flight path at once (per browser).
+S.tracksOn = lsGet("ouispy.tracksOn", true);
+function syncTracksBtn() {
+    const b = $("mapTracks");
+    b.classList.toggle("on", S.tracksOn);
+    b.setAttribute("aria-pressed", S.tracksOn ? "true" : "false");
+    b.querySelector("span").textContent = S.tracksOn ? "Tracks: on" : "Tracks: off";
+}
+$("mapTracks").onclick = () => {
+    S.tracksOn = !S.tracksOn;
+    lsSet("ouispy.tracksOn", S.tracksOn);
+    syncTracksBtn();
+    renderTrails();
+    renderDroneMap();
+};
+syncTracksBtn();
 function toggleTarget(mac) {
     S.tgtHidden.has(mac) ? S.tgtHidden.delete(mac) : S.tgtHidden.add(mac);
     lsSet("ouispy.targetsHidden", [...S.tgtHidden]);
@@ -3246,7 +3263,7 @@ function pilotIcon(d) {
 }
 function renderDroneMap() {
     if (!S.droneLayer) S.droneLayer = L.layerGroup().addTo(map);
-    const showP = $("drShowPilot").checked, showT = $("drShowTrack").checked;
+    const showP = $("drShowPilot").checked, showT = $("drShowTrack").checked && S.tracksOn !== false;
     const keep = new Set();
     for (const d of Object.values(S.drones)) {
         if (d.lat == null && d.plat == null) continue;
@@ -3707,15 +3724,69 @@ const OV_KIND = { detector: ["DETECTOR", "#7dd3fc"], skyspy: ["SKY-SPY", "#ff7ad
                   gps: ["GPS NODE", "#39ff88"], gpswd: ["GPS WARDRIVER", "#39ff88"] };
 const HOUSE_SVG = `<svg class="ov-house" viewBox="0 0 24 24"><path d="M3 11 12 3l9 8v10h-6v-6H9v6H3z"/></svg>`;
 function rssiTone(r) { return r == null ? "var(--muted)" : r >= -60 ? "#39ff88" : r >= -75 ? "#22d3ee" : r >= -85 ? "#ffb020" : "#ff4d6d"; }
-function renderOverview() {
+// Overview shows detections or wardriving (the same switch as Metrics), filtered by node
+// and by BLE / WiFi. Remembered per viewer.
+S.ov = { mode: lsGet("ouispy.ovMode", "det"), node: "", dom: "", wd: null, wdAct: null, wdAt: 0, actAt: 0 };
+$("ovMode").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.m === S.ov.mode);
+    b.onclick = () => {
+        S.ov.mode = b.dataset.m;
+        lsSet("ouispy.ovMode", S.ov.mode);
+        $("ovMode").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+        S.ov.wdAt = S.ov.actAt = 0;
+        renderOverview();
+    };
+});
+$("ovNode").onchange = () => { S.ov.node = $("ovNode").value; S.ov.wdAt = S.ov.actAt = 0; renderOverview(); };
+$("ovDom").onchange = () => { S.ov.dom = $("ovDom").value; S.ov.wdAt = S.ov.actAt = 0; renderOverview(); };
+function ovNodeOptions(nodes) {
+    const sel = $("ovNode"), want = ["", ...nodes.map((n) => n.id)].join(",");
+    if (sel.dataset.ids === want) return;
+    sel.dataset.ids = want;
+    sel.innerHTML = `<option value="">All nodes</option>` + nodes.map((n) => `<option value="${esc(n.id)}">${esc(nodeName(n.id))}</option>`).join("");
+    sel.value = S.ov.node;
+}
+async function ovLoadWd() {   // this session's devices (the feed) and 24 h of discoveries (the bars)
+    const t = Date.now();
+    if (t - S.ov.wdAt > 3000) {
+        S.ov.wdAt = t;
+        const q = new URLSearchParams({ scope: "session", limit: 400, node: S.ov.node });
+        try { S.ov.wd = await api(`/api/wardrive?${q}`); } catch (e) { /* keep the last */ }
+    }
+    if (t - S.ov.actAt > 30000) {
+        S.ov.actAt = t;
+        const q = new URLSearchParams({ range: 86400, node: S.ov.node, dom: S.ov.dom });
+        try { S.ov.wdAct = await api(`/api/metrics?${q}`); } catch (e) { /* keep the last */ }
+    }
+    renderOverview(true);
+}
+function renderOverview(fromLoad) {
     if (!$("tab-overview").classList.contains("active") || !S.fleet) return;
-    const nodes = S.fleet.nodes || [];
+    const wdMode = S.ov.mode === "wd";
+    if (wdMode && !fromLoad) ovLoadWd();
+    const allNodes = S.fleet.nodes || [];
+    ovNodeOptions(allNodes);
+    const isWd = (n) => ["wardrive", "gpswd"].includes(nodeKind(n));
+    const nodes = allNodes.filter((n) => (!S.ov.node || n.id === S.ov.node) && (!wdMode || isWd(n) || S.ov.node));
     const on = nodes.filter((n) => n.online).length;
     const st = S.statsBase || {};
     const nowS = Date.now() / 1000;
     const inRange = Object.values(S.targets || {}).filter((t) => t && nowS - (t.last || t.ts || 0) < 60).length;
     const liveDr = Object.values(S.drones || {}).filter((d) => droneLive(d)).length;
     const kpi = (k, v, sub, c) => `<div class="ov-kpi" style="--c:${c}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub || ""}</div></div>`;
+    if (wdMode) {
+        const w = S.ov.wd || { devices: [], this_session: {}, history: {} };
+        const devs = (w.devices || []).filter((d) => !S.ov.dom || d.kind === S.ov.dom);
+        const live = devs.filter((d) => nowS - d.last < 60).length;
+        const wifi = devs.filter((d) => d.kind === "wifi"), ble = devs.filter((d) => d.kind === "ble");
+        const placed = devs.filter((d) => d.lat != null).length;
+        const hist = w.history || {}, histN = (hist.wifi ? hist.wifi.n : 0) + (hist.ble ? hist.ble.n : 0);
+        $("ovKpis").innerHTML = kpi("Wardrivers online", `${on}/${nodes.length}`, nodes.length ? "wardriving now" : "no wardriver nodes", on ? "#22d3ee" : "#64748b") +
+            kpi("This session", devs.length, w.session_start ? `since ${new Date(w.session_start * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : "", "#22d3ee") +
+            kpi("In range now", live, "heard in the last minute", "#ffb020") +
+            kpi("WiFi / BLE", `${wifi.length} / ${ble.length}`, `${wifi.filter((d) => d.sec === "open").length} open networks`, "#ff2bd6") +
+            kpi("On the map", placed, `${histN} all time`, "#39ff88");
+    } else
     $("ovKpis").innerHTML = kpi("Nodes online", `${on}/${nodes.length}`, nodes.some((n) => n.is_home && n.online) ? "home up" : "home down", on === nodes.length ? "#2dd4bf" : "#ffb020") +
         kpi("Detections 24 h", st.day ?? "-", `${st.total ?? 0} all time`, "#7dd3fc") +
         kpi("Unique devices", st.macs ?? "-", "MACs seen", "#c4b5fd") +
@@ -3739,7 +3810,9 @@ function renderOverview() {
         </div>`;
     }).join("");
     $("ovFleet").querySelectorAll(".ov-node").forEach((el) => el.onclick = () => selectNode(el.dataset.id, true));
-    const dets = (S.dets || []).slice(0, 80);
+    if (wdMode) { ovWdFeed(); return; }
+    const dets = (S.dets || []).filter((d) => (!S.ov.node || d.node === S.ov.node || d.closest === S.ov.node) &&
+                                             (!S.ov.dom || d.dom === S.ov.dom)).slice(0, 80);
     $("ovFeedN").textContent = dets.length ? `${dets.length} latest` : "";
     $("ovFeed").innerHTML = dets.map((d) => `<div class="ov-det" data-mac="${esc(d.mac)}">
         <span class="ov-age">${ago(d.ts).replace(" ago", "")}</span>
@@ -3753,6 +3826,38 @@ function renderOverview() {
     const mx = Math.max(1, ...hrs.map((x) => x.c));
     $("ovActPeak").textContent = hrs.length ? `peak ${mx}/h` : "";
     $("ovAct").innerHTML = hrs.map((x, i) => `<i class="${i === hrs.length - 1 ? "now" : ""}" style="height:${Math.max(3, x.c / mx * 100)}%"
+        title="${new Date(x.h * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}  ${x.c}"></i>`).join("");
+}
+// Wardrive mode: the session's devices, newest first, and discoveries over the last 24 h.
+function ovWdFeed() {
+    const nowS = Date.now() / 1000;
+    const devs = ((S.ov.wd && S.ov.wd.devices) || []).filter((d) => !S.ov.dom || d.kind === S.ov.dom).slice(0, 80);
+    $("ovFeedN").textContent = devs.length ? `${devs.length} latest wardriven` : "";
+    $("ovFeed").innerHTML = devs.map((d) => {
+        const label = d.name || d.vendor || (d.kind === "wifi" ? "(hidden network)" : d.rnd ? "BLE (random address)" : "BLE device");
+        const tag = d.kind === "wifi" ? `<span class="ov-wdk" style="color:#22d3ee">WIFI ${esc(d.sec || "")}</span>` : `<span class="ov-wdk" style="color:#ff2bd6">BLE</span>`;
+        return `<div class="ov-det" data-mac="${esc(d.mac)}" data-kind="${d.kind}">
+        <span class="ov-age">${ago(d.last).replace(" ago", "")}</span>
+        <span class="ov-dev ${nowS - d.first < 60 ? "new" : ""}">${esc(label)} ${tag}</span>
+        <span class="ov-mac">${esc(d.mac)}</span>
+        <span class="ov-r" style="color:${rssiTone(d.rssi)}">${d.rssi ?? ""}</span>
+        <span class="ov-nd">${esc(nodeName(d.node))}</span></div>`;
+    }).join("") || `<div class="empty">${S.ov.wd ? "Nothing wardriven this session yet." : "Loading..."}</div>`;
+    $("ovFeed").querySelectorAll(".ov-det").forEach((el) => el.onclick = () => {
+        openWdDevice(el.dataset.mac, el.dataset.kind);
+    });
+    // 24 h of discoveries, folded into hours.
+    const m = S.ov.wdAct;
+    if (!m || !m.wd) { $("ovAct").innerHTML = ""; $("ovActPeak").textContent = ""; return; }
+    const per = Math.max(1, Math.round(3600 / m.bucket)), hrs = [];
+    for (let i = 0; i < m.n; i += per) {
+        let c = 0;
+        for (let j = i; j < Math.min(m.n, i + per); j++) c += (m.wd.new_series.wifi[j] || 0) + (m.wd.new_series.ble[j] || 0);
+        hrs.push({ h: m.start + i * m.bucket, c });
+    }
+    const mx = Math.max(1, ...hrs.map((x) => x.c));
+    $("ovActPeak").textContent = `new devices, peak ${mx}/h`;
+    $("ovAct").innerHTML = hrs.map((x, i) => `<i class="${i === hrs.length - 1 ? "now" : ""}" style="height:${Math.max(3, x.c / mx * 100)}%;background:#22d3ee"
         title="${new Date(x.h * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}  ${x.c}"></i>`).join("");
 }
 document.querySelector('.tab[data-tab="overview"]').addEventListener("click", () => setTimeout(renderOverview, 0));

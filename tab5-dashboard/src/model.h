@@ -266,6 +266,12 @@ void ingest_fleet(JsonObjectConst fleet);
 void ingest_det(JsonObjectConst d, bool live);
 void ingest_sighting(JsonObjectConst s);
 void ingest_metrics(JsonDocument &doc, uint32_t range);
+// Where each GPS node (fw G / Y) has been, from its live position: up to NODE_TRAIL points,
+// one per 4 m of movement. Its track can be hidden on its own (map card: TRACK).
+constexpr int NODE_TRAIL = 400;
+int node_trail(const char *id, float (*out)[2], int max);
+bool node_track_on(const char *id);
+void node_track_set(const char *id, bool on);
 void ingest_stats(JsonDocument &doc);
 void ingest_cleared(JsonObjectConst e);
 void ingest_drone(JsonObjectConst d);          // dashboard "drone" event shape

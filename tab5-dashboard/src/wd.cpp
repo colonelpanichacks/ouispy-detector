@@ -91,6 +91,11 @@ void wd_ingest(JsonObjectConst o, bool session) {
     double last = o["last"] | 0.0;
     if (last > d->last) d->last = last;
     else if (!last) d->last = time(nullptr);
+    double first = o["first"] | 0.0;
+    if (first && (!d->first || first < d->first)) d->first = first;
+    else if (!d->first) d->first = d->last;
+    const char *nd = o["node"] | "";
+    if (*nd) strlcpy(d->node, nd, sizeof d->node);
     d->seen = max<uint32_t>(d->seen + 1, o["seen"] | 0u);
     bool sess = session || (o["now"] | false);
     if (sess && !d->session) {
