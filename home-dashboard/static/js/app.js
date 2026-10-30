@@ -346,7 +346,10 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
     const tools = L.control({ position: "topright" });
     tools.onAdd = () => {
         const div = L.DomUtil.create("div", "map-tools");
-        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapTri", "mapLock", "mapMax"].forEach((id) => div.appendChild(document.getElementById(id)));
+        // Tracks and Wardrive too: in the panel header their on/off labels changed width and
+        // reflowed the header, resizing the map on phones.
+        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapTracks", "mapTri", "mapWd", "mapLock", "mapMax"]
+            .forEach((id) => { const el = document.getElementById(id); if (el) div.appendChild(el); });
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
         return div;

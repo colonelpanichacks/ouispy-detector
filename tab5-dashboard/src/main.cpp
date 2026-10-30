@@ -43,10 +43,10 @@ bool kb_begin() {
 }
 
 // Keyboard LEDs, kept dim: left = link (cyan live, amber no dashboard, red no Wi-Fi/node),
-// right = a short purple blink for every new detection, dark otherwise.
+// right = three red blinks for every detection (the nodes' triple beep), dark otherwise.
 void kb_leds() {
     static int lastLink = -1;
-    static uint32_t lastEvents = 0, blinkUntil = 0;
+    static uint32_t lastEvents = 0, blinkAt = 0;
     static bool lit = false;
     int link = M->usbLive || M->sockUp ? 2 : (M->wifiUp ? 1 : 0);
     if (link != lastLink) {
@@ -56,13 +56,15 @@ void kb_leds() {
         else kb.writeRgb(0, 0x30, 0x00, 0x00);
     }
     if (M->events != lastEvents) {
-        if (lastEvents) blinkUntil = millis() + 140;   // not on the boot-time catch-up
+        if (lastEvents) blinkAt = millis();   // not on the boot-time catch-up
         lastEvents = M->events;
     }
-    bool on = millis() < blinkUntil;
+    // 120 ms on, 90 ms off, three times; a new detection mid-pattern starts it over.
+    uint32_t t = millis() - blinkAt;
+    bool on = blinkAt && t < 3 * 210 && t % 210 < 120;
     if (on != lit) {
         lit = on;
-        if (on) kb.writeRgb(1, 0x30, 0x00, 0x48);   // dim purple
+        if (on) kb.writeRgb(1, 0xFF, 0x00, 0x00);   // red
         else kb.writeRgb(1, 0, 0, 0);
     }
 }

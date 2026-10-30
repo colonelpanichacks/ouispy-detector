@@ -888,12 +888,22 @@ body.map-maxed .toasts { z-index: 1700; }
 /* Phones: compact icon-only map toolbar; maximize alone, bottom-left. */
 .map-corner .icon-btn { margin: 0; background: rgba(6,8,11,0.86); backdrop-filter: blur(4px); border-color: var(--line-strong); color: var(--soft); }
 @media (max-width: 760px) {
-    .map-tools { gap: 4px; max-width: calc(100vw - 70px); }
-    .map-tools .map-traffic-btn, .map-tools .map-links-btn { height: 28px; padding: 0 7px; margin-left: 0; }
+    /* one slim icon column down the right edge: nothing changes size when toggled */
+    .map-tools { flex-direction: column; flex-wrap: nowrap; align-items: flex-end; gap: 4px; max-width: none; }
+    .map-tools .map-traffic-btn, .map-tools .map-links-btn { width: 30px; height: 30px; padding: 0; margin-left: 0; justify-content: center; }
     .map-tools .map-traffic-btn span, .map-tools .map-links-btn span { display: none; }
     .map-tools .map-traffic-btn svg, .map-tools .map-links-btn svg { width: 15px; height: 15px; }
-    .map-tools .map-layer { max-width: 112px; height: 28px; font-size: 11px; padding: 2px 6px; }
-    .map-corner .icon-btn { width: 34px; height: 34px; }
+    .map-tools .map-layer { max-width: 104px; height: 28px; font-size: 11px; padding: 2px 6px; }
+    .map-corner .icon-btn { width: 32px; height: 32px; }
+    .leaflet-control-zoom a { width: 28px !important; height: 28px !important; line-height: 28px !important; font-size: 16px !important; }
+    /* lighter labels: smaller type, tighter boxes */
+    .nmark .label { font-size: 10px; padding: 1px 5px; left: 10px; top: -10px; }
+    .nmark .label small { font-size: 9px; }
+    .nmark .core { width: 12px; height: 12px; left: -6px; top: -6px; }
+    .nmark.home .core { width: 16px; height: 16px; left: -8px; top: -8px; }
+    .tgt-label { font-size: 9.5px; }
+    .tgt-dot { width: 10px; height: 10px; left: -5px; top: -5px; }
+    .leaflet-control-attribution { font-size: 8px; }
 }
 
 /* ---------- metrics tab ---------- */
