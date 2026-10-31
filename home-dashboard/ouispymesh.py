@@ -235,6 +235,32 @@ def _gate():
         return resp
     return None
 socketio = SocketIO(app, async_mode="threading")  # same-origin only
+
+
+# The Tab5's Wi-Fi chip hands each burst it has queued to the P4 in one contiguous buffer,
+# and its 64 KB TCP window lets a burst (map tiles, Metrics, a state dump) outgrow the P4's
+# largest free block: the driver asserts and the Tab5 reboots. Bytes in flight never exceed
+# the sender's send buffer, so a small one on the Tab5's connections keeps every burst small
+# (what M5Stack's own firmware gets from a 5760-byte window). Wraps Socket.IO too.
+TAB5_AGENTS = ("ESP32HTTPClient", "arduino-WebSocket-Client", "OUI-SPY-Mesh-Tab5")
+TAB5_SNDBUF = 8192
+
+
+def _pace_tab5(wsgi):
+    def app_(environ, start_response):
+        ua = environ.get("HTTP_USER_AGENT", "")
+        if ua.startswith(TAB5_AGENTS) or "for=tab5" in environ.get("QUERY_STRING", ""):
+            sock = environ.get("werkzeug.socket")
+            if sock is not None:
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, TAB5_SNDBUF)
+                except OSError:
+                    pass
+        return wsgi(environ, start_response)
+    return app_
+
+
+app.wsgi_app = _pace_tab5(app.wsgi_app)
 store = Store(db_path)
 
 
