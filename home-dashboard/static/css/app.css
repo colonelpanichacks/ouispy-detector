@@ -1173,6 +1173,11 @@ body.map-maxed .toasts { z-index: 1700; }
 /* Phones: one screen at a time, like the Tab5. The tab row sits under the top bar and
    picks the view; the map, the node list and the live detections are tabs of their own
    here (the m-only buttons), next to the dock's tabs. Nothing scrolls but the view. */
+/* Tab order and names follow the Tab5's: Overview, Fleet, Live, Map, Drones, Metrics, then
+   the dashboard's own (--mo on each button). Fleet, Live and Map are tabs on phones only:
+   wider screens show them all the time. */
+.tabs-panel .tab { order: var(--mo, 50); }
+.tabs .dock-toggle { order: 99; }
 .tab.m-only { display: none; }
 @media (max-width: 760px) {
     html, body { height: 100%; overflow: hidden; }
