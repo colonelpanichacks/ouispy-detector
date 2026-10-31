@@ -1169,3 +1169,28 @@ body.map-maxed .toasts { z-index: 1700; }
 .danger-zone h4 { color: #ff4d6d; }
 .node.lost { box-shadow: inset 3px 0 0 #ff4d6d; }
 .ntag.gps { color: #39ff88; border-color: rgba(57, 255, 136, .5); background: rgba(57, 255, 136, .1); box-shadow: 0 0 6px rgba(57, 255, 136, .35); }
+
+/* Phones: one screen at a time, like the Tab5. The tab row sits under the top bar and
+   picks the view; the map, the node list and the live detections are tabs of their own
+   here (the m-only buttons), next to the dock's tabs. Nothing scrolls but the view. */
+.tab.m-only { display: none; }
+@media (max-width: 760px) {
+    html, body { height: 100%; overflow: hidden; }
+    body { display: flex; flex-direction: column; height: 100dvh; }
+    .topbar { flex: none; position: relative; }
+    main.grid { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 0; padding: 0 8px 8px; }
+    main.grid > .panel { display: none; }
+    .tab.m-only { display: inline-block; }
+    main.grid > .tabs-panel { display: flex; order: -1; flex: none; height: auto; min-height: 0;
+        background: none; border: none; padding: 0; }
+    .tabs-panel .tabs { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; margin: 0 -8px 8px; padding: 0 8px; }
+    .tabs .dock-toggle, .dock-grip, .tabs-panel .dock-body { display: none; }
+    body[data-mv="dock"] main.grid > .tabs-panel { flex: 1 1 auto; }
+    body[data-mv="dock"] .tabs-panel .dock-body { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+    body[data-mv="map"] main.grid > .map-panel, body[data-mv="fleet"] main.grid > .fleet-panel,
+    body[data-mv="feed"] main.grid > .feed-panel { display: flex; flex: 1 1 auto; min-height: 0; height: auto; max-height: none; overflow: hidden; }
+    body[data-mv="map"] .map-panel #map { flex: 1 1 auto; min-height: 0; }
+    /* the whole view scrolls, not a box inside it squeezed under the stats */
+    body[data-mv="fleet"] main.grid > .fleet-panel, body[data-mv="feed"] main.grid > .feed-panel { overflow-y: auto; }
+    body[data-mv="fleet"] .node-list, body[data-mv="feed"] .feed { flex: none; overflow: visible; }
+}

@@ -2891,16 +2891,48 @@ function showTab(name) {
     const t = document.querySelector(`.tab[data-tab="${name}"]`);
     if (dock.classList.contains("collapsed") || !t.classList.contains("active")) t.click();
 }
+// Phones show one view at a time (CSS, body[data-mv]): the map, the node list and the
+// detections are tabs of their own there (.m-only), and nothing folds.
+const phone = window.matchMedia("(max-width: 760px)");
+const M_VIEWS = { map: "map", fleet: "fleet", feed: "feed" };
+function setPhoneView(tab) {
+    document.body.dataset.mv = M_VIEWS[tab] || "dock";
+    if (tab === "map") setTimeout(() => map.invalidateSize(), 0);
+    if (phone.matches) lsSet("ouispy.phoneTab", tab);
+}
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
-    // The active tab's own button folds the dock; any tab unfolds it.
-    if (t.classList.contains("active") && !dock.classList.contains("collapsed")) return setDock(false);
-    if (dock.classList.contains("collapsed")) setDock(true);
+    if (phone.matches) {
+        if (dock.classList.contains("collapsed")) setDock(true);
+        t.scrollIntoView({ block: "nearest", inline: "nearest" });
+        setPhoneView(t.dataset.tab);
+    } else {
+        // The active tab's own button folds the dock; any tab unfolds it.
+        if (t.classList.contains("active") && !dock.classList.contains("collapsed")) return setDock(false);
+        if (dock.classList.contains("collapsed")) setDock(true);
+    }
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
     document.querySelectorAll(".tab-body").forEach((b) => b.classList.toggle("active", b.id === `tab-${t.dataset.tab}`));
     if (t.dataset.tab === "settings") { loadSettingsForm(); loadFleetKeyStatus(); }
     if (t.dataset.tab === "devices") loadDevices();
     if (t.dataset.tab === "console") $("console").scrollTop = $("console").scrollHeight;
 });
+
+// A phone opens on its last view (the map the first time); widening the window past
+// phone size leaves a phone-only tab for Overview.
+function phoneLayout() {
+    if (phone.matches) {
+        const tab = lsGet("ouispy.phoneTab", "map");
+        const t = document.querySelector(`.tab[data-tab="${tab}"]`) || document.querySelector('.tab[data-tab="map"]');
+        if (!t.classList.contains("active")) t.click();
+        else setPhoneView(t.dataset.tab);
+    } else {
+        delete document.body.dataset.mv;
+        if (document.querySelector(".tab.m-only.active")) document.querySelector('.tab[data-tab="overview"]').click();
+        setTimeout(() => map.invalidateSize(), 0);
+    }
+}
+phone.addEventListener("change", phoneLayout);
+phoneLayout();
 
 // ------------------------------------------------------------------
 // boot + live updates
