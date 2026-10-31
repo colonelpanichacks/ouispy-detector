@@ -2917,12 +2917,12 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
     if (t.dataset.tab === "console") $("console").scrollTop = $("console").scrollHeight;
 });
 
-// A phone opens on its last view (the map the first time); widening the window past
+// A phone opens on its last view (Overview the first time); widening the window past
 // phone size leaves a phone-only tab for Overview.
 function phoneLayout() {
     if (phone.matches) {
-        const tab = lsGet("ouispy.phoneTab", "map");
-        const t = document.querySelector(`.tab[data-tab="${tab}"]`) || document.querySelector('.tab[data-tab="map"]');
+        const tab = lsGet("ouispy.phoneTab", "overview");
+        const t = document.querySelector(`.tab[data-tab="${tab}"]`) || document.querySelector('.tab[data-tab="overview"]');
         if (!t.classList.contains("active")) t.click();
         else setPhoneView(t.dataset.tab);
     } else {
