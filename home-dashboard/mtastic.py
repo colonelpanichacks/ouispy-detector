@@ -196,13 +196,17 @@ class Mesh:
         try:
             d = packet.get("decoded") or {}
             frm = packet.get("fromId") or "?"
-            text = str(d.get("text") or "")
+            # A serial-module radio (a Tab5's Grove link) reads a glitch on its line as a stray
+            # NUL in front of the next text, or as a text of its own: drop both.
+            text = str(d.get("text") or "").lstrip("\x00\r\n\t ")
+            if not text.strip("\x00"):
+                return
             if text.startswith("OSM1 "):
                 self._on_link(frm, text)
                 return
             who = ((self.iface.nodes or {}).get(frm) or {}).get("user", {}).get("longName") if self.iface else None
             with self.lock:
-                self.status["inbox"] = ([{"from": frm, "name": who or "", "text": str(d.get("text") or "")[:200],
+                self.status["inbox"] = ([{"from": frm, "name": who or "", "text": text[:200],
                                           "ts": time.time()}] + self.status["inbox"])[:20]
         except Exception:
             pass
