@@ -14,6 +14,7 @@
 
 void sd_begin();
 bool sd_ok();
+bool sd_ensure();   // mount a card put in since boot (tries at most every 5 s)
 const char *sd_state();          // "no card", "12.3 of 29.7 GB free, 3 map packs"...
 uint32_t sd_tiles();             // tiles in every mounted pack
 // A tile's JPEG from the packs into buf; its length, 0 = not on the card. Any task.

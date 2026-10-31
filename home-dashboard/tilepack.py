@@ -143,10 +143,21 @@ def nc_job(work, z, bx, by, xr, yr):
         return 0
     x0, y0, _, _ = tile_merc(z, bx, by + BLOCK - 1)
     _, _, x1, y1 = tile_merc(z, bx + BLOCK - 1, by)
-    img = get(NCONEMAP.format(x0=x0, y0=y0, x1=x1, y1=y1, px=256 * BLOCK))
-    if not img:
+    # The state's server now and then answers with an error page instead of a picture: ask
+    # again, and leave the block for the next run (not marked done) if it keeps failing.
+    im = None
+    for i in range(3):
+        img = get(NCONEMAP.format(x0=x0, y0=y0, x1=x1, y1=y1, px=256 * BLOCK))
+        if not img:
+            return 0
+        try:
+            im = Image.open(io.BytesIO(img)).convert("RGB")
+            break
+        except Exception:
+            time.sleep(5 * (i + 1))
+    if im is None:
+        print(f"z{z} block {bx},{by}: no picture from NC OneMap, left for the next run", flush=True)
         return 0
-    im = Image.open(io.BytesIO(img)).convert("RGB")
     rows = []
     for dy in range(BLOCK):
         for dx in range(BLOCK):

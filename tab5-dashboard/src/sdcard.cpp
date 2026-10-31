@@ -105,7 +105,10 @@ void sd_begin() {
     }
     static SPIClass spi(FSPI);
     spi.begin(43, 39, 44, 42);
-    if (!SD.begin(42, spi, 25000000, "/sdcard", 4)) {
+    // Every map pack stays open (MAX_PACKS), plus the snapshot, the tile cache, device
+    // records, the lookup db and an upload at once: 4 here filled up with packs and every
+    // other file on the card failed to open. The FATFS buffers go in PSRAM.
+    if (!SD.begin(42, spi, 25000000, "/sdcard", MAX_PACKS + 8)) {
         strlcpy(state, "no card (or not FAT32)", sizeof state);
         return;
     }

@@ -193,6 +193,9 @@ bool load(const char *path) {
 void saver(void *) {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(5000));
+        // A card put in while running: mount it (maps, tile cache, lookup db). Its saved
+        // state is NOT loaded now (the live model is newer); the next save replaces it.
+        if (!sd_ok() && sd_ensure()) savedVer = savedWd = 0, savedMs = 0;
         if (millis() - savedMs < EVERY_MS) continue;
         if (M->version == savedVer && wd_version() == savedWd) continue;
         store_save();
@@ -201,9 +204,32 @@ void saver(void *) {
 
 }  // namespace
 
+// The 2026-10-31 fresh start: everything the mesh had seen was wiped on the dashboard and
+// the nodes, and the card's snapshot from before must not bring it back. A card without the
+// marker file still holds the old snapshot: it goes at boot, and the first save marks the
+// card. A file on the card, not NVS: the saver's stack is in PSRAM, and a flash write from
+// it (NVS) turns the cache it lives behind off and asserts.
+const char *FRESH = "/sdcard/state/fresh-20261031";
+
+static bool fresh_done() {
+    struct stat st;
+    return stat(FRESH, &st) == 0;
+}
+
+static void fresh_mark() {
+    mkdir(DIR_, 0775);
+    if (FILE *f = fopen(FRESH, "wb")) fclose(f);
+}
+
 void store_load() {
     if (!saveLock) saveLock = xSemaphoreCreateMutex();
     if (!sd_ok() || !alloc()) return;
+    if (!fresh_done()) {
+        remove(SNAP);
+        remove(OLD);
+        fresh_mark();
+        Serial.println("store: fresh start, the snapshot from before it is gone");
+    }
     if (!load(SNAP) && !load(OLD)) Serial.println("store: nothing saved on the card yet");
     savedMs = millis();
 }
@@ -221,6 +247,7 @@ void store_save() {
     bool ok = write_file(len);
     savedMs = millis();
     if (ok) savedBytes = len;
+    if (ok && !fresh_done()) fresh_mark();   // this card now holds the fresh state
     else savedVer = savedWd = 0;   // try again on the next round
     snprintf(st, sizeof st, ok ? "saved %u KB in %u ms" : "save FAILED (%u KB, %u ms)", (unsigned)(len / 1024),
              (unsigned)(millis() - t0));
