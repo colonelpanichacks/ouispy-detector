@@ -2293,14 +2293,14 @@ void draw_overview() {
     char v[24], sub[32];
     const bool wdm = A.ovWd;
     const double nowS = server_now();
-    // What the filters keep: nodes (wardrivers only in WARDRIVE mode, unless one is picked),
-    // detections, wardriven devices (newest first).
+    // What the filters keep: the whole fleet always (wardrivers only in WARDRIVE mode; a
+    // picked node is outlined, not the only one listed), detections and wardriven devices
+    // by the node and radio filters (newest first).
     static int nIdx[64], dIdx[300], wIdx[200];
     int nn = 0, nd = 0, nw = 0;
     for (int i = 0; i < M->nnodes && nn < 64; i++) {
         const Node &n = M->nodes[i];
-        if (A.node[0] && strcmp(n.id, A.node)) continue;
-        if (wdm && !A.node[0] && !node_is_wardriver(n)) continue;
+        if (wdm && !node_is_wardriver(n)) continue;
         nIdx[nn++] = i;
     }
     for (int i = 0; i < M->ndets && nd < 300; i++) {
@@ -2376,6 +2376,7 @@ void draw_overview() {
         const Node &n = M->nodes[i];
         uint16_t nc = node_color565(n.id);
         hit(PAD + 8, ry, fw - 16, rh - 2, H_NODEROW, i);   // tap: to Fleet; hold: its settings
+        if (A.node[0] && !strcmp(n.id, A.node)) C.drawRoundRect(PAD + 6, ry + 2, fw - 12, rh - 4, 8, nc);   // the picked node
         C.fillRoundRect(PAD + 12, ry + 8, 5, rh - 18, 2, n.online ? nc : dim(nc, 0.35f));
         int rx = PAD + fw - 16;
         // 1: name, status
