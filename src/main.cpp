@@ -2011,14 +2011,15 @@ static void remoteMgmtTick() {
     static uint32_t topoAt = 15000;
     if (meshCfg.enabled && currentMode == SCANNING_MODE && !meshOtaBusy() && (int32_t)(now - topoAt) >= 0) {
         topoAt = now + 20000 + random(0, 5000);
-        if (meshCfg.home) {
-            if (isSerialConnected()) {
-                uint8_t d[STATUS_MAX];
-                char id[7];
-                meshSelfIdHex(id);
-                printStatusLine(id, d, buildStatus(d));
-            }
-        } else if (!statusDueAt) {
+        if (meshCfg.home && isSerialConnected()) {
+            uint8_t d[STATUS_MAX];
+            char id[7];
+            meshSelfIdHex(id);
+            printStatusLine(id, d, buildStatus(d));
+        }
+        // The home floods its status too: a Tab5 on a remote's USB out in the field sees the
+        // home (and its settings) the same way it sees every other node.
+        if (!statusDueAt) {
             statusDueAt = now;
             statusCopies = 0;   // one copy: the next round is only 20 s away
         }

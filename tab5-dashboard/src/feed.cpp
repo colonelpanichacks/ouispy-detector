@@ -13,6 +13,10 @@ namespace {
 
 constexpr int MAXN = MAX_NODES;
 constexpr float HOME_TIMEOUT = 15, SEEN_WINDOW = 60, DEDUP_WINDOW = 6;
+// A node beyond our node's radio range reaches us only through relays: its status every
+// ~20-25 s, its detections, never its 1.5 s announces (those are one hop). The node's own
+// roster forgets it after 8 s, so it counts as up while anything from it came this recently.
+constexpr float NODE_TIMEOUT = 75;
 constexpr int SEEN_MACS = 128, DEDUP = 64, KNOWN = 4096;
 
 struct SpiRamAllocator : ArduinoJson::Allocator {
@@ -196,9 +200,10 @@ void on_tlm(const char *body) {
         if (rs) n->rssi = rs;
         inRoster[n - nodes] = true;
     }
-    // TLM is authoritative: anyone not in the roster has dropped.
+    // Out of the roster (not a neighbor right now) and nothing relayed from it lately: down.
     for (int i = 0; i < nn; i++)
-        if (!inRoster[i] && strcmp(nodes[i].id, localId)) nodes[i].online = false;
+        if (!inRoster[i] && strcmp(nodes[i].id, localId) && now - nodes[i].lastSeen > NODE_TIMEOUT)
+            nodes[i].online = false;
     publish_fleet();
 }
 
@@ -273,6 +278,7 @@ void on_detection(const char *body) {
     descr.trim();
     if (!node.length()) node = localId[0] ? localId : "HOME";   // no tag: our own node heard it
     node.toUpperCase();
+    if (node.length() == 6 && strcmp(node.c_str(), localId)) node_seen(node.c_str(), nullptr, now);   // relayed: it's up
     const char *type = d["type"] | "";
     String dom = (const char *)(d["dom"] | "");
     if (dom != "ble" && dom != "wifi") dom = (!strcasecmp(type, "PROBE") || !strcasecmp(type, "BEACON")) ? "wifi" : "ble";
