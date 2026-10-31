@@ -26,7 +26,14 @@ port (Unit C6L, serial module in TEXTMSG mode). Short coded lines, one per text 
                 OSM1 D <node> <mac> <rssi> <dom> <name>  a detection its USB node made
   home -> car   OSM1 S <on>/<all> <d24> <id>:<up>:<rssi>,...   the mesh, every minute while
                 a Tab5 link was heard in the last 30 min (nothing on the air otherwise)
+  both ways     OSM2 B<base64>   detections, up to 12 a message, 12 bytes each: mac[6],
+                node[3], rssi (int8), flags (bit0 wifi, bit1 new), age (s, <=255). The far
+                end shows them as if its own nodes had heard them; a detection that came
+                over the link never goes back over it.
+  car -> home   OSM1 W <node> <wifi> <ble>   a wardriver's session counts (the data itself
+                syncs when the Tab5 is back on Wi-Fi: too much for LoRa)
 """
+import base64
 import json
 import threading
 import time
@@ -40,6 +47,10 @@ GAP_S = 15          # between messages: Meshtastic airtime is shared by every ra
 MAX_BYTES = 200
 DEFAULT_PSK = b"\x01"   # "AQ==": the public default key (LongFast and friends)
 SUMMARY_S = 60        # home -> Tab5 link: the mesh summary
+REC = 12              # bytes per bridged detection
+BATCH = 12            # detections per OSM2 B message (base64 of 144 bytes: under MAX_BYTES)
+BRIDGE_Q = 120        # waiting detections; past this the oldest go
+BRIDGE_DEDUP_S = 60   # the same device seen by the same node again this soon: not resent
 LINK_FRESH_S = 1800   # ...only while a Tab5 link was heard this recently
 
 
@@ -57,7 +68,11 @@ class Mesh:
         self.feed_line = feed_line        # (line, source): a car's position into the fleet
         self.feed_det = feed_det          # (detection dict, source): a car's detection
         self.link_heard = 0
+        self.link_wifi = False     # its last hello said it's on Wi-Fi
         self.summary_at = 0
+        self.bridge = []          # (mac bytes, node bytes, rssi, flags, ts) for the link
+        self.bridge_seen = {}     # (mac, node) -> ts last queued
+        self.bridge_dropped = 0
         self.lock = threading.Lock()
         self.status = {"state": "off", "error": "", "radio": "", "channel": "", "sent": 0, "failed": 0,
                        "queued": 0, "last": None, "heard": 0, "inbox": [], "link": None}
@@ -76,6 +91,8 @@ class Mesh:
         if not c or not c.get("enabled"):
             return
         send = c["send"]
+        if event == "det" and p.get("source") != "meshtastic" and self.link_fresh():
+            self._bridge_add(p)
         if event == "det" and send["new_devices"] and p.get("is_new"):
             name = p.get("alias") or p.get("descr") or p.get("match") or "device"
             with self.lock:
@@ -172,10 +189,80 @@ class Mesh:
                                "Pick a channel with its own key")
         return idx, name
 
+    def link_fresh(self):
+        """A Tab5 link is out there, off Wi-Fi: worth airtime."""
+        return (bool(self.link_heard) and time.time() - self.link_heard < LINK_FRESH_S
+                and not self.link_wifi)
+
+    def _bridge_add(self, p):
+        try:
+            mac = bytes.fromhex(str(p.get("mac", "")).replace(":", ""))
+            node = bytes.fromhex(str(p.get("node", "")))
+        except ValueError:
+            return
+        if len(mac) != 6 or len(node) != 3:
+            return
+        now = time.time()
+        key = (mac, node)
+        with self.lock:
+            if now - self.bridge_seen.get(key, 0) < BRIDGE_DEDUP_S:
+                return
+            self.bridge_seen[key] = now
+            if len(self.bridge_seen) > 2000:
+                self.bridge_seen = {k: t for k, t in self.bridge_seen.items() if now - t < BRIDGE_DEDUP_S}
+            flags = (1 if p.get("dom") == "wifi" else 0) | (2 if p.get("is_new") else 0)
+            self.bridge.append((mac, node, max(-128, min(127, int(p.get("rssi") or 0))), flags, now))
+            if len(self.bridge) > BRIDGE_Q:
+                self.bridge_dropped += len(self.bridge) - BRIDGE_Q
+                del self.bridge[:-BRIDGE_Q]
+            self.status["bridge_q"] = len(self.bridge)
+
+    def _bridge_frame(self):
+        """The next OSM2 B message, or None."""
+        with self.lock:
+            batch, self.bridge = self.bridge[:BATCH], self.bridge[BATCH:]
+            self.status["bridge_q"] = len(self.bridge)
+        if not batch:
+            return None
+        now = time.time()
+        raw = b"".join(m + n + (r & 0xFF).to_bytes(1, "little") + bytes([f, min(255, int(now - ts))])
+                       for m, n, r, f, ts in batch)
+        with self.lock:
+            self.status["bridged_out"] = self.status.get("bridged_out", 0) + len(batch)
+        return "OSM2 B" + base64.b64encode(raw).decode()
+
+    def _bridge_in(self, payload):
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except ValueError:
+            return 0
+        now = time.time()
+        n = 0
+        for k in range(0, len(raw) - REC + 1, REC):
+            r = raw[k:k + REC]
+            rssi = r[9] - 256 if r[9] > 127 else r[9]
+            d = {"mac": ":".join(f"{b:02X}" for b in r[0:6]), "node": r[6:9].hex().upper(), "rssi": rssi,
+                 "dom": "wifi" if r[10] & 1 else "ble", "desc": "via mesh link", "ts": now - r[11]}
+            if self.feed_det:
+                self.feed_det(d, "meshtastic")
+            n += 1
+        with self.lock:
+            self.status["bridged_in"] = self.status.get("bridged_in", 0) + n
+        return n
+
     def _on_link(self, frm, text):
         """A coded line from a Tab5 link (OSM1 ...): into the fleet like a node's own line."""
+        if text.startswith("OSM2 B"):
+            if not self._bridge_in(text[6:]):
+                return
+            self.link_heard, self.link_wifi = time.time(), False
+            with self.lock:
+                self.status["link"] = {"from": frm, "ts": self.link_heard}
+            return
         parts = text.split(" ", 6)
         try:
+            if parts[1] in ("P", "D"):
+                self.link_wifi = False
             if parts[1] == "P" and len(parts) >= 6 and self.feed_line:
                 node, lat, lon, acc = parts[2].upper(), float(parts[3]), float(parts[4]), float(parts[5])
                 self.feed_line("POS " + json.dumps({"node": node, "lat": lat, "lon": lon, "acc": acc}), "meshtastic")
@@ -184,7 +271,14 @@ class Mesh:
                 name = parts[6] if len(parts) > 6 else ""
                 self.feed_det({"mac": mac, "rssi": rssi, "node": node, "dom": dom if dom in ("ble", "wifi") else "ble",
                                "desc": name or "via Tab5 link"}, "meshtastic")
-            elif parts[1] != "H":   # H: hello, a link with nothing else to say
+            elif parts[1] == "W" and len(parts) >= 5:   # a wardriver's session counts
+                self.link_wifi = False
+                with self.lock:
+                    self.status["link_wd"] = {"node": parts[2].upper(), "wifi": int(parts[3]), "ble": int(parts[4]),
+                                              "ts": time.time()}
+            elif parts[1] == "H":   # hello: on Wi-Fi or not
+                self.link_wifi = len(parts) > 3 and parts[3] == "wifi"
+            else:
                 return
         except (ValueError, IndexError):
             return
@@ -201,7 +295,7 @@ class Mesh:
             text = str(d.get("text") or "").lstrip("\x00\r\n\t ")
             if not text.strip("\x00"):
                 return
-            if text.startswith("OSM1 "):
+            if text.startswith(("OSM1 ", "OSM2 ")):
                 self._on_link(frm, text)
                 return
             who = ((self.iface.nodes or {}).get(frm) or {}).get("user", {}).get("longName") if self.iface else None
@@ -258,13 +352,16 @@ class Mesh:
                 if lines:
                     more = f" +{len(lines) - 5} more" if len(lines) > 5 else ""
                     self.queue(f"OUI-SPY {len(lines)} new: " + "; ".join(lines[:5]) + more)
-                if (self.summary and self.link_heard and time.time() - self.link_heard < LINK_FRESH_S
-                        and time.time() - self.summary_at >= SUMMARY_S):
+                if self.summary and self.link_fresh() and time.time() - self.summary_at >= SUMMARY_S:
                     self.summary_at = time.time()
                     try:
                         self.queue(self.summary())
                     except Exception:
                         pass
+                if self.link_fresh() and not self.outbox and time.time() - self.last_tx >= GAP_S:
+                    frame = self._bridge_frame()
+                    if frame:
+                        self.queue(frame)
                 if self.outbox and time.time() - self.last_tx >= GAP_S:
                     with self.lock:
                         text = self.outbox.pop(0)

@@ -317,11 +317,7 @@ void on_detection(const char *body) {
     ev["source"] = "usb";
     bool isNew = known_add(mac.c_str());
     ev["is_new"] = isNew;
-    if (isNew && local()) {   // no dashboard: tell the home over the mesh link (if there is one)
-        String nm = (const char *)(d["alias"] | "");
-        if (!nm.length()) nm = descr;
-        meshlink_det(node.c_str(), mac.c_str(), rssi, dom.c_str(), nm.c_str());
-    }
+    if (local()) meshlink_det(node.c_str(), mac.c_str(), rssi, dom == "wifi", isNew);   // no dashboard: home hears it over the mesh link
     ev["id"] = nextId++;
     if (seenBy.size() > 1) ev["closest"] = seenBy[0][0];
     if (local()) ingest_det(ev.as<JsonObjectConst>(), true);
@@ -372,6 +368,12 @@ void on_line(char *line) {
     else if (line[0] == '{' && strstr(line, "\"mac\"")) on_detection(line);
 }
 
+// The home's detections over the mesh link, queued the same way (link task -> feed task).
+struct LinkDet { char node[7], mac[18]; int8_t rssi; bool wifi, isNew; uint8_t age; };
+constexpr int LINKDQ = 32;
+LinkDet linkdq[LINKDQ];
+int nlinkd = 0;
+
 struct LinkNode { char id[7]; bool up; int16_t rssi; };
 constexpr int LINKQ = 24;
 LinkNode linkq[LINKQ];
@@ -385,6 +387,31 @@ void apply_link_nodes() {
     memcpy(q, linkq, sizeof(LinkNode) * n);
     nlink = 0;
     portEXIT_CRITICAL(&linkMux);
+    LinkDet dq[LINKDQ];
+    portENTER_CRITICAL(&linkMux);
+    int nd = nlinkd;
+    memcpy(dq, linkdq, sizeof(LinkDet) * nd);
+    nlinkd = 0;
+    portEXIT_CRITICAL(&linkMux);
+    if (local()) {
+        double t = now_s();
+        for (int i = 0; i < nd; i++) {
+            JsonDocument ev(&psram);
+            ev["ts"] = t - dq[i].age;
+            ev["node"] = dq[i].node;
+            ev["mac"] = dq[i].mac;
+            ev["rssi"] = dq[i].rssi;
+            ev["type"] = dq[i].wifi ? "WIFI" : "BLE";
+            ev["descr"] = "via mesh link";
+            ev["dom"] = dq[i].wifi ? "wifi" : "ble";
+            ev["source"] = "link";
+            ev["is_new"] = known_add(dq[i].mac) || dq[i].isNew;
+            ev["id"] = nextId++;
+            node_seen(dq[i].node, nullptr, t);
+            ingest_det(ev.as<JsonObjectConst>(), true);
+        }
+        if (nd) publish_fleet();
+    }
     if (!n || !local()) return;
     double now = now_s();
     for (int i = 0; i < n; i++) {
@@ -487,6 +514,17 @@ void feed_link_node(const char *id, bool up, int rssi) {
         LinkNode &l = linkq[nlink++];
         for (int i = 0; i < 7; i++) l.id[i] = toupper(id[i]);
         l.up = up, l.rssi = rssi;
+    }
+    portEXIT_CRITICAL(&linkMux);
+}
+
+void feed_link_det(const char *node, const char *mac, int rssi, bool wifi, bool isNew, int ageS) {
+    portENTER_CRITICAL(&linkMux);
+    if (nlinkd < LINKDQ) {
+        LinkDet &d = linkdq[nlinkd++];
+        strlcpy(d.node, node, sizeof d.node);
+        strlcpy(d.mac, mac, sizeof d.mac);
+        d.rssi = rssi, d.wifi = wifi, d.isNew = isNew, d.age = constrain(ageS, 0, 255);
     }
     portEXIT_CRITICAL(&linkMux);
 }
