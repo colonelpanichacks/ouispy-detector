@@ -411,12 +411,14 @@ void debug_poll() {
         p.begin("tab5diag", true);
         uint32_t crashes = p.getUInt("crashes", 0);
         p.end();
-        char b[1000];
+        char tm[200];
+        maptiles_timing(tm, sizeof tm);
+        char b[1200];
         snprintf(b, sizeof b,
                  "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
                  "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
                  "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
-                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
+                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"tile_ms\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
                  "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
                  "\"sync\":%lu,\"ppa_push\":%lu,\"m_unused\":%lu,\"m_tiles\":%lu,\"m_rings\":%lu,\"m_tgt_nodes\":%lu,\"m_drones\":%lu,\"m_chrome\":%lu}}\n",
                  (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
@@ -425,7 +427,7 @@ void debug_poll() {
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                  (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,
-                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(), (unsigned long)sd_cache_puts(), (unsigned long)sd_cache_hits(), store_state(),
+                 (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(), (unsigned long)sd_cache_puts(), (unsigned long)sd_cache_hits(), store_state(), tm,
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0,
                  (unsigned long)ui_prof[0], (unsigned long)ui_prof[1], (unsigned long)ui_prof[2], (unsigned long)ui_prof[3],
                  (unsigned long)ui_prof[5], (unsigned long)ui_prof[4], (unsigned long)ui_prof[6], 0UL, (unsigned long)ui_prof[7], (unsigned long)ui_prof[8],

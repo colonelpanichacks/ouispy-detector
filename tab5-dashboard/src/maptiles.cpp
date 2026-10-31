@@ -57,6 +57,8 @@ const char *DIRECT[NLAYERS] = {
 };
 constexpr size_t PLACEHOLDER_UNDER = 10000;   // Esri's "no imagery here yet" tile (satellite): never kept
 uint32_t dashFailMs = 0;                      // the dashboard last failed a tile: go direct for a while
+// Where tile time goes, for /info: counts and total ms per stage.
+struct { uint32_t pack, cache, dash, net, fail, msCard, msWait, msDl, msDec; } T;
 
 // TLS buffers (~40 KB a connection) in PSRAM, not the internal RAM the Wi-Fi link lives on.
 void *tls_calloc(size_t n, size_t sz) {
@@ -119,12 +121,15 @@ size_t from_internet(const Want &w, uint8_t *buf, bool &keep) {
 }
 
 // One tile from the dashboard, else straight from the internet; its size (0 = failed).
-// keep: worth putting in the card's cache.
+// keep: worth putting in the card's cache. The dashboard is only tried while its feed is
+// connected: on someone else's Wi-Fi it isn't there, and waiting out a connect to it on every
+// tile would stall the map, so a foreign network goes straight to the internet from the
+// first tile.
 size_t download(const Want &w, uint8_t *buf, bool &keep) {
     keep = true;
     if (WiFi.status() != WL_CONNECTED) return 0;
     size_t n = 0;
-    if (!dashFailMs || millis() - dashFailMs > 30000) {
+    if (net_online() && (!dashFailMs || millis() - dashFailMs > 30000)) {
         n = from_dashboard(w, buf);
         dashFailMs = n ? 0 : millis();
     }
@@ -159,25 +164,38 @@ void loader(void *) {
         const char *lid = LAYER_IDS[w.layer];
         int src = 0;   // 0 pack, 1 cache, 2 download
         bool keep = true;
+        uint32_t t0 = millis();
         size_t n = sd_tile(lid, w.z, w.x, w.y, buf, BUF_N);
         if (!n && (n = sd_cache_get(lid, w.z, w.x, w.y, buf, BUF_N))) src = 1;
+        T.msCard += millis() - t0;
         if (!n) {
             src = 2;
+            t0 = millis();
             net_bulk_begin();
             while (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < HEAP_FLOOR) vTaskDelay(pdMS_TO_TICKS(100));
+            uint32_t t1 = millis();
+            T.msWait += t1 - t0;
+            bool dash = net_online();
             n = download(w, buf, keep);
+            T.msDl += millis() - t1;
             net_bulk_end();
+            if (n) (dash && !dashFailMs ? T.dash : T.net)++;
+        } else {
+            (src ? T.cache : T.pack)++;
         }
         if (!n) {
+            T.fail++;
             vTaskDelay(pdMS_TO_TICKS(150));
             continue;
         }
+        t0 = millis();
         dec->fillSprite(0);
         bool png = n > 4 && buf[0] == 0x89 && buf[1] == 'P';
         if (!(png ? dec->drawPng(buf, n, 0, 0) : dec->drawJpg(buf, n, 0, 0))) {
             if (src == 1) sd_cache_drop(lid, w.z, w.x, w.y);   // a bad copy: fetch it again next time
             continue;
         }
+        T.msDec += millis() - t0;
         if (src == 2 && keep) sd_cache_put(lid, w.z, w.x, w.y, buf, n);
         // Row-major, cache-line aligned, written out of the CPU cache: the PPA reads it by DMA.
         uint16_t *t = (uint16_t *)heap_caps_aligned_alloc(128, TILE * TILE * 2, MALLOC_CAP_SPIRAM);
@@ -240,6 +258,14 @@ uint32_t maptiles_stack_min() {
     for (auto t : loaderTask)
         if (t) m = min(m, (uint32_t)uxTaskGetStackHighWaterMark(t));
     return m;
+}
+
+void maptiles_timing(char *out, size_t cap) {
+    uint32_t got = T.pack + T.cache + T.dash + T.net, dl = max((uint32_t)1, T.dash + T.net + T.fail);
+    snprintf(out, cap, "%lu pack, %lu card, %lu dash, %lu net, %lu failed; card %lu ms, wait %lu ms, download %lu ms, decode %lu ms (avg)",
+             (unsigned long)T.pack, (unsigned long)T.cache, (unsigned long)T.dash, (unsigned long)T.net, (unsigned long)T.fail,
+             (unsigned long)(T.msCard / max((uint32_t)1, got + T.fail)), (unsigned long)(T.msWait / dl), (unsigned long)(T.msDl / dl),
+             (unsigned long)(T.msDec / max((uint32_t)1, got)));
 }
 
 uint32_t maptiles_cached() {

@@ -17,4 +17,5 @@ const uint16_t *maptile(uint8_t layer, int z, int x, int y);
 const uint16_t *maptile_peek(uint8_t layer, int z, int x, int y);   // cached only, no request
 void maptiles_clear_requests();   // the view moved: drop requests that are now off screen
 uint32_t maptiles_cached();
+void maptiles_timing(char *out, size_t cap);   // where tile time goes, for /info
 uint32_t maptiles_stack_min();   // bytes of stack never used by the loaders (health)
