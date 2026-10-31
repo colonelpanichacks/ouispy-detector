@@ -209,28 +209,50 @@ def main():
     ap.add_argument("--zmax", type=int, default=19)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--keep", action="store_true", help="keep the work file")
+    ap.add_argument("--tile-kb", type=int, default=50,
+                    help="average tile size the deep packs are cut by (the imagery runs 30-50 KB)")
     ap.add_argument("--work", help="where the work file goes (default: --out)")
     a = ap.parse_args()
     s, w, n, e = (float(v) for v in a.bbox.split(","))
     os.makedirs(a.out, exist_ok=True)
     wdir = a.work or a.out
     # Pack groups, each fetched into its own work file, written out, then the work file
-    # deleted: the card never holds more than one group's scratch copy. Shallow zooms
-    # share one pack; a deep zoom is cut into column strips of about PACK_MAX each.
-    groups = []
-    shallow = [z for z in range(a.zmin, a.zmax + 1) if z <= USGS_MAX]
-    if shallow:
-        groups.append((f"{a.name}-z{shallow[0]}-{shallow[-1]}", [(z, None) for z in shallow]))
-    for z in range(max(a.zmin, USGS_MAX + 1), a.zmax + 1):
+    # deleted: the card never holds more than one group's scratch copy. Consecutive shallow
+    # zooms share a pack while they fit; a zoom too big for one pack (any deep zoom, or a
+    # shallow one over a big area: all of NC at z14) is cut into column strips of about
+    # PACK_MAX each.
+    limit = PACK_MAX * 0.85
+    groups, run, run_b = [], [], 0
+
+    def zoom_est(z):
         (x0, y0), (x1, y1) = tile_xy(n, w, z), tile_xy(s, e, z)
-        est = (x1 - x0 + 1) * (y1 - y0 + 1) * 20_000
-        strips = max(1, math.ceil(est / (PACK_MAX * 0.85)))
+        return (x1 - x0 + 1) * (y1 - y0 + 1) * a.tile_kb * 1000
+
+    def flush():
+        if run:
+            label = f"{a.name}-z{run[0]}-{run[-1]}" if len(run) > 1 else f"{a.name}-z{run[0]}"
+            groups.append((label, [(z, None) for z in run]))
+
+    for z in range(a.zmin, a.zmax + 1):
+        b = zoom_est(z)
+        if z <= USGS_MAX and run_b + b <= limit:
+            run.append(z)
+            run_b += b
+            continue
+        flush()
+        run, run_b = [], 0
+        if z <= USGS_MAX and b <= limit:
+            run, run_b = [z], b
+            continue
+        (x0, y0), (x1, y1) = tile_xy(n, w, z), tile_xy(s, e, z)
+        strips = max(1, math.ceil(b / limit))
         ax = x0 - x0 % BLOCK   # strips start on export-block edges
         width = math.ceil((x1 - ax + 1) / strips / BLOCK) * BLOCK
         cuts = list(range(ax, x1 + 1, width))
         for i, c in enumerate(cuts):
             xr = (max(c, x0), min(c + width - 1, x1))
             groups.append((f"{a.name}-z{z}" + (f"-{i + 1}" if len(cuts) > 1 else ""), [(z, xr)]))
+    flush()
     for label, parts in groups:
         path = os.path.join(a.out, label + ".pak")
         if os.path.exists(path):
