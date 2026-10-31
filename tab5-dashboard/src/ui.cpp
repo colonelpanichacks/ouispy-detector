@@ -75,7 +75,7 @@ uint16_t dim(uint16_t c, float f) {
 
 enum HitAct : uint8_t {
     H_TAB, H_ROW, H_TARGET, H_DOM, H_NODE, H_SEARCH, H_CLEAR, H_RANGE, H_ACK, H_MUTE, H_SILENCE,
-    H_HELP, H_SETUP, H_CLOSE, H_FIELD, H_SRC, H_NET, H_SAVE, H_BACK, H_REVEAL, H_RESCAN,
+    H_HELP, H_SETUP, H_CLOSE, H_FIELD, H_SRC, H_NET, H_SAVE, H_BACK, H_REVEAL, H_RESCAN, H_GROVE,
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
@@ -3780,6 +3780,12 @@ void draw_settings() {
     w = C.textWidth("SOUND") + 28;
     bx -= w + 10;
     chip(bx, 28, "SOUND", rgb(0x39ff88), soundPage, nullptr, H_SOUNDPG);
+    // Grove port A: a GPS unit, or a Meshtastic radio (Unit C6L) linking us to home over LoRa.
+    const char *gl = S.meshLink ? "GROVE: MESH" : "GROVE: GPS";
+    font(F_SM);
+    w = C.textWidth(gl) + 28;
+    bx -= w + 10;
+    chip(bx, 28, gl, rgb(0xff2bd6), S.meshLink, nullptr, H_GROVE);
     font(F_SM);
     text(bx - 20, 43, "tap a field or UP DN TAB   ENTER next   ESC back", FAINT, middle_right);
 
@@ -4293,6 +4299,11 @@ static void dispatch(const Hit &h) {
         case H_BACK: if (settings_ready()) A.settings = false; break;
         case H_REVEAL: reveal = !reveal; break;
         case H_SOUNDPG: soundPage = !soundPage; break;
+        case H_GROVE:
+            S.meshLink = !S.meshLink;
+            settings_save();
+            toast(S.meshLink ? "port A: mesh link (Unit C6L)" : "port A: GPS unit");
+            break;
         case H_SND: {
             bool *vs[] = {&S.sound, &S.sndDet, &S.sndDrone, &S.sndNode, &S.proxBeep};
             if (h.arg >= 200) S.vol = h.arg - 200, sfx_volume(), sfx_play(SFX_DETECT);

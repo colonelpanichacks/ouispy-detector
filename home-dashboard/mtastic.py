@@ -19,7 +19,15 @@ everyone in radio range. Airtime is precious: one message per 15 s at most, each
   nodes         a node drops off the mesh / comes back (off by default)
 
 It also listens: radios it hears and text sent to it show in Settings.
+
+Tab5 link: a Tab5 out of Wi-Fi range keeps in touch through a Meshtastic radio on its Grove
+port (Unit C6L, serial module in TEXTMSG mode). Short coded lines, one per text message:
+  car -> home   OSM1 P <node> <lat> <lon> <acc>          where it is (a fleet node's fix)
+                OSM1 D <node> <mac> <rssi> <dom> <name>  a detection its USB node made
+  home -> car   OSM1 S <on>/<all> <d24> <id>:<up>:<rssi>,...   the mesh, every minute while
+                a Tab5 link was heard in the last 30 min (nothing on the air otherwise)
 """
+import json
 import threading
 import time
 
@@ -31,6 +39,8 @@ BATCH_S = 60
 GAP_S = 15          # between messages: Meshtastic airtime is shared by every radio in range
 MAX_BYTES = 200
 DEFAULT_PSK = b"\x01"   # "AQ==": the public default key (LongFast and friends)
+SUMMARY_S = 60        # home -> Tab5 link: the mesh summary
+LINK_FRESH_S = 1800   # ...only while a Tab5 link was heard this recently
 
 
 def _clip(text):
@@ -39,13 +49,18 @@ def _clip(text):
 
 
 class Mesh:
-    def __init__(self, get_settings, node_name, busy_ports):
+    def __init__(self, get_settings, node_name, busy_ports, summary=None, feed_line=None, feed_det=None):
         self.get_settings = get_settings
         self.node_name = node_name
         self.busy_ports = busy_ports      # () -> serial ports our own nodes are on
+        self.summary = summary            # () -> "OSM1 S ..." for a Tab5 link
+        self.feed_line = feed_line        # (line, source): a car's position into the fleet
+        self.feed_det = feed_det          # (detection dict, source): a car's detection
+        self.link_heard = 0
+        self.summary_at = 0
         self.lock = threading.Lock()
         self.status = {"state": "off", "error": "", "radio": "", "channel": "", "sent": 0, "failed": 0,
-                       "queued": 0, "last": None, "heard": 0, "inbox": []}
+                       "queued": 0, "last": None, "heard": 0, "inbox": [], "link": None}
         self.iface = None
         self.iface_port = None
         self.outbox = []
@@ -157,10 +172,34 @@ class Mesh:
                                "Pick a channel with its own key")
         return idx, name
 
+    def _on_link(self, frm, text):
+        """A coded line from a Tab5 link (OSM1 ...): into the fleet like a node's own line."""
+        parts = text.split(" ", 6)
+        try:
+            if parts[1] == "P" and len(parts) >= 6 and self.feed_line:
+                node, lat, lon, acc = parts[2].upper(), float(parts[3]), float(parts[4]), float(parts[5])
+                self.feed_line("POS " + json.dumps({"node": node, "lat": lat, "lon": lon, "acc": acc}), "meshtastic")
+            elif parts[1] == "D" and len(parts) >= 6 and self.feed_det:
+                node, mac, rssi, dom = parts[2].upper(), parts[3].upper(), int(parts[4]), parts[5]
+                name = parts[6] if len(parts) > 6 else ""
+                self.feed_det({"mac": mac, "rssi": rssi, "node": node, "dom": dom if dom in ("ble", "wifi") else "ble",
+                               "desc": name or "via Tab5 link"}, "meshtastic")
+            elif parts[1] != "H":   # H: hello, a link with nothing else to say
+                return
+        except (ValueError, IndexError):
+            return
+        self.link_heard = time.time()
+        with self.lock:
+            self.status["link"] = {"from": frm, "ts": self.link_heard}
+
     def _on_text(self, packet, interface=None):
         try:
             d = packet.get("decoded") or {}
             frm = packet.get("fromId") or "?"
+            text = str(d.get("text") or "")
+            if text.startswith("OSM1 "):
+                self._on_link(frm, text)
+                return
             who = ((self.iface.nodes or {}).get(frm) or {}).get("user", {}).get("longName") if self.iface else None
             with self.lock:
                 self.status["inbox"] = ([{"from": frm, "name": who or "", "text": str(d.get("text") or "")[:200],
@@ -215,6 +254,13 @@ class Mesh:
                 if lines:
                     more = f" +{len(lines) - 5} more" if len(lines) > 5 else ""
                     self.queue(f"OUI-SPY {len(lines)} new: " + "; ".join(lines[:5]) + more)
+                if (self.summary and self.link_heard and time.time() - self.link_heard < LINK_FRESH_S
+                        and time.time() - self.summary_at >= SUMMARY_S):
+                    self.summary_at = time.time()
+                    try:
+                        self.queue(self.summary())
+                    except Exception:
+                        pass
                 if self.outbox and time.time() - self.last_tx >= GAP_S:
                     with self.lock:
                         text = self.outbox.pop(0)

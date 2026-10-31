@@ -319,8 +319,18 @@ def _usb_ignore():
     return ign
 
 
+def _link_summary():
+    """The mesh in one Meshtastic text for a Tab5 link: OSM1 S <on>/<all> <d24> <id>:<up>:<rssi>,..."""
+    nodes = fleet.snapshot(lists=False).get("nodes", [])
+    on = sum(1 for n in nodes if n.get("online"))
+    rows = ",".join(f'{n["id"]}:{1 if n.get("online") else 0}:{int(n.get("rssi") or 0)}' for n in nodes[:12])
+    return f"OSM1 S {on}/{len(nodes)} {store.detection_stats()['day']} {rows}"
+
+
 mesh = mesh_mod.Mesh(lambda: settings()["meshtastic"],
-                     lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, lambda: _our_ports())
+                     lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, lambda: _our_ports(),
+                     summary=_link_summary, feed_line=lambda line, src: fleet.feed_line(line, src),
+                     feed_det=lambda d, src: fleet.feed_detection(d, src))
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread

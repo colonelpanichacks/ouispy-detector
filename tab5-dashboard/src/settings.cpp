@@ -24,6 +24,7 @@ void settings_load() {
     S.sndNode = p.getBool("sndnode", true);
     S.proxBeep = p.getBool("proxbeep", true);
     S.vol = p.getUChar("vol", 55);
+    S.meshLink = p.getBool("meshlink", false);
     S.muted = p.getString("muted", "");
     S.source = p.getUChar("source", SRC_AUTO);
     p.end();
@@ -48,6 +49,7 @@ void settings_save() {
     p.putBool("sndnode", S.sndNode);
     p.putBool("proxbeep", S.proxBeep);
     p.putUChar("vol", S.vol);
+    p.putBool("meshlink", S.meshLink);
     p.putString("muted", S.muted);
     p.putUChar("source", S.source);
     p.end();
@@ -118,9 +120,10 @@ bool settings_serial_line(const String &raw) {
     else if (key == "bright") S.bright = constrain(val.toInt(), 5, 100);
     else if (key == "sound") S.sound = val.toInt() != 0;
     else if (key == "vol") S.vol = constrain(val.toInt(), 0, 100);
+    else if (key == "meshlink") S.meshLink = val.toInt() != 0;
     else if (key == "source") S.source = val == "usb" ? SRC_USB : val == "network" ? SRC_NETWORK : SRC_AUTO;
     else {
-        Serial.printf("unknown key '%s' (ssid pass host port token otapass tz hostname flip bright sound source)\n",
+        Serial.printf("unknown key '%s' (ssid pass host port token otapass tz hostname flip bright sound source meshlink)\n",
                       key.c_str());
         return true;
     }

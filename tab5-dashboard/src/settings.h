@@ -26,6 +26,7 @@ struct Settings {
     bool proxBeep = true; // proximity mode beeps (the keyboard LED pulses either way)
     uint8_t vol = 55;     // %
     String muted;         // comma-separated MACs whose alerts are silenced
+    bool meshLink = false; // Grove port A: a Meshtastic radio (Unit C6L) instead of a GPS unit
 };
 
 extern Settings S;

@@ -8,6 +8,7 @@
 #include "net.h"
 #include "gps.h"
 #include "wd.h"
+#include "meshlink.h"
 
 namespace {
 
@@ -314,7 +315,13 @@ void on_detection(const char *body) {
     dedup[slot] = {key, now};
     ev["alias"] = d["alias"] | "";
     ev["source"] = "usb";
-    ev["is_new"] = known_add(mac.c_str());
+    bool isNew = known_add(mac.c_str());
+    ev["is_new"] = isNew;
+    if (isNew && local()) {   // no dashboard: tell the home over the mesh link (if there is one)
+        String nm = (const char *)(d["alias"] | "");
+        if (!nm.length()) nm = descr;
+        meshlink_det(node.c_str(), mac.c_str(), rssi, dom.c_str(), nm.c_str());
+    }
     ev["id"] = nextId++;
     if (seenBy.size() > 1) ev["closest"] = seenBy[0][0];
     if (local()) ingest_det(ev.as<JsonObjectConst>(), true);
@@ -365,6 +372,30 @@ void on_line(char *line) {
     else if (line[0] == '{' && strstr(line, "\"mac\"")) on_detection(line);
 }
 
+struct LinkNode { char id[7]; bool up; int16_t rssi; };
+constexpr int LINKQ = 24;
+LinkNode linkq[LINKQ];
+int nlink = 0;
+portMUX_TYPE linkMux = portMUX_INITIALIZER_UNLOCKED;
+
+void apply_link_nodes() {
+    LinkNode q[LINKQ];
+    portENTER_CRITICAL(&linkMux);
+    int n = nlink;
+    memcpy(q, linkq, sizeof(LinkNode) * n);
+    nlink = 0;
+    portEXIT_CRITICAL(&linkMux);
+    if (!n || !local()) return;
+    double now = now_s();
+    for (int i = 0; i < n; i++) {
+        if (q[i].up) node_seen(q[i].id, nullptr, now);
+        else if (LNode *nd = node_get(q[i].id, false)) nd->online = false;
+        if (LNode *nd = node_get(q[i].id, false))
+            if (q[i].rssi) nd->rssi = q[i].rssi;
+    }
+    publish_fleet();
+}
+
 void feed_task(void *) {
     static char buf[512];
     static char line[2048];
@@ -374,6 +405,7 @@ void feed_task(void *) {
     bool wasLive = false;
     for (;;) {
         size_t got = usb_read(buf, sizeof buf, 100);
+        apply_link_nodes();   // the home's summary over the mesh link
         for (size_t i = 0; i < got; i++) {
             char c = buf[i];
             if (c == '\n') {
@@ -444,4 +476,17 @@ void feed_start() {
     known = (uint32_t *)ps_calloc(KNOWN, sizeof(uint32_t));
     usb_start();
     xTaskCreatePinnedToCore(feed_task, "feed", 12288, nullptr, 3, nullptr, 1);
+}
+
+// The home's summary arrives on the gps task; the node table belongs to the feed task, so
+// the summary is queued here and applied there (apply_link_nodes).
+void feed_link_node(const char *id, bool up, int rssi) {
+    if (strlen(id) != 6) return;
+    portENTER_CRITICAL(&linkMux);
+    if (nlink < LINKQ) {
+        LinkNode &l = linkq[nlink++];
+        for (int i = 0; i < 7; i++) l.id[i] = toupper(id[i]);
+        l.up = up, l.rssi = rssi;
+    }
+    portEXIT_CRITICAL(&linkMux);
 }

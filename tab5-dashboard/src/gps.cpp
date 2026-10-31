@@ -1,4 +1,6 @@
 #include "gps.h"
+#include "meshlink.h"
+#include "settings.h"
 #include <M5Unified.h>
 
 namespace {
@@ -134,22 +136,31 @@ void gps_task(void *) {
     static const int pins[2][2] = {{53, 54}, {54, 53}};   // (rx, tx): units differ in which wire is TX
     static const uint32_t bauds[] = {9600, 115200, 38400, 57600, 4800};
     for (;;) {
+        // Port A carries a Meshtastic radio instead (Setup: GROVE MESH): it has the port.
+        if (S.meshLink) {
+            if (openRx >= 0) Serial1.end(), openRx = -1;
+            present = false;
+            meshlink_run();
+            continue;
+        }
         // Search.
         present = false;
         int rx = -1;
-        while (rx < 0) {
+        while (rx < 0 && !S.meshLink) {
             for (auto &p : pins) {
                 for (uint32_t b : bauds) {
                     snprintf(state, sizeof state, "no GPS (looking %lu)", (unsigned long)b);
+                    if (S.meshLink) break;
                     if (probe(p[0], p[1], b, 1300)) { rx = p[0], baudNow = b; break; }
                 }
                 if (rx >= 0) break;
             }
             if (rx < 0) {   // nothing on the port: look again in a while (plugging one in is noticed then)
                 snprintf(state, sizeof state, "no GPS");
-                vTaskDelay(pdMS_TO_TICKS(30000));
+                for (int k = 0; k < 300 && !S.meshLink; k++) vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
+        if (rx < 0) continue;
         present = true;
         // Read until it goes quiet for 5 s.
         char line[120];
@@ -205,7 +216,7 @@ GpsFix gps_fix() {
     return f;
 }
 
-const char *gps_state() { return state; }
+const char *gps_state() { return S.meshLink ? meshlink_state() : state; }
 bool gps_present() { return present; }
 
 int gps_trail(float (*out)[2], int max) {
