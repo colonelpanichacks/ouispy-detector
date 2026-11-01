@@ -336,7 +336,7 @@ function renderNodes() {
 // maxZoom 22 everywhere: past a layer's last real tile level (maxNativeZoom)
 // Leaflet enlarges its final tiles, so you can always zoom in close.
 const MAP_MAX_ZOOM = 22;
-const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
+const map = L.map("map", { zoomControl: false, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
 // What marks.js (its own file, outside this closure) needs from here.
 window.OUISPY = { map, api, esc, $ };
 let tileLayer = null;
@@ -2846,9 +2846,7 @@ $("fkHome").onclick = () => twoTap($("fkHome"), async () => {
 
 // tabs
 // ------------------------------------------------------------------
-// Console layout: collapsible sections and the bottom dock. On desktop the
-// page is one screen (no page scroll); every column scrolls inside itself.
-// What is collapsed, and the dock height, are remembered per browser.
+// Console layout: collapsible sections, remembered per browser.
 // ------------------------------------------------------------------
 const secState = lsGet("ouispy.collapsed", {});
 document.querySelectorAll(".sec").forEach((sec) => {
@@ -2860,81 +2858,39 @@ document.querySelectorAll(".sec").forEach((sec) => {
         lsSet("ouispy.collapsed", secState);
     };
 });
-const dock = document.querySelector(".tabs-panel");
-function setDock(open) {
-    dock.classList.toggle("collapsed", !open);
-    $("dockToggle").title = open ? "Collapse this panel" : "Expand this panel";
-    lsSet("ouispy.dockOpen", open);
-    setTimeout(() => map.invalidateSize(), 220);   // the map row grew or shrank
+// One view at a time on every screen, like the Tab5 (CSS, body[data-mv]): the tab row
+// under the top bar picks it, in the Tab5's order (Overview, Fleet, Live, Map, Drones,
+// Metrics), then the dashboard's own. The browser opens on its last view.
+const M_VIEWS = { map: "map", fleet: "fleet", feed: "feed" };
+function setView(tab) {
+    document.body.dataset.mv = M_VIEWS[tab] || "dock";
+    if (tab === "map") map.invalidateSize();
+    lsSet("ouispy.tab", tab);
 }
-function setDockHeight(px) {
-    // Leave the fleet / map / detections row at least ~300 px under the top bar.
-    const h = Math.round(Math.max(160, Math.min(window.innerHeight - 380, px)));
-    document.documentElement.style.setProperty("--dock-h", h + "px");
-    return h;
-}
-setDockHeight(lsGet("ouispy.dockH", Math.round(window.innerHeight * 0.42)));
-setDock(lsGet("ouispy.dockOpen", true));
-$("dockToggle").onclick = () => setDock(dock.classList.contains("collapsed"));
-$("dockGrip").onpointerdown = (e) => {
-    if (dock.classList.contains("collapsed")) setDock(true);
-    e.preventDefault();
-    const grip = e.currentTarget;
-    grip.setPointerCapture(e.pointerId);
-    grip.onpointermove = (m) => setDockHeight(window.innerHeight - m.clientY - 12);
-    grip.onpointerup = (u) => {
-        grip.onpointermove = grip.onpointerup = null;
-        lsSet("ouispy.dockH", setDockHeight(window.innerHeight - u.clientY - 12));
-        map.invalidateSize();
-    };
-};
-// Open a dock tab from code (never folds it, unlike pressing the open tab).
 function showTab(name) {
     const t = document.querySelector(`.tab[data-tab="${name}"]`);
-    if (dock.classList.contains("collapsed") || !t.classList.contains("active")) t.click();
+    if (t && !t.classList.contains("active")) t.click();
 }
-// Phones show one view at a time (CSS, body[data-mv]): the map, the node list and the
-// detections are tabs of their own there (.m-only), and nothing folds.
-const phone = window.matchMedia("(max-width: 760px)");
-const M_VIEWS = { map: "map", fleet: "fleet", feed: "feed" };
-function setPhoneView(tab) {
-    document.body.dataset.mv = M_VIEWS[tab] || "dock";
-    if (tab === "map") setTimeout(() => map.invalidateSize(), 0);
-    if (phone.matches) lsSet("ouispy.phoneTab", tab);
+// Anything that shows a place goes to the Map tab first: a hidden map can't fit bounds.
+function toMap() {
+    showTab("map");
+    map.invalidateSize();
 }
 document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
-    if (phone.matches) {
-        if (dock.classList.contains("collapsed")) setDock(true);
-        t.scrollIntoView({ block: "nearest", inline: "nearest" });
-        setPhoneView(t.dataset.tab);
-    } else {
-        // The active tab's own button folds the dock; any tab unfolds it.
-        if (t.classList.contains("active") && !dock.classList.contains("collapsed")) return setDock(false);
-        if (dock.classList.contains("collapsed")) setDock(true);
-    }
+    t.scrollIntoView({ block: "nearest", inline: "nearest" });
     document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
     document.querySelectorAll(".tab-body").forEach((b) => b.classList.toggle("active", b.id === `tab-${t.dataset.tab}`));
+    setView(t.dataset.tab);
     if (t.dataset.tab === "settings") { loadSettingsForm(); loadFleetKeyStatus(); }
     if (t.dataset.tab === "devices") loadDevices();
     if (t.dataset.tab === "console") $("console").scrollTop = $("console").scrollHeight;
 });
-
-// A phone opens on its last view (Overview the first time); widening the window past
-// phone size leaves a phone-only tab for Overview.
-function phoneLayout() {
-    if (phone.matches) {
-        const tab = lsGet("ouispy.phoneTab", "overview");
-        const t = document.querySelector(`.tab[data-tab="${tab}"]`) || document.querySelector('.tab[data-tab="overview"]');
-        if (!t.classList.contains("active")) t.click();
-        else setPhoneView(t.dataset.tab);
-    } else {
-        delete document.body.dataset.mv;
-        if (document.querySelector(".tab.m-only.active")) document.querySelector('.tab[data-tab="overview"]').click();
-        setTimeout(() => map.invalidateSize(), 0);
-    }
+{
+    const tab = lsGet("ouispy.tab", lsGet("ouispy.phoneTab", "overview"));
+    const t = document.querySelector(`.tab[data-tab="${tab}"]`) || document.querySelector('.tab[data-tab="overview"]');
+    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    t.click();
 }
-phone.addEventListener("change", phoneLayout);
-phoneLayout();
 
 // ------------------------------------------------------------------
 // boot + live updates
@@ -3656,6 +3612,7 @@ function drawFlights(fitTo) {
         if (!fitTo || fitTo.includes(i)) bounds.push(...tr, ...pt, ...(f.pilot ? [f.pilot] : []));
     }
     if (fitTo === undefined || !bounds.length) return;
+    toMap();
     // Keep it clear of the drawer when the map is wide enough to show it beside the drawer.
     const mr = map.getContainer().getBoundingClientRect(), dr = $("drDrawer").getBoundingClientRect();
     const over = $("drDrawer").classList.contains("open") ? Math.max(0, mr.right - dr.left) : 0;
@@ -3687,6 +3644,7 @@ $("drZoom").onclick = () => {
     const d = S.drones[S.droneOpen];
     if (!d) return;
     const pts = [[d.lat, d.lon], [d.plat, d.plon]].filter((p) => p[0] != null);
+    if (pts.length) toMap();
     if (pts.length > 1) map.fitBounds(pts, { padding: [60, 60], maxZoom: 18 });
     else if (pts.length) map.setView(pts[0], Math.max(map.getZoom(), 17));
 };
@@ -3930,6 +3888,7 @@ $("wdShowMap").onclick = () => {
     const d = S.wdOpen && S.wdOpen.dev;
     if (!d || d.lat == null) return;
     if (S.wdScope === "off") { S.wdScope = "history"; lsSet("ouispy.wdScope", "history"); loadWd(); }
+    toMap();
     map.setView([d.lat, d.lon], Math.max(map.getZoom(), 18));
 };
 const _showWardriverPrev = showWardriver;

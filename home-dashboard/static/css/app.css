@@ -1197,19 +1197,16 @@ body.map-maxed .toasts { z-index: 1700; }
 /* Phones: one screen at a time, like the Tab5. The tab row sits under the top bar and
    picks the view; the map, the node list and the live detections are tabs of their own
    here (the m-only buttons), next to the dock's tabs. Nothing scrolls but the view. */
-/* Tab order and names follow the Tab5's: Overview, Fleet, Live, Map, Drones, Metrics, then
-   the dashboard's own (--mo on each button). Fleet, Live and Map are tabs on phones only:
-   wider screens show them all the time. */
+/* Every screen now, not just phones: the map is a tab of its own, not the main screen.
+   Tab order and names follow the Tab5's: Overview, Fleet, Live, Map, Drones, Metrics, then
+   the dashboard's own (--mo on each button). */
 .tabs-panel .tab { order: var(--mo, 50); }
-.tabs .dock-toggle { order: 99; }
-.tab.m-only { display: none; }
-@media (max-width: 760px) {
+@media all {
     html, body { height: 100%; overflow: hidden; }
     body { display: flex; flex-direction: column; height: 100dvh; }
     .topbar { flex: none; position: relative; }
     main.grid { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 0; padding: 0 8px 8px; }
     main.grid > .panel { display: none; }
-    .tab.m-only { display: inline-block; }
     main.grid > .tabs-panel { display: flex; order: -1; flex: none; height: auto; min-height: 0;
         background: none; border: none; padding: 0; }
     .tabs-panel .tabs { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; margin: 0 -8px 8px; padding: 0 8px; }
@@ -1263,3 +1260,15 @@ body.map-maxed .toasts { z-index: 1700; }
 .mk-bar[hidden] { display: none; }
 .mk-bar button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #2b3542; background: #10141b; color: #22d3ee; cursor: pointer; }
 .mk-bar button:disabled { opacity: .4; cursor: default; }
+
+/* Wide screens: the Fleet view lays its node cards out in columns, the Live feed and the
+   other views keep a readable width; the map takes the whole view. */
+@media (min-width: 761px) {
+    main.grid { padding: 0 14px 14px; }
+    .tabs-panel .tabs { margin: 0 -14px 12px; padding: 0 14px; }
+    body[data-mv="fleet"] .fleet-panel .node-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; align-content: start; }
+    body[data-mv="fleet"] .fleet-panel .node-list > * { margin: 0; }
+}
+@media (min-width: 761px) {
+    body[data-mv="fleet"] .home-stats { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
