@@ -610,6 +610,8 @@ def api_metrics():
     m = store.metrics(until - rng, until, node, dom)
     # Wardriving on the same buckets, so the two read side by side.
     m["wd"] = wardrive.metrics(until - rng, until, node, dom, m["bucket"], m["start"], m["n"])
+    # And drones (Sky-Spy nodes): the Tab5 shows these for a drone node.
+    m["drones"] = drones.metrics(m["start"], m["start"] + m["bucket"] * m["n"], node, m["bucket"], m["n"])
     return jsonify(m)
 
 

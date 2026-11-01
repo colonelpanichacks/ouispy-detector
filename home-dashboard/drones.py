@@ -337,6 +337,64 @@ class Drones:
         live["stats"] = dict(agg)
         return live
 
+    def metrics(self, start, until, node=None, bucket=300, n=None):
+        """Drones in [start, until) on the detections' buckets, for the Metrics view: how many
+        reports and drones per bucket, the highest / fastest / farthest, which nodes heard
+        them, and every drone with its latest telemetry."""
+        n = n or max(1, int((until - start) // bucket))
+        where, args = "ts>=? AND ts<?", [start, until]
+        if node:
+            where += " AND node=?"
+            args.append(node)
+        st = self.store
+        with st.lock:
+            rows = st.db.execute(f"SELECT ts, mac FROM drone_reports WHERE {where}", args).fetchall()
+            agg = st.db.execute(f"SELECT COUNT(*) n, COUNT(DISTINCT mac) u, MAX(alt) alt, MAX(hagl) hagl, "
+                                f"MAX(spd) spd, MIN(rssi) rmin, MAX(rssi) rmax FROM drone_reports WHERE {where}",
+                                args).fetchone()
+            by_node = st.db.execute(f"SELECT node, COUNT(DISTINCT mac) u FROM drone_reports WHERE {where} "
+                                    f"GROUP BY node ORDER BY u DESC LIMIT 8", args).fetchall()
+            per = st.db.execute(
+                f"SELECT mac, COUNT(*) n, MIN(ts) first, MAX(ts) last, MAX(alt) max_alt, MAX(spd) max_spd, "
+                f"MAX(rssi) best_rssi FROM drone_reports WHERE {where} GROUP BY mac ORDER BY last DESC LIMIT 12",
+                args).fetchall()
+            lasts = {r["mac"]: r for r in st.db.execute(
+                f"SELECT r.mac, r.node, r.rssi, r.alt, r.hagl, r.spd, r.hdg, r.lat, r.lon, r.plat, r.plon, r.data "
+                f"FROM drone_reports r JOIN (SELECT mac, MAX(ts) t FROM drone_reports WHERE {where} GROUP BY mac) x "
+                f"ON r.mac=x.mac AND r.ts=x.t", args).fetchall()}
+            metas = {r["mac"]: dict(r) for r in st.db.execute("SELECT mac, alias, tag FROM drone_meta").fetchall()}
+        series, seen = [0] * n, [set() for _ in range(n)]
+        for r in rows:
+            i = min(n - 1, max(0, int((r["ts"] - start) // bucket)))
+            series[i] += 1
+            seen[i].add(r["mac"])
+        now = time.time()
+        with self.lock:
+            live_now = sum(1 for s in self.live.values() if now - s.get("last", 0) < LIVE_S
+                           and (not node or node in (s.get("nodes") or {})))
+        out = []
+        for r in per:
+            last = lasts.get(r["mac"])
+            d = dict(r)
+            meta = metas.get(r["mac"], {})
+            d.update({"alias": meta.get("alias") or "", "tag": meta.get("tag") or "unknown",
+                      "live": now - r["last"] < LIVE_S})
+            if last:
+                try:
+                    data = json.loads(last["data"] or "{}")
+                except ValueError:
+                    data = {}
+                d.update({"node": last["node"], "rssi": last["rssi"], "alt": last["alt"], "hagl": last["hagl"],
+                          "spd": last["spd"], "hdg": last["hdg"], "id": data.get("id") or data.get("serial") or "",
+                          "status": _label(STATUS, data.get("st")), "ua_type": _label(UA_TYPES, data.get("uat"))})
+                if last["lat"] is not None and last["plat"] is not None:
+                    d["pilot_dist_m"] = round(_haversine(last["lat"], last["lon"], last["plat"], last["plon"]))
+            out.append(d)
+        return {"total": agg["n"], "unique": agg["u"], "live": live_now, "max_alt": agg["alt"],
+                "max_hagl": agg["hagl"], "max_spd": agg["spd"], "rssi_best": agg["rmax"],
+                "series": series, "unique_series": [len(x) for x in seen],
+                "by_node": [[r["node"] or "?", r["u"]] for r in by_node], "drones": out}
+
     def recent(self, hours=24, limit=200):
         st = self.store
         with st.lock:
