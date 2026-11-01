@@ -3583,8 +3583,92 @@ async function openDrone(mac) {
         const pts = h.map((x, i) => `${((x.ts - t0) / Math.max(1, t1 - t0) * 320).toFixed(1)},${(78 - (ys[i] - lo) / (hiY - lo) * 74).toFixed(1)}`);
         $("drAlt").innerHTML = `<polyline points="${pts.join(" ")}" class="altline"/><text x="2" y="10">${Math.round(hiY)} m</text>`;
     } else $("drAlt").innerHTML = `<text x="2" y="44">No altitude history yet</text>`;
+    if (S.flights.mac !== mac) loadFlights(mac);
 }
-$("drClose").onclick = () => { $("drDrawer").classList.remove("open"); S.droneOpen = null; };
+// Past flights of the open drone: each one drawn on the map on demand, its track solid
+// and its pilot's dashed, takeoff (circle), landing (diamond) and where the pilot stood.
+S.flights = { mac: null, list: [], shown: new Set(), layer: null };
+function flightHue(base, i) { return (base + i * 137) % 360; }
+function fmtDur(s) {
+    s = Math.round(s || 0);
+    return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`;
+}
+function fmtDist(m) { return m == null ? "-" : m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`; }
+async function loadFlights(mac) {
+    clearFlights();
+    S.flights = { mac, list: [], shown: new Set(), layer: S.flights.layer };
+    $("drFlights").innerHTML = `<div class="empty">Loading flights...</div>`;
+    let r;
+    try { r = await api(`/api/drones/${encodeURIComponent(mac)}/flights?days=30`); } catch (e) { r = { flights: [] }; }
+    if (S.droneOpen !== mac) return;
+    S.flights.list = r.flights || [];
+    renderFlightList();
+}
+function renderFlightList() {
+    const F = S.flights, d = S.drones[F.mac] || { mac: F.mac };
+    const base = droneHue(d);
+    $("drFlHint").textContent = `(${F.list.length} in the last 30 days: drone track solid, pilot dashed)`;
+    $("drFlAll").disabled = $("drFlNone").disabled = !F.list.length;
+    $("drFlights").innerHTML = F.list.map((f, i) => {
+        const bits = [fmtDist(f.dist_m) + " flown", f.max_hagl != null ? `max ${Math.round(f.max_hagl)} m AGL` : f.max_alt != null ? `max ${Math.round(f.max_alt)} m MSL` : "",
+            f.max_spd != null ? `${f.max_spd.toFixed(1)} m/s top` : "", f.pilot_max_m != null ? `up to ${fmtDist(f.pilot_max_m)} from pilot` : "no pilot position",
+            `${f.reports} report${f.reports === 1 ? "" : "s"}`, f.nodes.length ? "via " + f.nodes.map(nodeName).join(", ") : ""].filter(Boolean);
+        return `<button type="button" class="fl-row ${F.shown.has(i) ? "on" : ""}" data-i="${i}" style="--h:${flightHue(base, i)}">
+            <span class="fl-dot"></span><span class="fl-when">${esc(fullTime(f.start))}</span><span class="fl-dur">${fmtDur(f.dur)}</span>
+            <span class="fl-sub">${esc(bits.join(" | "))}</span></button>`;
+    }).join("") || `<div class="empty">No stored flights for this drone in the last 30 days.</div>`;
+    $("drFlights").querySelectorAll(".fl-row").forEach((b) => b.onclick = () => {
+        const i = +b.dataset.i;
+        if (F.shown.has(i)) F.shown.delete(i); else F.shown.add(i);
+        drawFlights(F.shown.has(i) ? [i] : undefined);
+        renderFlightList();
+    });
+}
+function flightMark(ll, cls, hue, label, tip) {
+    return L.marker(ll, { zIndexOffset: 650, keyboard: false, icon: L.divIcon({ className: "", iconSize: [0, 0],
+        html: `<div class="fl-mk ${cls}" style="--h:${hue}"><div></div>${label ? `<span>${esc(label)}</span>` : ""}</div>` }) })
+        .bindTooltip(tip, { direction: "top", offset: [0, -8] });
+}
+// fitTo: undefined leaves the view alone, null fits every flight shown, [i] fits those.
+function drawFlights(fitTo) {
+    const F = S.flights;
+    if (!F.layer) F.layer = L.layerGroup().addTo(map);
+    F.layer.clearLayers();
+    const d = S.drones[F.mac] || { mac: F.mac };
+    const base = droneHue(d), bounds = [];
+    for (const i of [...F.shown].sort((a, b) => b - a)) {
+        const f = F.list[i];
+        if (!f) continue;
+        const hue = flightHue(base, i), c = `hsl(${hue} 100% 60%)`, when = fullTime(f.start);
+        const tr = f.track.map((p) => [p[1], p[2]]), pt = f.ptrack.map((p) => [p[1], p[2]]);
+        if (tr.length > 1) {
+            L.polyline(tr, { color: "#000", weight: 6, opacity: .45, interactive: false }).addTo(F.layer);
+            L.polyline(tr, { color: c, weight: 3, opacity: .95, className: "dr-track" })
+                .bindTooltip(`${esc(droneName(d))}: flight ${esc(when)}, ${fmtDur(f.dur)}`, { sticky: true }).addTo(F.layer);
+        }
+        if (pt.length > 1) L.polyline(pt, { color: c, weight: 2, dashArray: "5 6", opacity: .9, interactive: false }).addTo(F.layer);
+        if (f.takeoff) flightMark(f.takeoff, "up", hue, hms(f.start), `Takeoff / first heard ${esc(when)}`).addTo(F.layer);
+        if (f.landing && tr.length > 1) flightMark(f.landing, "down", hue, "", `Landing / last heard ${esc(fullTime(f.end))}`).addTo(F.layer);
+        if (f.pilot) {
+            flightMark(f.pilot, "pilot", hue, "PILOT", `Pilot at the start of the ${esc(when)} flight`).addTo(F.layer);
+            if (f.takeoff) L.polyline([f.pilot, f.takeoff], { color: c, weight: 1, dashArray: "2 5", opacity: .6, interactive: false }).addTo(F.layer);
+        }
+        if (!fitTo || fitTo.includes(i)) bounds.push(...tr, ...pt, ...(f.pilot ? [f.pilot] : []));
+    }
+    if (fitTo === undefined || !bounds.length) return;
+    // Keep it clear of the drawer when the map is wide enough to show it beside the drawer.
+    const mr = map.getContainer().getBoundingClientRect(), dr = $("drDrawer").getBoundingClientRect();
+    const over = $("drDrawer").classList.contains("open") ? Math.max(0, mr.right - dr.left) : 0;
+    const right = mr.width - over > 320 ? over + 50 : 50;
+    map.fitBounds(bounds, { paddingTopLeft: [50, 50], paddingBottomRight: [right, 50], maxZoom: 18 });
+}
+function clearFlights() {
+    if (S.flights && S.flights.layer) S.flights.layer.clearLayers();
+    if (S.flights) S.flights.shown = new Set();
+}
+$("drFlAll").onclick = () => { S.flights.list.forEach((_, i) => S.flights.shown.add(i)); drawFlights(null); renderFlightList(); };
+$("drFlNone").onclick = () => { clearFlights(); renderFlightList(); };
+$("drClose").onclick = () => { $("drDrawer").classList.remove("open"); S.droneOpen = null; clearFlights(); S.flights.mac = null; };
 $("drSave").onclick = async () => {
     await api(`/api/drones/${encodeURIComponent(S.droneOpen)}`, { method: "POST", body: { alias: $("drAlias").value, notes: $("drNotes").value } });
     toast("good", "Drone saved", $("drAlias").value || S.droneOpen);

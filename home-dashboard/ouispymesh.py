@@ -765,6 +765,16 @@ def api_drone(mac):
     return (jsonify(d), 200) if d else (jsonify({"error": "unknown drone"}), 404)
 
 
+@app.route("/api/drones/<mac>/flights")
+def api_drone_flights(mac):
+    """Past flights of one drone with its own and its pilot's tracks."""
+    try:
+        days = min(365.0, float(request.args.get("days", 30)))
+    except ValueError:
+        days = 30.0
+    return jsonify({"mac": mac.upper(), "flights": drones.flights(mac, days=days)})
+
+
 @app.route("/api/drones/<mac>", methods=["POST"])
 def api_drone_meta(mac):
     data = request.get_json(silent=True) or {}

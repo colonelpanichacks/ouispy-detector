@@ -54,6 +54,9 @@ TRACK_KEEP = 600     # points kept per drone in memory
 STORE_EVERY_S = 2.0  # one stored report per drone per this many seconds
 FAA_ID_TYPES = {1, 2}   # CTA-2063 serial / CAA registration: what the FAA indexes
 FAA_RETRY_S = 3600      # a failed lookup (network) tries again in an hour
+FLIGHT_GAP_S = 300      # quiet this long: the next report starts a new flight...
+FLIGHT_AIR_GAP_S = 1500 # ...unless it was up in the air on both sides (heard on and off at range)
+FLIGHT_AIR_M = 10       # "up in the air": this high above the ground
 
 
 def _num(v, bad=None, lo=None, hi=None):
@@ -337,6 +340,47 @@ class Drones:
         live["stats"] = dict(agg)
         return live
 
+    def flights(self, mac, days=30, limit=40, max_pts=300):
+        """Past flights of one drone, newest first: its reports split wherever it went quiet
+        (FLIGHT_GAP_S, longer while it stayed in the air). Each has the drone's track [[ts, lat, lon, hagl|alt]], the pilot's
+        [[ts, lat, lon]] (thinned), where it took off and landed, and its numbers."""
+        mac = mac.upper()
+        st = self.store
+        with st.lock:
+            rows = st.db.execute(
+                "SELECT ts, node, lat, lon, alt, hagl, spd, plat, plon FROM drone_reports "
+                "WHERE mac=? AND ts>=? ORDER BY ts", (mac, time.time() - days * 86400)).fetchall()
+        groups, cur = [], []
+        for r in rows:
+            gap = r["ts"] - cur[-1]["ts"] if cur else 0
+            aloft = all((x["hagl"] or 0) > FLIGHT_AIR_M for x in (r, cur[-1])) if cur else False
+            if gap > (FLIGHT_AIR_GAP_S if aloft else FLIGHT_GAP_S):
+                groups.append(cur)
+                cur = []
+            cur.append(r)
+        if cur:
+            groups.append(cur)
+        out = []
+        for g in reversed(groups[-limit:]):
+            tr = [[r["ts"], r["lat"], r["lon"], r["hagl"] if r["hagl"] is not None else r["alt"]]
+                  for r in g if r["lat"] is not None and r["lon"] is not None and (r["lat"] or r["lon"])]
+            pt = _dedupe([[r["ts"], r["plat"], r["plon"]] for r in g
+                          if r["plat"] is not None and r["plon"] is not None and (r["plat"] or r["plon"])])
+            dist = sum(_haversine(a[1], a[2], b[1], b[2]) for a, b in zip(tr, tr[1:]))
+            pmax = max((_haversine(pt[0][1], pt[0][2], t[1], t[2]) for t in tr), default=None) if pt else None
+            out.append({
+                "start": g[0]["ts"], "end": g[-1]["ts"], "dur": g[-1]["ts"] - g[0]["ts"], "reports": len(g),
+                "max_hagl": max((r["hagl"] for r in g if r["hagl"] is not None), default=None),
+                "max_alt": max((r["alt"] for r in g if r["alt"] is not None), default=None),
+                "max_spd": max((r["spd"] for r in g if r["spd"] is not None), default=None),
+                "dist_m": round(dist), "pilot_max_m": round(pmax) if pmax is not None else None,
+                "nodes": sorted({r["node"] for r in g if r["node"]}),
+                "takeoff": tr[0][1:3] if tr else None, "landing": tr[-1][1:3] if tr else None,
+                "pilot": pt[0][1:3] if pt else None,
+                "track": _thin(tr, max_pts), "ptrack": _thin(pt, max_pts // 3),
+            })
+        return out
+
     def metrics(self, start, until, node=None, bucket=300, n=None):
         """Drones in [start, until) on the detections' buckets, for the Metrics view: how many
         reports and drones per bucket, the highest / fastest / farthest, which nodes heard
@@ -459,6 +503,19 @@ def faa_lookup(serial):
     with opener.open(urllib.request.Request("https://uasdoc.faa.gov/api/v1/serialNumbers?" + q, headers=hdr),
                      timeout=30) as r:
         return json.loads(r.read())
+
+
+def _thin(pts, n):
+    """Every k-th point so at most n remain, first and last kept."""
+    if len(pts) <= n:
+        return pts
+    k = len(pts) / (n - 1)
+    return [pts[int(i * k)] for i in range(n - 1)] + [pts[-1]]
+
+
+def _dedupe(pts):
+    """Consecutive repeats of one position dropped (a parked pilot)."""
+    return [p for i, p in enumerate(pts) if not i or p[1:3] != pts[i - 1][1:3]]
 
 
 def _haversine(lat1, lon1, lat2, lon2):

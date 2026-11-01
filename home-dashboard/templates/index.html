@@ -734,6 +734,12 @@
         <textarea id="drNotes" class="field" rows="2" placeholder="Who, where, why..."></textarea>
         <h4>Altitude (last 24 h)</h4>
         <svg class="dr-alt" id="drAlt" viewBox="0 0 320 80" preserveAspectRatio="none"></svg>
+        <h4>Flights <span class="lbl-hint" id="drFlHint">(last 30 days: drone track solid, pilot dashed)</span></h4>
+        <div class="fl-ctl">
+            <button class="btn ghost" id="drFlAll" type="button">Show all</button>
+            <button class="btn ghost" id="drFlNone" type="button">Clear map</button>
+        </div>
+        <div class="fl-list" id="drFlights"></div>
         <div class="drawer-actions">
             <button class="btn ghost" id="drZoom">Show on map</button>
         </div>

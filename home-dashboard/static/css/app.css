@@ -1055,6 +1055,27 @@ body.map-maxed .toasts { z-index: 1700; }
 .dr-alt { width: 100%; height: 80px; background: rgba(255, 255, 255, .02); border: 1px solid var(--line); border-radius: 4px; }
 .dr-alt .altline { fill: none; stroke: #00f0ff; stroke-width: 2; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 3px #00f0ff); }
 .dr-alt text { fill: var(--muted); font-size: 9px; }
+.fl-ctl { display: flex; gap: 6px; margin-bottom: 6px; }
+.fl-list { display: flex; flex-direction: column; gap: 4px; }
+.fl-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 4px 10px; align-items: center; padding: 7px 9px;
+    border: 1px solid var(--line); border-left: 3px solid hsl(var(--h) 100% 60% / .35); border-radius: 4px;
+    background: rgba(255, 255, 255, .02); cursor: pointer; font-size: 12px; text-align: left; color: #dbe4ee; }
+.fl-row:hover { border-color: hsl(var(--h) 100% 60% / .7); }
+.fl-row.on { border-color: hsl(var(--h) 100% 60%); border-left-color: hsl(var(--h) 100% 60%);
+    background: hsl(var(--h) 100% 60% / .09); box-shadow: 0 0 10px hsl(var(--h) 100% 60% / .25); }
+.fl-row .fl-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid hsl(var(--h) 100% 60%); }
+.fl-row.on .fl-dot { background: hsl(var(--h) 100% 60%); box-shadow: 0 0 6px hsl(var(--h) 100% 60%); }
+.fl-row .fl-when { font-weight: 700; color: #fff; }
+.fl-row .fl-dur { font-family: var(--mono); color: hsl(var(--h) 100% 70%); }
+.fl-row .fl-sub { grid-column: 2 / 4; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.fl-mk { width: 0; height: 0; position: relative; }
+.fl-mk > div { position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border: 2px solid hsl(var(--h) 100% 60%);
+    background: #06080b; box-shadow: 0 0 6px hsl(var(--h) 100% 60%); }
+.fl-mk.up > div { border-radius: 50%; }
+.fl-mk.down > div { transform: rotate(45deg); }
+.fl-mk.pilot > div { border-radius: 50% 50% 50% 0; transform: rotate(-45deg); border-style: dashed; }
+.fl-mk span { position: absolute; left: 11px; top: -8px; white-space: nowrap; font: 700 10px var(--mono);
+    color: hsl(var(--h) 100% 72%); text-shadow: 0 0 3px #000, 0 0 3px #000; }
 @media (max-width: 600px) {
     .drone-kpis { grid-template-columns: repeat(3, 1fr); }
     .igrid { grid-template-columns: 1fr; }
