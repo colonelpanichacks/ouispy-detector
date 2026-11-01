@@ -6,11 +6,13 @@ void node_trail_add(const char *id, double la, double lo);
 
 Model *M = nullptr;
 static SemaphoreHandle_t lock_;
+static void memo_load();
 
 void model_init() {
     M = (Model *)ps_calloc(1, sizeof(Model));
     lock_ = xSemaphoreCreateRecursiveMutex();
     strlcpy(M->mode, "live", sizeof M->mode);
+    memo_load();   // now, on the setup task: the feed task that first needs it runs on a PSRAM stack (no flash)
     // Restore muted MACs.
     int start = 0;
     while (start < (int)S.muted.length() && M->nmuted < MAX_MUTED) {
@@ -765,6 +767,42 @@ void ingest_metrics(JsonDocument &doc, uint32_t range) {
         if (w.nch == 16) break;
         w.ch[w.nch] = c["ch"] | 0;
         w.chCount[w.nch++] = c["count"] | 0;
+    }
+    // Drones, on the same buckets.
+    JsonObjectConst dj = doc["drones"];
+    auto &d = m.dr;
+    auto fnum = [](JsonVariantConst v) { return v.isNull() ? NAN : v.as<float>(); };
+    d.total = dj["total"] | 0, d.unique = dj["unique"] | 0, d.live = dj["live"] | 0;
+    d.maxAlt = fnum(dj["max_alt"]), d.maxHagl = fnum(dj["max_hagl"]), d.maxSpd = fnum(dj["max_spd"]);
+    d.rssiBest = dj["rssi_best"] | 0;
+    wdSeries(dj["series"], d.reports);
+    wdSeries(dj["unique_series"], d.uniq);
+    d.nnode = 0;
+    for (JsonArrayConst b : dj["by_node"].as<JsonArrayConst>()) {
+        if (d.nnode == 8) break;
+        cpy(d.node[d.nnode].name, sizeof d.node[d.nnode].name, b[0]);
+        d.node[d.nnode].count = b[1] | 0;
+        d.node[d.nnode++].devices = 0;
+    }
+    d.ndr = 0;
+    for (JsonObjectConst o : dj["drones"].as<JsonArrayConst>()) {
+        if (d.ndr == 12) break;
+        auto &r = d.dr[d.ndr++];
+        cpy(r.mac, sizeof r.mac, o["mac"]);
+        const char *nm = o["alias"] | "";
+        if (!*nm) nm = o["id"] | "";
+        if (!*nm) nm = r.mac;
+        strlcpy(r.name, nm, sizeof r.name);
+        cpy(r.type, sizeof r.type, o["ua_type"]);
+        cpy(r.status, sizeof r.status, o["status"]);
+        cpy(r.node, sizeof r.node, o["node"]);
+        r.reports = o["n"] | 0;
+        r.last = o["last"] | 0.0;
+        r.alt = fnum(o["alt"]), r.hagl = fnum(o["hagl"]), r.spd = fnum(o["spd"]);
+        r.maxAlt = fnum(o["max_alt"]), r.maxSpd = fnum(o["max_spd"]);
+        r.rssi = o["rssi"] | 0;
+        r.pilotM = o["pilot_dist_m"].isNull() ? -1 : o["pilot_dist_m"].as<int32_t>();
+        r.live = o["live"] | false;
     }
     m.fetchedMs = millis();
     clock_from(m.until);

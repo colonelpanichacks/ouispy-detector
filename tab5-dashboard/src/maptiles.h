@@ -19,3 +19,4 @@ void maptiles_clear_requests();   // the view moved: drop requests that are now 
 uint32_t maptiles_cached();
 void maptiles_timing(char *out, size_t cap);   // where tile time goes, for /info
 uint32_t maptiles_stack_min();   // bytes of stack never used by the loaders (health)
+void maptiles_direct(bool on);   // skip the dashboard, fetch tiles straight from the internet (testing)

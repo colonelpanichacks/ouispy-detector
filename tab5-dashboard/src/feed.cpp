@@ -502,7 +502,8 @@ void feed_start() {
     seen = (SeenMac *)ps_calloc(SEEN_MACS, sizeof(SeenMac));
     known = (uint32_t *)ps_calloc(KNOWN, sizeof(uint32_t));
     usb_start();
-    xTaskCreatePinnedToCore(feed_task, "feed", 12288, nullptr, 3, nullptr, 1);
+    // In PSRAM, to leave internal RAM to the Wi-Fi link (net.cpp has why); never writes flash.
+    xTaskCreatePinnedToCoreWithCaps(feed_task, "feed", 12288, nullptr, 3, nullptr, 1, MALLOC_CAP_SPIRAM);
 }
 
 // The home's summary arrives on the gps task; the node table belongs to the feed task, so

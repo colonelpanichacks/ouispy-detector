@@ -29,7 +29,7 @@ struct App {
     bool mapFollow = false;     // keep the newest live drone centred
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
     bool droneTracks = true;    // map: every track (drones, pilots, our own trail)
-    bool mxWd = false;          // metrics: wardriving instead of detections
+    uint8_t mxMode = 0;         // metrics: 0 detections, 1 wardriving, 2 drones (follows the picked node's kind)
     char prox[18] = "";         // proximity mode: this device (MAC), LED + beeps by its signal
     bool ovWd = false;          // overview: wardriving instead of detections
     bool pilotOn = true;        // map: pilots, their track and the line to their drone

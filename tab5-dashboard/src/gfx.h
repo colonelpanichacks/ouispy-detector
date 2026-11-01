@@ -9,7 +9,9 @@
 #include <Arduino.h>
 
 bool gfx_init();
-bool gfx_ok();
+bool gfx_ok();          // false once a PPA job has hung: everything below then runs on the CPU
+void gfx_retire();      // the CPU from now on (the debug port's /cpu, to check that path)
+uint32_t gfx_stalls();  // PPA jobs that timed out (0 or 1)
 
 // Fill a panel-space rectangle of `buf` (720x1280 rgb565) with an rgb565 colour.
 void gfx_fill(uint16_t *buf, int px, int py, int pw, int ph, uint16_t col);

@@ -177,6 +177,26 @@ struct Metrics {
         uint8_t ch[16];
         uint16_t chCount[16];
     } wd;
+    // Drones (Sky-Spy nodes, the dashboard's "drones"): reports and drones per bucket, and
+    // each drone with its latest telemetry.
+    struct DroneRow {
+        char mac[18], name[24], type[28], status[16], node[7];
+        uint32_t reports;
+        double last;
+        float alt, hagl, spd, maxAlt, maxSpd;   // NAN = not reported
+        int16_t rssi;
+        int32_t pilotM;                          // -1 = no pilot position
+        bool live;
+    };
+    struct {
+        uint32_t total, unique, live;
+        float maxAlt, maxHagl, maxSpd;
+        int16_t rssiBest;
+        uint16_t reports[MAX_BUCKETS], uniq[MAX_BUCKETS];
+        uint8_t nnode, ndr;
+        Bar node[8];
+        DroneRow dr[12];
+    } dr;
 };
 
 struct Stats {

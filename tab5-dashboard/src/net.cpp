@@ -20,6 +20,7 @@
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <esp_core_dump.h>
+#include <esp_flash.h>
 #include <HTTPClient.h>
 #include <SocketIOclient.h>
 #include <WiFi.h>
@@ -434,6 +435,31 @@ void debug_poll() {
                  (unsigned long)ui_prof[9], (unsigned long)ui_prof[10], (unsigned long)ui_prof[11]);
         c.print("HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
         c.print(b);
+    } else if (req.startsWith("GET /direct")) {   // /direct?on=1: tiles as on a foreign network
+        maptiles_direct(req.indexOf("on=1") > 0);
+        c.print("HTTP/1.0 200 OK\r\n\r\nok\n");
+    } else if (req.startsWith("GET /cpu")) {   // retire the PPA, as a hung job would
+        gfx_retire();
+        c.print("HTTP/1.0 200 OK\r\n\r\nok\n");
+    } else if (req.startsWith("GET /coredump")) {
+        // The whole core dump partition image (every task's stack), for esp-coredump with
+        // the ELF that crashed: where each task was, not just the one the panic interrupted.
+        size_t addr = 0, size = 0;
+        if (esp_core_dump_image_get(&addr, &size) != ESP_OK) {
+            c.print("HTTP/1.0 404 Not Found\r\n\r\n");
+        } else {
+            c.printf("HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %u\r\n\r\n", (unsigned)size);
+            static uint8_t chunk[2048];
+            for (size_t off = 0; off < size && c.connected(); off += sizeof chunk) {
+                size_t k = min(sizeof chunk, size - off);
+                if (esp_flash_read(nullptr, chunk, addr + off, k) != ESP_OK) break;
+                for (size_t w = 0; w < k && c.connected();) {
+                    size_t r = c.write(chunk + w, k - w);
+                    if (!r) delay(2);
+                    w += r;
+                }
+            }
+        }
     } else if (req.startsWith("GET /crash")) {
         // The last panic, from the core dump the framework saved to flash: task, PC, cause,
         // return address and the code addresses found on its stack (decode them with the
@@ -549,6 +575,7 @@ void link_task(void *) {
         } else {
             downSince = 0;
         }
+        node_memo_flush(false);   // here, not in poll: a flash write needs an internal-RAM stack
         if (up && !A.otaActive) debug_poll();
         if (sockStarted && !A.otaActive) {
             sio.loop();
@@ -739,7 +766,7 @@ void fetch_metrics() {
     JsonDocument filter;
     for (const char *k : {"bucket", "start", "until", "total", "prev_total", "unique", "new_devices",
                           "nodes_active", "n", "peak", "series", "unique_series", "by_vendor", "by_node",
-                          "by_type", "by_dom", "rssi", "wd"})
+                          "by_type", "by_dom", "rssi", "wd", "drones"})
         filter[k] = true;   // everything but the 7x24 heat grid
     JsonDocument doc(&psram);
     if (http_json(path, doc, &filter)) ingest_metrics(doc, range);
@@ -847,7 +874,6 @@ void poll_task(void *) {
             lastStats = now;
             fetch_stats();
         }
-        node_memo_flush(false);
         static uint32_t lastWd = 0;
         if (A.wdScope == 2 && M->sockUp && (!lastWd || now - lastWd > 300000)) {
             lastWd = now;
@@ -903,7 +929,10 @@ void net_start() {
     // Socket.IO + ArduinoOTA + scans on one task, blocking HTTP on the other, so a slow
     // /api/state never stalls the live feed.
     xTaskCreatePinnedToCore(link_task, "link", 12288, nullptr, 3, nullptr, 0);
-    xTaskCreatePinnedToCore(poll_task, "poll", 12288, nullptr, 2, nullptr, 0);
+    // Poll's stack in PSRAM: every byte of internal RAM left is room for the Wi-Fi link's
+    // receive buffers (running out of those is the esp_hosted sdio_read assert). It never
+    // writes flash, which a PSRAM stack can't.
+    xTaskCreatePinnedToCoreWithCaps(poll_task, "poll", 12288, nullptr, 2, nullptr, 0, MALLOC_CAP_SPIRAM);
 }
 
 String net_ip() { return WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String(); }

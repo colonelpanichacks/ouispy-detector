@@ -56,6 +56,7 @@ const char *DIRECT[NLAYERS] = {
     "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/%d/%ld/%ld",
 };
 constexpr size_t PLACEHOLDER_UNDER = 10000;   // Esri's "no imagery here yet" tile (satellite): never kept
+bool forceDirect = false;                     // the debug port's /direct: test the no-dashboard path at home
 uint32_t dashFailMs = 0;                      // the dashboard last failed a tile: go direct for a while
 // Where tile time goes, for /info: counts and total ms per stage.
 struct { uint32_t pack, cache, dash, net, fail, msCard, msWait, msDl, msDec; } T;
@@ -129,7 +130,7 @@ size_t download(const Want &w, uint8_t *buf, bool &keep) {
     keep = true;
     if (WiFi.status() != WL_CONNECTED) return 0;
     size_t n = 0;
-    if (net_online() && (!dashFailMs || millis() - dashFailMs > 30000)) {
+    if (!forceDirect && net_online() && (!dashFailMs || millis() - dashFailMs > 30000)) {
         n = from_dashboard(w, buf);
         dashFailMs = n ? 0 : millis();
     }
@@ -221,6 +222,8 @@ void loader(void *) {
 }
 
 }  // namespace
+
+void maptiles_direct(bool on) { forceDirect = on; }
 
 void maptiles_start() {
     mbedtls_platform_set_calloc_free(tls_calloc, free);

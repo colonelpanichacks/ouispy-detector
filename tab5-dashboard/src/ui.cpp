@@ -272,6 +272,8 @@ void dot(int x, int y, int r, uint16_t col) {
     C.fillCircle(x, y, r, col);
 }
 
+void follow_node_kind();   // Metrics / Overview follow the picked node's kind (below)
+
 uint16_t rssi_color(int rssi) {
     if (!rssi) return FAINT;
     if (rssi >= -60) return ACCENT;
@@ -772,7 +774,7 @@ void map_zoom_at(int dz, int x, int y) {
 // k levels up (its matching part is scaled up). The PPA rotates it onto the portrait
 // framebuffer and scales it, by DMA; only what falls off the screen is cropped.
 void tile_blit(const uint16_t *t, int k, int tx, int ty, double ts, int sx0, int sy0) {
-    if (!ppa_canvas()) return;
+    if (!C.getBuffer()) return;   // gfx_tile draws on the CPU when the PPA is out
     int sub = TILE >> k;
     int su = (tx & ((1 << k) - 1)) * sub, sv = (ty & ((1 << k) - 1)) * sub;
     float scale = (float)(ts / sub);   // a multiple of 1/16 (draw_map snaps it)
@@ -2291,6 +2293,7 @@ void filters_cell(int x, int y, const Node &n, bool compact) {
 void draw_overview() {
     int tw = (W - 2 * PAD - 4 * 12) / 5, th = 104, y = CY;
     char v[24], sub[32];
+    follow_node_kind();
     const bool wdm = A.ovWd;
     const double nowS = server_now();
     // What the filters keep: the whole fleet always (wardrivers only in WARDRIVE mode; a
@@ -3063,6 +3066,151 @@ void hbars(int x, int y, int w, int h, const char *title, const Bar *bars, int n
     }
 }
 
+// What a node runs, from its build stamp (the dashboard's firmware.node_kind): 2 a Sky-Spy
+// (drones), 1 a wardriver, 0 a detector.
+int node_kind(const char *id) {
+    const Node *n = node_by_id(id);
+    if (!n) return -1;
+    size_t l = strlen(n->fw);
+    if (!l) return -1;
+    char e = n->fw[l - 1];
+    return e == 'S' ? 2 : e == 'W' || e == 'Y' ? 1 : 0;
+}
+
+// Picking a node (cycling them, or anywhere else) shows what that node does: Metrics goes
+// to its detections, wardriving or drones, Overview's feed to wardriving or detections.
+// The chip still switches by hand until the next node is picked.
+void follow_node_kind() {
+    static char last[7] = "-";
+    if (!strcmp(last, A.node)) return;
+    int k = A.node[0] ? node_kind(A.node) : 0;
+    if (k < 0) return;   // its status (build stamp) isn't in yet: decide when it is
+    strlcpy(last, A.node, sizeof last);
+    A.mxMode = k;
+    A.ovWd = k == 1;
+}
+
+void fmt_num(char *out, size_t cap, float v, const char *unit) {
+    if (isnan(v)) snprintf(out, cap, "-");
+    else snprintf(out, cap, "%.0f%s", v, unit);
+}
+
+// Metrics, drones: what the Sky-Spy nodes heard (Remote ID), with each drone's telemetry.
+void draw_metrics_drones(int y) {
+    const Metrics &m = M->metrics;
+    const auto &d = m.dr;
+    int tw = (W - 2 * PAD - 4 * 12) / 5, th = 88;
+    char v[24], sub[40];
+    snprintf(v, sizeof v, "%u", (unsigned)d.unique);
+    snprintf(sub, sizeof sub, "%u report%s", (unsigned)d.total, d.total == 1 ? "" : "s");
+    kpi(PAD, y, tw, th, "DRONES", v, AMBER, sub);
+    snprintf(v, sizeof v, "%u", (unsigned)d.live);
+    kpi(PAD + (tw + 12), y, tw, th, "IN THE AIR NOW", v, d.live ? RED : ACCENT, "last minute");
+    fmt_num(v, sizeof v, d.maxAlt, " m");
+    if (isnan(d.maxHagl)) sub[0] = 0;
+    else snprintf(sub, sizeof sub, "%.0f m AGL", d.maxHagl);
+    kpi(PAD + 2 * (tw + 12), y, tw, th, "HIGHEST", v, SKY, sub[0] ? sub : nullptr);
+    fmt_num(v, sizeof v, d.maxSpd, " m/s");
+    if (isnan(d.maxSpd)) sub[0] = 0;
+    else snprintf(sub, sizeof sub, "%.0f km/h", d.maxSpd * 3.6f);
+    kpi(PAD + 3 * (tw + 12), y, tw, th, "FASTEST", v, PINK, sub[0] ? sub : nullptr);
+    if (d.total) snprintf(v, sizeof v, "%d dBm", d.rssiBest);
+    else snprintf(v, sizeof v, "-");
+    kpi(PAD + 4 * (tw + 12), y, tw, th, "BEST SIGNAL", v, rssi_color(d.rssiBest));
+
+    // Reports over time (bars) with drones heard (pink line).
+    y += th + 12;
+    int chH = 200;
+    panel(PAD, y, W - 2 * PAD, chH, "DRONE REPORTS OVER TIME");
+    font(F_SM);
+    text(W - PAD - 16, y + 10, "bars reports   line drones", FAINT, top_right);
+    if (m.valid && m.nbuckets && d.total) {
+        int n = m.nbuckets;
+        uint32_t mx = 1, mu = 1;
+        for (int i = 0; i < n; i++) mx = max(mx, (uint32_t)d.reports[i]), mu = max(mu, (uint32_t)d.uniq[i]);
+        int px = PAD + 56, pw = W - 2 * PAD - 72, py = y + 36, ph = chH - 64;
+        float bw = (float)pw / n;
+        C.drawFastHLine(px, py + ph, pw, LINE2);
+        for (int g = 1; g <= 2; g++) C.drawFastHLine(px, py + ph - ph * g / 2, pw, LINE);
+        char lab[12];
+        snprintf(lab, sizeof lab, "%u", (unsigned)mx);
+        text(px - 8, py, lab, FAINT, top_right);
+        text(px - 8, py + ph, "0", FAINT, bottom_right);
+        for (int i = 0; i < n; i++) {
+            int h = (int)((uint64_t)d.reports[i] * ph / mx);
+            if (d.reports[i] && h < 2) h = 2;
+            int bx = px + (int)(i * bw), bwi = max(1, (int)bw - 1);
+            if (h) {
+                C.fillRect(bx, py + ph - h, bwi, h, dim(AMBER, 0.7f));
+                C.drawFastHLine(bx, py + ph - h, bwi, AMBER);
+            }
+        }
+        int lx = -1, ly = 0;
+        for (int i = 0; i < n; i++) {
+            int xx = px + (int)(i * bw + bw / 2), yy = py + ph - (int)d.uniq[i] * ph / mu;
+            if (lx >= 0) C.drawLine(lx, ly, xx, yy, PINK);
+            lx = xx, ly = yy;
+        }
+        text(px, py + ph + 6, clock_str(m.start, false), FAINT);
+        text(px + pw / 2, py + ph + 6, clock_str((m.start + m.until) / 2, false), FAINT, top_center);
+        text(px + pw, py + ph + 6, "now", FAINT, top_right);
+    } else {
+        font(F_MD);
+        text(W / 2, y + chH / 2, !m.valid ? (M->sockUp ? "loading metrics" : waiting_text()) : "no drones in this range",
+             FAINT, middle_center);
+    }
+
+    // Every drone with its latest telemetry, and which nodes heard them.
+    y += chH + 12;
+    int bh = CB - y, wn = 300, wt = W - 2 * PAD - wn - 12;
+    panel(PAD, y, wt, bh, "DRONES AND TELEMETRY");
+    // Right-aligned number columns end at these x's (the + 50 / 46 / 70 below).
+    const int cName = PAD + 16, cType = PAD + 220, cStat = PAD + 400, cAlt = PAD + 500, cAgl = PAD + 560,
+              cSpd = PAD + 620, cRssi = PAD + 690, cPil = PAD + 760, cLast = PAD + wt - 16;
+    int hy = y + 36;
+    font(F_SM);
+    text(cName, hy, "DRONE", FAINT);
+    text(cType, hy, "TYPE", FAINT);
+    text(cStat, hy, "STATUS", FAINT);
+    text(cAlt + 50, hy, "ALT", FAINT, top_right);
+    text(cAgl + 50, hy, "AGL", FAINT, top_right);
+    text(cSpd + 50, hy, "M/S", FAINT, top_right);
+    text(cRssi + 46, hy, "RSSI", FAINT, top_right);
+    text(cPil + 70, hy, "PILOT", FAINT, top_right);
+    text(cLast, hy, "SEEN", FAINT, top_right);
+    int row = 30, yy = hy + 22;
+    for (int i = 0; i < d.ndr && yy + row <= y + bh - 4; i++, yy += row) {
+        const auto &r = d.dr[i];
+        if (r.live) C.fillRect(PAD + 4, yy, wt - 8, row - 2, dim(RED, 0.10f));
+        font(F_MD);
+        text(cName, yy + row / 2, fit_name(r.name, cType - cName - 12), r.live ? AMBER : TEXT, middle_left);
+        font(F_SM);
+        text(cType, yy + row / 2, fit_name(r.type[0] ? r.type : "-", cStat - cType - 12), MUTED, middle_left);
+        text(cStat, yy + row / 2, fit_name(r.status[0] ? r.status : "-", cAlt - cStat - 8),
+             !strcmp(r.status, "Emergency") ? RED : !strcmp(r.status, "Airborne") ? SKY : MUTED, middle_left);
+        char b[16];
+        font(F_MD);
+        fmt_num(b, sizeof b, r.alt, "");
+        text(cAlt + 50, yy + row / 2, b, TEXT, middle_right);
+        fmt_num(b, sizeof b, r.hagl, "");
+        text(cAgl + 50, yy + row / 2, b, TEXT, middle_right);
+        fmt_num(b, sizeof b, r.spd, "");
+        text(cSpd + 50, yy + row / 2, b, TEXT, middle_right);
+        snprintf(b, sizeof b, "%d", r.rssi);
+        text(cRssi + 46, yy + row / 2, r.rssi ? b : "-", r.rssi ? rssi_color(r.rssi) : FAINT, middle_right);
+        if (r.pilotM >= 0) snprintf(b, sizeof b, r.pilotM >= 1000 ? "%.1f km" : "%.0f m", r.pilotM >= 1000 ? r.pilotM / 1000.0 : (double)r.pilotM);
+        else snprintf(b, sizeof b, "-");
+        text(cPil + 70, yy + row / 2, b, r.pilotM >= 0 ? PINK : FAINT, middle_right);
+        font(F_SM);
+        text(cLast, yy + row / 2, r.live ? "NOW" : age_str(r.last), r.live ? RED : MUTED, middle_right);
+    }
+    if (!d.ndr) {
+        font(F_MD);
+        text(PAD + wt / 2, y + bh / 2, m.valid ? "no drones heard" : "-", FAINT, middle_center);
+    }
+    hbars(PAD + wt + 12, y, wn, bh, "BY NODE", d.node, d.nnode, true);
+}
+
 // Metrics, wardriving: what the wardriver nodes heard in the range (same filters).
 void draw_metrics_wd(int y) {
     const Metrics &m = M->metrics;
@@ -3177,6 +3325,7 @@ void draw_metrics_wd(int y) {
 }
 
 void draw_metrics() {
+    follow_node_kind();
     const Metrics &m = M->metrics;
     int x = PAD, y = CY, w;
     font(F_SM);
@@ -3192,20 +3341,25 @@ void draw_metrics() {
     x += w + 8;
     chip(x, y, A.node[0] ? node_name(A.node) : "ALL NODES", A.node[0] ? node_color565(A.node) : ACCENT, A.node[0] != 0, &w, H_NODE);
     x += w + 20;
-    chip(x, y, A.mxWd ? "WARDRIVE" : "DETECTIONS", A.mxWd ? rgb(0x22d3ee) : ACCENT, true, &w, H_MXWD);
-    if (m.valid) {
+    static const char *modes[] = {"DETECTIONS", "WARDRIVE", "DRONES"};
+    const uint16_t modeCol[] = {ACCENT, rgb(0x22d3ee), AMBER};
+    chip(x, y, modes[A.mxMode % 3], modeCol[A.mxMode % 3], true, &w, H_MXWD);
+    if (M->usbLive && !M->bridging) {   // the same corner: one or the other
+        font(F_SM);
+        text(W - PAD, y + 12, "local history since boot", AMBER, middle_right);
+    } else if (m.valid) {
         char u[48];
         snprintf(u, sizeof u, "updated %us ago", (unsigned)((millis() - m.fetchedMs) / 1000));
         font(F_SM);
         text(W - PAD, y + 12, u, FAINT, middle_right);
     }
-    if (M->usbLive && !M->bridging) {
-        font(F_SM);
-        text(W - PAD, y + 15, "local history since boot", AMBER, middle_right);
-    }
     y += 42;
-    if (A.mxWd) {
+    if (A.mxMode == 1) {
         draw_metrics_wd(y);
+        return;
+    }
+    if (A.mxMode == 2) {
+        draw_metrics_drones(y);
         return;
     }
     int tw = (W - 2 * PAD - 4 * 12) / 5, th = 88;
@@ -4527,7 +4681,7 @@ static void dispatch(const Hit &h) {
         A.metricsGen++;
         break;
     case H_NODE: cycle_node(); break;
-    case H_MXWD: A.mxWd = !A.mxWd; break;
+    case H_MXWD: A.mxMode = (A.mxMode + 1) % 3; break;
     case H_OSK: {
         size_t n = strlen(A.search);
         if (h.arg == 8) { if (n) A.search[n - 1] = 0; }
