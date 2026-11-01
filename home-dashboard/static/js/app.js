@@ -338,7 +338,7 @@ function renderNodes() {
 const MAP_MAX_ZOOM = 22;
 const map = L.map("map", { zoomControl: false, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
 // What marks.js (its own file, outside this closure) needs from here.
-window.OUISPY = { map, api, esc, $ };
+window.OUISPY = { map, api, esc, $, nodeName, showTab: (t) => showTab(t) };
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 // Map toolbar on the map itself (top right): layer, lines, traffic, full

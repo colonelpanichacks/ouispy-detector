@@ -35,6 +35,19 @@ def list_serial_ports():
     return out
 
 
+def port_used_by_other(device):
+    """True when another program (esptool flashing, a serial console) has this port open.
+    A probe of an unknown board steps aside for it rather than sharing the line."""
+    import os
+    import subprocess
+    try:
+        out = subprocess.run(["lsof", "-t", device], capture_output=True, text=True, timeout=2).stdout
+    except Exception:
+        return False
+    me = str(os.getpid())
+    return any(pid and pid != me for pid in out.split())
+
+
 class Source(threading.Thread):
     kind = "source"
 
@@ -110,9 +123,16 @@ class SerialSource(Source):
                         self.cur_sn = p["serial"]
                         return p["device"]
                 return None
+            # No home serial known yet: the pinned path, unless a board we must never open
+            # (the Tab5 resets when its port opens) is sitting on it now.
+            ignore = set(self.get_ignore() or [])
+            here = next((p for p in list_serial_ports() if p["device"] == self.port_cfg), None)
+            if here and here["serial"] in ignore:
+                return None
             return self.port_cfg
         now = time.time()
-        cands = [p for p in list_serial_ports() if p["espressif"]
+        ignore = set(self.get_ignore() or [])
+        cands = [p for p in list_serial_ports() if p["espressif"] and p["serial"] not in ignore
                  and now - self.skip.get(p["serial"], 0) > 60]
         if not cands:
             return None
@@ -165,7 +185,7 @@ class SerialSource(Source):
                 # USB-CDC sending again if an earlier host left it stalled.
                 self.ser.write(b"\n")
                 last_rx = time.time()
-                opened_at = time.time()
+                opened_at = yield_at = time.time()
                 proven = self.port_cfg != "auto" and not self.fallback   # the home's own port is trusted
                 prefCheck = time.time()
                 self.set_state(connected=True, port=port,
@@ -176,6 +196,14 @@ class SerialSource(Source):
                     # OUI-SPY node (a TLM line). Other Espressif boards on
                     # USB (other projects!) are released within 12 s, never
                     # held, and skipped for a while.
+                    # ...and steps aside at once for another program that opens it (esptool).
+                    if not proven and time.time() - yield_at > 1:
+                        yield_at = time.time()
+                        if port_used_by_other(port):
+                            self.set_state(connected=False, detail=f"{port} is in use by another program, left alone")
+                            if self.cur_sn:
+                                self.skip[self.cur_sn] = time.time()
+                            break
                     if not proven and time.time() - opened_at > 12:
                         if self.cur_sn:
                             self.skip[self.cur_sn] = time.time()
@@ -257,7 +285,7 @@ class WardriveUsbSource(Source):
         self.get_ignore = get_ignore
         self.wardrive = wardrive
         self.readers = {}             # usb serial -> {"port", "id", "ser"}
-        self.not_wd = {}              # usb serial -> when it proved not to be a wardriver
+        self.not_wd = {}              # usb serial -> when it proved not to be a wardriver (until unplugged)
         self.rlock = threading.Lock()
 
     def run(self):
@@ -265,11 +293,18 @@ class WardriveUsbSource(Source):
             return
         while not self.stop_evt.is_set():
             ignore = set(self.get_ignore() or []) | set(self.busy() or [])
-            now = time.time()
-            for p in list_serial_ports():
+            ports = list_serial_ports()
+            # A board that proved not to be a wardriver is left alone until it is unplugged
+            # (or reset into a new build: it re-enumerates), never reopened on a timer: that
+            # cut into flashing and console sessions on boards being set up.
+            present = {p["serial"] for p in ports}
+            for sn in [s for s in self.not_wd if s not in present]:
+                del self.not_wd[sn]
+            for p in ports:
                 sn = p["serial"]
-                if (not p["espressif"] or not sn or sn in ignore or sn in self.readers
-                        or now - self.not_wd.get(sn, 0) < 600):
+                if (not p["espressif"] or not sn or sn in ignore or sn in self.readers or sn in self.not_wd):
+                    continue
+                if port_used_by_other(p["device"]):   # being flashed or on someone's console
                     continue
                 with self.rlock:
                     self.readers[sn] = {"port": p["device"], "id": None, "ser": None}
@@ -282,6 +317,7 @@ class WardriveUsbSource(Source):
     def _read(self, sn, port):
         import json as _json
         opened = time.time()
+        yield_at = opened
         proven = False
         try:
             ser = serial.Serial(port, 115200, timeout=1)
@@ -293,6 +329,10 @@ class WardriveUsbSource(Source):
                 if not proven and time.time() - opened > 12:
                     self.not_wd[sn] = time.time()
                     break
+                if not proven and time.time() - yield_at > 1:
+                    yield_at = time.time()
+                    if port_used_by_other(port):   # someone else wants it: hand it over, look later
+                        break
                 if sn in set(self.busy() or []):   # the home source wants it (fallback)
                     break
                 chunk = ser.read(ser.in_waiting or 1)

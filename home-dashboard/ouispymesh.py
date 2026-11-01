@@ -332,7 +332,9 @@ def _link_summary():
 mesh = mesh_mod.Mesh(lambda: settings()["meshtastic"],
                      lambda nid: (store.nodes_meta().get(nid) or {}).get("alias") or nid, lambda: _our_ports(),
                      summary=_link_summary, feed_line=lambda line, src: fleet.feed_line(line, src),
-                     feed_det=lambda d, src: fleet.feed_detection(d, src))
+                     feed_det=lambda d, src: fleet.feed_detection(d, src),
+                     radio_serial=(lambda: store.get_setting("meshtastic_usb_serial", ""),
+                                   lambda sn: store.set_setting("meshtastic_usb_serial", sn)))
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread
@@ -1386,6 +1388,53 @@ def api_rns_test():
 def api_meshtastic():
     """The Meshtastic connector: radio, channel, messages sent / failed / waiting, what it heard."""
     return jsonify({**mesh.snapshot(), "config": settings()["meshtastic"]})
+
+
+@app.route("/api/meshstatus")
+def api_meshstatus():
+    """Both meshes at a glance (the Mesh status panel and the Tab5): the ESP-NOW fleet (channel,
+    rate, encryption, each node: up or not, last heard, signal, who it hears) and the Meshtastic
+    link (radio, channel, traffic, the field Tab5's radio: last heard, signal, Wi-Fi or LoRa)."""
+    snap = fleet.snapshot(lists=False)
+    nodes, home = snap.get("nodes", []), snap.get("home") or {}
+    now = time.time()
+    meta = store.nodes_meta()
+    rows = []
+    for n in nodes:
+        c = n.get("cfg") or {}
+        rows.append({"id": n["id"], "name": n.get("alias") or (meta.get(n["id"]) or {}).get("alias") or n["id"],
+                     "home": bool(n.get("is_home")), "online": bool(n.get("online")),
+                     "age": n.get("age"), "rssi": n.get("rssi"), "fw": c.get("fw"),
+                     "key": c.get("kfp") == home_kfp() if c.get("kfp") else None, "locked": c.get("locked"),
+                     "peers": c.get("peers"),
+                     "hears": [{"id": x[0], "rssi": x[1]} for x in (c.get("nbr") or []) if isinstance(x, list) and x]})
+    m = mesh.snapshot()
+    cfg = settings()["meshtastic"]
+    link = m.get("link") or {}
+    with src_lock:
+        srcs = {k: v.status() for k, v in sources.items()}
+    return jsonify({
+        "now": now,
+        "espnow": {"ch": home.get("ch"), "rate": home.get("rate"), "enc": bool(home.get("enc")),
+                   "auth_fail": home.get("eauth") or 0, "replays": home.get("ereplay") or 0,
+                   "lost": home.get("dlost") or 0, "home_up": home.get("up"), "home_age": home.get("age"),
+                   "online": sum(1 for r in rows if r["online"]), "total": len(rows), "nodes": rows},
+        "meshtastic": {"enabled": bool(cfg.get("enabled")), "state": m.get("state"), "error": m.get("error"),
+                       "radio": m.get("radio"), "channel": m.get("channel"), "port": mesh.iface_port,
+                       "sent": m.get("sent"), "failed": m.get("failed"), "queued": m.get("queued"),
+                       "last_sent": m.get("last"), "heard": m.get("heard"),
+                       "link": {**link, "age": now - link["ts"]} if link.get("ts") else None},
+        "usb": {k: {"connected": v.get("connected"), "detail": v.get("detail"), "port": v.get("port")}
+                for k, v in srcs.items()},
+    })
+
+
+def home_kfp():
+    """The fleet key fingerprint the home reports: a node showing another one can't talk to us."""
+    for n in fleet.snapshot(lists=False).get("nodes", []):
+        if n.get("is_home"):
+            return (n.get("cfg") or {}).get("kfp")
+    return None
 
 
 @app.route("/api/meshtastic/test", methods=["POST"])

@@ -18,6 +18,7 @@
         <span class="mode-badge" id="modeBadge">LIVE</span>
     </div>
     <div class="sources" id="sources"></div>
+    <div class="mesh-pills" id="meshPills"></div>
     <div class="top-actions">
         <button class="chip-btn" id="soundBtn" title="Audible alert on detection">
             <svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path class="wave" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
@@ -38,6 +39,7 @@
             <h3>Mesh Fleet</h3>
             <span class="count" id="fleetCount">0 / 0</span>
         </div>
+        <div class="ms" id="meshStatus"></div>
         <div class="sec" data-sec="homestats">
             <button class="sec-head" type="button"><span>Home node</span><svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
             <div class="sec-body"><div class="home-stats" id="homeStats"></div></div>
@@ -766,5 +768,6 @@
 <script src="{{ url_for('static', filename='vendor/qrcode.min.js') }}"></script>
 <script src="{{ asset('js/app.js') }}"></script>
 <script src="{{ asset('js/marks.js') }}"></script>
+<script src="{{ asset('js/meshstatus.js') }}"></script>
 </body>
 </html>

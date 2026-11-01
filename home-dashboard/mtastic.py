@@ -60,13 +60,17 @@ def _clip(text):
 
 
 class Mesh:
-    def __init__(self, get_settings, node_name, busy_ports, summary=None, feed_line=None, feed_det=None):
+    def __init__(self, get_settings, node_name, busy_ports, summary=None, feed_line=None, feed_det=None,
+                 radio_serial=None):
         self.get_settings = get_settings
         self.node_name = node_name
         self.busy_ports = busy_ports      # () -> serial ports our own nodes are on
         self.summary = summary            # () -> "OSM1 S ..." for a Tab5 link
         self.feed_line = feed_line        # (line, source): a car's position into the fleet
         self.feed_det = feed_det          # (detection dict, source): a car's detection
+        # (get, set) of the radio's USB serial number: macOS renames a USB port when the radio
+        # is plugged back in (or another board goes in first), so it is found by this instead.
+        self.radio_serial = radio_serial
         self.link_heard = 0
         self.link_wifi = False     # its last hello said it's on Wi-Fi
         self.summary_at = 0
@@ -161,6 +165,7 @@ class Mesh:
             from meshtastic.tcp_interface import TCPInterface
             iface = TCPInterface(hostname=port[4:])
         else:
+            port = self._find_port(port)
             if port in self.busy_ports():
                 raise RuntimeError(f"{port} is one of our own nodes, not a Meshtastic radio")
             from meshtastic.serial_interface import SerialInterface
@@ -169,9 +174,43 @@ class Mesh:
         pub.subscribe(self._on_text, "meshtastic.receive.text")
         pub.subscribe(self._on_lost, "meshtastic.connection.lost")
         self.iface, self.iface_port = iface, port
+        self._remember_serial(port)
         me = iface.getMyNodeInfo() or {}
         user = me.get("user") or {}
         self._set(radio=f"{user.get('longName') or '?'} ({user.get('id') or '?'})", error="")
+
+    def _find_port(self, port):
+        """The port the radio is on now: the one set in Settings, unless it is gone or another
+        board took it, then wherever the radio's USB serial number turned up."""
+        if not self.radio_serial:
+            return port
+        want = self.radio_serial[0]()
+        if not want:
+            return port
+        try:
+            from serial.tools import list_ports
+            ports = list(list_ports.comports())
+        except Exception:
+            return port
+        here = next((p for p in ports if p.device == port), None)
+        if here and (here.serial_number or "") == want:
+            return port
+        moved = next((p.device for p in ports if (p.serial_number or "") == want), None)
+        if moved:
+            self._set(port_now=moved)
+            return moved
+        raise RuntimeError(f"the Meshtastic radio (USB serial {want[-6:]}) isn't plugged in")
+
+    def _remember_serial(self, port):
+        if not self.radio_serial:
+            return
+        try:
+            from serial.tools import list_ports
+            sn = next((p.serial_number for p in list_ports.comports() if p.device == port), None)
+        except Exception:
+            sn = None
+        if sn and sn != self.radio_serial[0]():
+            self.radio_serial[1](sn)
 
     def _channel_ok(self, c):
         """(index, name) of the private channel to broadcast on; raises when it isn't private."""
@@ -256,8 +295,7 @@ class Mesh:
             if not self._bridge_in(text[6:]):
                 return
             self.link_heard, self.link_wifi = time.time(), False
-            with self.lock:
-                self.status["link"] = {"from": frm, "ts": self.link_heard}
+            self._link_status(frm, None)
             return
         parts = text.split(" ", 6)
         try:
@@ -283,8 +321,15 @@ class Mesh:
         except (ValueError, IndexError):
             return
         self.link_heard = time.time()
+        self._link_status(frm, parts[2].upper() if len(parts) > 2 else None)
+
+    def _link_status(self, frm, node):
+        rx = getattr(self, "_rx", None) or {}
         with self.lock:
-            self.status["link"] = {"from": frm, "ts": self.link_heard}
+            prev = self.status.get("link") or {}
+            self.status["link"] = {"from": frm, "ts": self.link_heard, "wifi": self.link_wifi,
+                                   "node": node or prev.get("node"), "rssi": rx.get("rxRssi"), "snr": rx.get("rxSnr"),
+                                   "msgs": (prev.get("msgs") or 0) + 1}
 
     def _on_text(self, packet, interface=None):
         try:
@@ -296,6 +341,8 @@ class Mesh:
             if not text.strip("\x00"):
                 return
             if text.startswith(("OSM1 ", "OSM2 ")):
+                # How well the field link is getting through: signal and SNR of its last message.
+                self._rx = {k: packet.get(k) for k in ("rxRssi", "rxSnr", "hopStart", "hopLimit")}
                 self._on_link(frm, text)
                 return
             who = ((self.iface.nodes or {}).get(frm) or {}).get("user", {}).get("longName") if self.iface else None
