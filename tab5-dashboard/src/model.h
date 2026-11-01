@@ -133,6 +133,26 @@ struct Drone {
     float ptrack[DRONE_TRACK][2];   // where the pilot stood/walked
 };
 
+// A drone's past flights (the dashboard's /api/drones/<mac>/flights, compact form), fetched
+// when its FLIGHTS list opens and kept on the card for when there's no dashboard.
+constexpr int FL_MAX = 5, FL_PTS = 48, FL_PPTS = 16;
+struct Flight {
+    double start, end;                // server time
+    float maxH, maxSpd;               // maxH: AGL when agl, else MSL; maxSpd < 0 unknown
+    bool agl, hasPilot;
+    int32_t dist, pilotMax;           // m; pilotMax -1 unknown
+    uint16_t reports;
+    float pilot[2];                   // where the pilot stood at the start
+    uint8_t nt, np;
+    float tr[FL_PTS][2], pt[FL_PPTS][2];   // [lat, lon]
+};
+struct DroneFlights {
+    char mac[18];
+    bool loading, valid, cached;      // cached: from the card, not the dashboard
+    int n;                            // newest first
+    Flight f[FL_MAX];
+};
+
 // One device's full record, fetched when its detail page opens.
 struct DevDetail {
     char mac[18];
@@ -252,6 +272,7 @@ struct Model {
 
     DevDetail detail;
     WdInfo wdInfo;
+    DroneFlights flights;
 
     // alerts
     uint32_t alertsUnacked;
@@ -303,6 +324,7 @@ void ingest_drone(JsonObjectConst d);          // dashboard "drone" event shape
 void ingest_tri(JsonObjectConst f);            // dashboard "tri" event: a triangulated fix
 void ingest_rid(JsonObjectConst r, const char *homeId);   // a node's raw "RID {...}" line (USB mode)
 void ingest_detail(JsonDocument &doc);
+void ingest_flights(JsonDocument &doc);
 void ingest_names(JsonObjectConst aliases, JsonObjectConst names, JsonObjectConst groupOf);
 int live_drones();
 void prune_targets();

@@ -7,6 +7,7 @@ int net_rssi();
 String net_target();            // "host:port" as resolved
 bool net_ota_enabled();
 bool net_online();
+void net_want_flights(const char *mac);   // (re)load a drone's past flights into M->flights
 bool net_post_now(const char *path, const char *body);   // POST and wait (poll task only): true on 200                       // talking to the dashboard (not USB-only)
 void net_bulk_begin();                   // around any big HTTP download (see net.cpp)
 void net_bulk_end();

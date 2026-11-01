@@ -772,7 +772,23 @@ def api_drone_flights(mac):
         days = min(365.0, float(request.args.get("days", 30)))
     except ValueError:
         days = 30.0
-    return jsonify({"mac": mac.upper(), "flights": drones.flights(mac, days=days)})
+    if request.args.get("compact") != "1":
+        return jsonify({"mac": mac.upper(), "flights": drones.flights(mac, days=days)})
+    # The Tab5's form: a few flights, short tracks of [lat, lon], rounded (~1 m): a few KB.
+    try:
+        limit = max(1, min(10, int(request.args.get("limit", 5))))
+        pts = max(8, min(120, int(request.args.get("pts", 48))))
+    except ValueError:
+        limit, pts = 5, 48
+    r5 = lambda p: [round(p[0], 5), round(p[1], 5)] if p else None
+    out = []
+    for f in drones.flights(mac, days=days, limit=limit, max_pts=pts):
+        out.append({"start": int(f["start"]), "end": int(f["end"]), "reports": f["reports"],
+                    "max_hagl": f["max_hagl"] if f["max_hagl"] is not None else f["max_alt"],
+                    "agl": f["max_hagl"] is not None, "max_spd": f["max_spd"], "dist_m": f["dist_m"],
+                    "pilot_max_m": f["pilot_max_m"], "pilot": r5(f["pilot"]),
+                    "track": [r5(p[1:3]) for p in f["track"]], "ptrack": [r5(p[1:3]) for p in f["ptrack"]][:pts // 3]})
+    return jsonify({"mac": mac.upper(), "flights": out})
 
 
 @app.route("/api/drones/<mac>", methods=["POST"])

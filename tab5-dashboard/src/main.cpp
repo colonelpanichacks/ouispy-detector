@@ -212,8 +212,12 @@ void serial_poll() {
         }
         if (serialLine == "shot") ui_screenshot(Serial);
         else if (serialLine.startsWith("key ")) ui_key(strtol(serialLine.c_str() + 4, nullptr, 16), 0);   // e.g. "key 51" = Down
+        else if (serialLine.startsWith("tap ")) {   // "tap 640 360": a finger down and up there (screen pixels)
+            int x = 0, y = 0;
+            if (sscanf(serialLine.c_str() + 4, "%d %d", &x, &y) == 2) ui_tap(x, y);
+        }
         else if (serialLine.length() && !settings_serial_line(serialLine))
-            Serial.println("commands: show | shot | key <hid hex> | set <ssid|pass|host|port|token|otapass|tz|hostname|flip|bright|sound> <value> | reboot | clear");
+            Serial.println("commands: show | shot | key <hid hex> | tap <x> <y> | set <ssid|pass|host|port|token|otapass|tz|hostname|flip|bright|sound> <value> | reboot | clear");
         serialLine = "";
     }
 }

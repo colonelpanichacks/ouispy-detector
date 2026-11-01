@@ -80,7 +80,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND,
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DRCARDX, H_LOCKDRONE, H_LOCKPILOT, H_LOCKNODE, H_UNLOCK, H_DRTRACK, H_DRFLIGHTS, H_DRDETAILS, H_FLOPEN, H_FLPICK, H_FLCLEAR, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND,
     H_MKPIN, H_MKAREA, H_MKOPEN, H_MKHUE, H_MKICON, H_MKNAME, H_MKSAVE, H_MKDEL, H_MKCLOSE, H_MKUNDO, H_MKDONE, H_MKCANCEL,
     H_WDNAME, H_WDNODE, H_WDADD
 };
@@ -615,6 +615,51 @@ uint16_t drone_color(const Drone &d) {
 
 // Drones, live first then newest.
 int droneIdx[MAX_DRONES], nDrone = 0;
+
+const Drone *drone_by_mac(const char *mac) {
+    for (int i = 0; mac[0] && i < M->ndrones; i++)
+        if (!strcasecmp(M->drones[i].mac, mac)) return &M->drones[i];
+    return nullptr;
+}
+
+// Each drone's track can be hidden on its own (its map card: TRACK), like a GPS node's.
+char trackOff[16][18];
+int nTrackOff = 0;
+bool drone_track_on(const char *mac) {
+    for (int i = 0; i < nTrackOff; i++)
+        if (!strcasecmp(trackOff[i], mac)) return false;
+    return true;
+}
+void drone_track_set(const char *mac, bool on) {
+    for (int i = 0; i < nTrackOff; i++)
+        if (!strcasecmp(trackOff[i], mac)) {
+            if (on) memmove(trackOff[i], trackOff[i + 1], sizeof trackOff[0] * (--nTrackOff - i));
+            return;
+        }
+    if (!on) {
+        if (nTrackOff == 16) memmove(trackOff[0], trackOff[1], sizeof trackOff[0] * --nTrackOff);
+        strlcpy(trackOff[nTrackOff++], mac, sizeof trackOff[0]);
+    }
+}
+
+// "Nov 01 14:05" (local), for past flights.
+const char *date_str(double ts) {
+    static char b[4][20];
+    static int k = 0;
+    char *o = b[k = (k + 1) & 3];
+    if (!ts || !M->clockValid) return "--";
+    time_t t = (time_t)ts;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(o, 20, "%b %d %H:%M", &tm);
+    return o;
+}
+
+// Past flights each in their own colour: the drone's first, then pink, amber, lime, violet.
+uint16_t flight_color(const Drone *d, int i) {
+    static const uint32_t ALT[4] = {0xff2bd6, 0xffb020, 0x39ff88, 0xa78bfa};
+    return i == 0 && d ? drone_color(*d) : rgb(ALT[(i + 3) % 4]);
+}
 void build_drones() {
     nDrone = 0;
     for (int i = 0; i < M->ndrones; i++) droneIdx[nDrone++] = i;
@@ -768,7 +813,7 @@ void map_zoom_at(int dz, int x, int y) {
     ZA.on = true, ZA.x = x, ZA.y = y;
     screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
     A.mapZoom = nz;
-    A.mapFollow = false, A.gpsFollow = false;
+    A.lockWhat = 0, A.gpsFollow = false;
     maptiles_clear_requests();
 }
 
@@ -881,12 +926,55 @@ void mark_icon(int x, int y, int s, int icon, uint16_t c) {
 }
 
 // + PIN / + AREA on the map, or the bar for the one in progress.
+// Bottom centre of the map: what it is locked on (tap to let go) and the past flight drawn.
+void draw_map_banners() {
+    if (A.markMode || A.markOpen) return;
+    int y = MY + MH - 64, bh = 48;
+    auto banner = [&](int &yy, const char *t, uint16_t c, int act) {
+        font(F_MD);
+        int bw = C.textWidth(t) + 40 + 110, x = MX + (MW - bw) / 2;
+        fast_round(x, yy, bw, bh, 10, dim(BG, 0.94f));
+        glow_rect(x, yy, bw, bh, 10, c);
+        hit(x, yy, bw, bh, act);
+        text(x + 18, yy + bh / 2, t, c, middle_left);
+        font(F_SM);
+        text(x + bw - 18, yy + bh / 2, "TAP TO CLEAR", MUTED, middle_right);
+        yy -= bh + 10;
+    };
+    char b[80];
+    if (A.flShow >= 0 && M->flights.valid && A.flShow < M->flights.n) {
+        const Flight &f = M->flights.f[A.flShow];
+        const Drone *d = drone_by_mac(M->flights.mac);
+        snprintf(b, sizeof b, "FLIGHT  %s  %s   %s", d ? fit_name(drone_name(*d), 200) : M->flights.mac, date_str(f.start),
+                 dur_str((uint32_t)max(60.0, f.end - f.start)));
+        banner(y, b, flight_color(d, A.flShow), H_FLCLEAR);
+    }
+    if (A.lockWhat) {
+        const char *who = A.lockId;
+        if (A.lockWhat <= 2) { if (const Drone *d = drone_by_mac(A.lockId)) who = drone_name(*d); }
+        else if (const Node *n = node_by_id(A.lockId)) who = n->alias[0] ? n->alias : n->id;
+        snprintf(b, sizeof b, "LOCKED ON %s%s", A.lockWhat == 2 ? "PILOT OF " : "", fit_name(who, 260));
+        banner(y, b, A.lockWhat == 2 ? AMBER : PINK, H_UNLOCK);
+    }
+}
+
 void draw_mark_tools() {
     if (A.markOpen) return;
     int x = MX + PAD, y = MY + MH - 64, w;
-    if (!A.markMode) {
-        chip(x, y, "+ PIN", rgb(0x22d3ee), false, &w, H_MKPIN);
-        chip(x + w + 10, y, "+ AREA", rgb(0xff2bd6), false, nullptr, H_MKAREA);
+    if (!A.markMode) {   // solid like the controls on the right: a bare chip vanishes over satellite
+        int bx = x, by = MY + MH - 64;
+        auto btn = [&](const char *t, uint16_t c, int act) {
+            font(F_MD);
+            int bw = C.textWidth(t) + 36, bh = 52;
+            hit(bx - 6, by - 4, bw + 12, bh + 8, act);
+            C.fillRoundRect(bx, by, bw, bh, 10, dim(PANEL, 0.95f));
+            C.drawRoundRect(bx, by, bw, bh, 10, dim(c, 0.7f));
+            glow(bx + bw / 2, by + bh / 2, t, c, middle_center);
+            bx += bw + 10;
+        };
+        btn("+ PIN", rgb(0x22d3ee), H_MKPIN);
+        btn("+ AREA", rgb(0xff2bd6), H_MKAREA);
+        (void)w;
         return;
     }
     int bw = A.markMode == 1 ? 560 : 760, bh = 56;
@@ -1003,11 +1091,15 @@ void draw_map() {
         GpsFix gf = gps_fix();
         if (gf.valid) A.mapLat = gf.lat, A.mapLon = gf.lon;
     }
-    if (A.mapFollow) {
-        for (int k = 0; k < nDrone; k++) {
-            const Drone &d = M->drones[droneIdx[k]];
-            if (drone_live(d) && d.hasPos) { A.mapLat = d.lat, A.mapLon = d.lon; break; }
+    // Locked on (a card's LOCK): that drone, its pilot or that node stays centred.
+    if (A.lockWhat == 1 || A.lockWhat == 2) {
+        if (const Drone *d = drone_by_mac(A.lockId)) {
+            if (A.lockWhat == 1 && d->hasPos) A.mapLat = d->lat, A.mapLon = d->lon;
+            else if (A.lockWhat == 2 && d->hasPilot) A.mapLat = d->plat, A.mapLon = d->plon;
         }
+    } else if (A.lockWhat == 3) {
+        const Node *n = node_by_id(A.lockId);
+        if (n && n->hasPos) A.mapLat = n->lat, A.mapLon = n->lon;
     }
     // Ease the displayed zoom toward the target: ~150 ms per level, frame-rate independent.
     static uint32_t lastMs = 0;
@@ -1231,11 +1323,12 @@ void draw_map() {
         if (!live && now - d.last > 1800) continue;
         uint16_t c = drone_color(d);
         // Pilot track: dashed, in the drone's colour (mesh-mapper's pilot path).
-        if (A.pilotOn && A.droneTracks)
+        bool tracks = A.droneTracks && drone_track_on(d.mac);
+        if (A.pilotOn && tracks)
             for (int p = 1; p < d.nptrack; p++)
                 dashed(sx(d.ptrack[p - 1][1]), sy(d.ptrack[p - 1][0]), sx(d.ptrack[p][1]), sy(d.ptrack[p][0]),
                        dim(c, live ? 0.75f : 0.35f));
-        for (int p = 1; A.droneTracks && p < d.ntrack; p++) {
+        for (int p = 1; tracks && p < d.ntrack; p++) {
             int x0 = sx(d.track[p - 1][1]), y0 = sy(d.track[p - 1][0]), x1 = sx(d.track[p][1]), y1 = sy(d.track[p][0]);
             uint16_t tc = dim(c, (0.35f + 0.65f * p / d.ntrack) * (live ? 1.0f : 0.45f));
             C.drawLine(x0, y0, x1, y1, tc);
@@ -1265,6 +1358,36 @@ void draw_map() {
             font(F_SM);
             if (b[0]) map_text(x + 26, y + 11, b, TEXT);
             hit(x - 24, y - 24, 48, 48, H_DRONE, k);
+        }
+    }
+    // A past flight (the drone's FLIGHTS list): its track solid, the pilot's dashed, takeoff
+    // (ring), landing (diamond) and where the pilot stood.
+    if (A.flShow >= 0 && M->flights.valid && A.flShow < M->flights.n) {
+        const Flight &f = M->flights.f[A.flShow];
+        uint16_t fc = flight_color(drone_by_mac(M->flights.mac), A.flShow);
+        for (int p = 1; p < f.np; p++)
+            dashed(sx(f.pt[p - 1][1]), sy(f.pt[p - 1][0]), sx(f.pt[p][1]), sy(f.pt[p][0]), dim(fc, 0.85f));
+        for (int p = 1; p < f.nt; p++)
+            thick_line(sx(f.tr[p - 1][1]), sy(f.tr[p - 1][0]), sx(f.tr[p][1]), sy(f.tr[p][0]), fc);
+        if (f.hasPilot && f.nt) dashed(sx(f.pilot[1]), sy(f.pilot[0]), sx(f.tr[0][1]), sy(f.tr[0][0]), dim(fc, 0.5f));
+        font(F_SM);
+        if (f.nt) {
+            int x = sx(f.tr[0][1]), y = sy(f.tr[0][0]);
+            C.fillCircle(x, y, 9, BG), C.drawCircle(x, y, 9, fc), C.drawCircle(x, y, 8, fc);
+            map_text(x + 14, y - 10, clock_str(f.start, false), fc);
+            if (f.nt > 1) {
+                int lx = sx(f.tr[f.nt - 1][1]), ly = sy(f.tr[f.nt - 1][0]);
+                C.fillTriangle(lx, ly - 10, lx + 10, ly, lx - 10, ly, fc);
+                C.fillTriangle(lx, ly + 10, lx + 10, ly, lx - 10, ly, fc);
+                C.fillTriangle(lx, ly - 6, lx + 6, ly, lx - 6, ly, BG);
+                C.fillTriangle(lx, ly + 6, lx + 6, ly, lx - 6, ly, BG);
+                map_text(lx + 14, ly + 10, clock_str(f.end, false), fc);
+            }
+        }
+        if (f.hasPilot) {
+            int px = sx(f.pilot[1]), py = sy(f.pilot[0]);
+            pilot_glyph(px, py, fc);
+            map_text(px + 18, py, "PILOT", fc);
         }
     }
     // Wardriven devices: one dot each where it was loudest, coloured like the web map
@@ -1365,9 +1488,9 @@ void draw_map() {
         const Node *pn = node_by_id(A.mapPop);
         if (!pn || !pn->hasPos) A.mapPop[0] = 0;
         else {
-            int px = sx(pn->lon), py = sy(pn->lat), cw = 380, chh = 236;
-            int cx = constrain(px + 30, MX + 8, MX + MW - cw - 8), cy = constrain(py - chh / 2, MY + 84, MY + MH - chh - 8);
-            if (cx < px + 30 && px + 30 + cw > MX + MW - 8) cx = constrain(px - 30 - cw, MX + 8, MX + MW - cw - 8);
+            int px = sx(pn->lon), py = sy(pn->lat), cw = 470, chh = 236;
+            int cx = constrain(px + 30, MX + 8, MX + MW - cw - 152), cy = constrain(py - chh / 2, MY + 84, MY + MH - chh - 8);
+            if (cx < px + 30 && px + 30 + cw > MX + MW - 152) cx = constrain(px - 30 - cw, MX + 8, MX + MW - cw - 152);
             uint16_t nc = node_color565(pn->id);
             fast_round(cx, cy, cw, chh, 10, dim(BG, 0.95f));
             glow_rect(cx, cy, cw, chh, 10, nc);
@@ -1397,6 +1520,58 @@ void draw_map() {
                 bool tk = node_track_on(pn->id);
                 chip(bx, cy + 176, tk ? "TRACK ON" : "TRACK OFF", rgb(0x39ff88), tk, &w2, H_POPTRACK);
             }
+            bx += w2 + 10;
+            bool lk = A.lockWhat == 3 && !strcmp(A.lockId, pn->id);
+            chip(bx, cy + 176, lk ? "LOCKED" : "LOCK", PINK, lk, &w2, H_LOCKNODE);
+        }
+    }
+    // The tapped drone's card: what it is, how high and fast, its pilot; LOCK on the drone
+    // or the pilot (the map keeps it centred), its track on/off, past FLIGHTS, DETAILS.
+    if (A.mapDrone[0]) {
+        const Drone *dp = drone_by_mac(A.mapDrone);
+        if (!dp || (!dp->hasPos && !dp->hasPilot)) A.mapDrone[0] = 0;
+        else {
+            const Drone &d = *dp;
+            bool live = drone_live(d);
+            uint16_t c = drone_color(d);
+            int px = d.hasPos ? sx(d.lon) : sx(d.plon), py = d.hasPos ? sy(d.lat) : sy(d.plat), cw = 470, chh = 262;
+            int cx = constrain(px + 34, MX + 8, MX + MW - cw - 152), cy = constrain(py - chh / 2, MY + 84, MY + MH - chh - 8);
+            if (cx < px + 34 && px + 34 + cw > MX + MW - 152) cx = constrain(px - 34 - cw, MX + 8, MX + MW - cw - 152);
+            fast_round(cx, cy, cw, chh, 10, dim(BG, 0.95f));
+            glow_rect(cx, cy, cw, chh, 10, c);
+            hit(cx, cy, cw, chh, H_NONE);
+            font(F_MD);
+            text(cx + 16, cy + 22, fit_name(drone_name(d), cw - 80), c, middle_left);
+            chip(cx + cw - 52, cy + 8, "X", MUTED, false, nullptr, H_DRCARDX);
+            font(F_SM);
+            char l[96];
+            snprintf(l, sizeof l, "%s   %s", d.ua[0] ? d.ua : "drone", live ? (d.status[0] ? d.status : "LIVE") : "not heard lately");
+            text(cx + 16, cy + 50, fit(l, cw - 32), live ? ACCENT : MUTED, middle_left);
+            char h[24], s[24];
+            if (d.hasHagl) snprintf(h, sizeof h, "%d m AGL", (int)d.hagl);
+            else if (d.hasAlt) snprintf(h, sizeof h, "%d m MSL", (int)d.alt);
+            else strcpy(h, "- m");
+            if (d.hasSpd) snprintf(s, sizeof s, "%.1f m/s", d.spd); else strcpy(s, "- m/s");
+            snprintf(l, sizeof l, "%s   %s   %d dBm   seen %s ago", h, s, d.rssi, age_str(d.last));
+            text(cx + 16, cy + 76, fit(l, cw - 32), TEXT, middle_left);
+            if (d.hasPilot && d.pilotDist >= 0) snprintf(l, sizeof l, "pilot %ld m from the drone", (long)d.pilotDist);
+            else snprintf(l, sizeof l, d.hasPilot ? "pilot located" : "pilot position not sent");
+            text(cx + 16, cy + 100, l, d.hasPilot ? AMBER : FAINT, middle_left);
+            if (d.hasPos) snprintf(l, sizeof l, "%.6f, %.6f", d.lat, d.lon);
+            else snprintf(l, sizeof l, "pilot %.6f, %.6f", d.plat, d.plon);
+            text(cx + 16, cy + 124, l, MUTED, middle_left);
+            int bx = cx + 16, w2;
+            bool ld = A.lockWhat == 1 && !strcasecmp(A.lockId, d.mac), lp = A.lockWhat == 2 && !strcasecmp(A.lockId, d.mac);
+            chip(bx, cy + 154, ld ? "LOCKED ON DRONE" : "LOCK DRONE", PINK, ld, &w2, d.hasPos ? H_LOCKDRONE : -1);
+            bx += w2 + 10;
+            chip(bx, cy + 154, lp ? "LOCKED ON PILOT" : "LOCK PILOT", AMBER, lp, &w2, d.hasPilot ? H_LOCKPILOT : -1);
+            bx = cx + 16;
+            bool tk = drone_track_on(d.mac);
+            chip(bx, cy + 206, tk ? "TRACK ON" : "TRACK OFF", rgb(0x39ff88), tk, &w2, H_DRTRACK);
+            bx += w2 + 10;
+            chip(bx, cy + 206, "FLIGHTS", SKY, false, &w2, H_DRFLIGHTS);
+            bx += w2 + 10;
+            chip(bx, cy + 206, "DETAILS", ACCENT, false, &w2, H_DRDETAILS);
         }
     }
     C.clearClipRect();
@@ -1441,8 +1616,7 @@ void draw_map() {
 
     // Controls, right edge.
     struct { const char *t; uint8_t act; bool on; } btn[] = {
-        {"+", H_ZOOMIN, false}, {"-", H_ZOOMOUT, false},
-        {"FIT", H_FIT, false}, {"FOLLOW", H_FOLLOW, A.mapFollow}, {"TRI", H_TRI, A.triOn},
+        {"FIT", H_FIT, false}, {"TRI", H_TRI, A.triOn},
         {"TRACKS", H_TRACKS, A.droneTracks}, {"PILOT", H_PILOT, A.pilotOn},
         {A.wdScope == 2 ? "WD ALL" : A.wdScope == 1 ? "WD NOW" : "WD OFF", H_WD, A.wdScope > 0},
         {"ME", H_ME, A.gpsFollow}};
@@ -1457,6 +1631,7 @@ void draw_map() {
         by += bh + 10;
     }
     draw_mark_tools();
+    draw_map_banners();
     if (A.markOpen) draw_mark_editor();
     uint32_t q6 = micros();
     (void)q0, (void)q1; ui_prof[7] = q2 - q1, ui_prof[8] = q3 - q2, ui_prof[9] = q4 - q3, ui_prof[10] = q5 - q4, ui_prof[11] = q6 - q5;
@@ -1567,6 +1742,10 @@ void draw_drones() {
     int cw;
     int mx = x + w - 18 - (C.textWidth("SHOW ON MAP") + 28);
     chip(mx, y + 26, "SHOW ON MAP", ACCENT, false, &cw, H_DRONEMAP);
+    if (A.flOpen && strcasecmp(M->flights.mac, d.mac)) A.flOpen = false;   // another drone picked
+    font(F_SM);
+    int fxw = C.textWidth("FLIGHTS") + 28;
+    chip(mx - 10 - fxw, y + 26, "FLIGHTS", SKY, A.flOpen, nullptr, H_FLOPEN);
     // Its name: a full-width field of its own (tap or E, Enter saves to the dashboard and
     // every screen), laid out like the node editor's.
     {
@@ -1615,6 +1794,45 @@ void draw_drones() {
         text(cx2, cy2, k[i], FAINT);
         font(F_LG);
         text(cx2, cy2 + 18, fit(b[i], gw - 12), i < 2 ? SKY : TEXT);
+    }
+    // Its past flights (FLIGHTS), in place of the Remote ID fields and radar: tap one to see it on the map.
+    if (A.flOpen) {
+        const DroneFlights &F = M->flights;
+        int ly = gy + 3 * 56 + 4;
+        font(F_SM);
+        char hd[80];
+        snprintf(hd, sizeof hd, "PAST FLIGHTS, LAST 30 DAYS%s", F.cached ? "   (from the card: no dashboard)" : "");
+        text(gx, ly, hd, dim(SKY, 0.9f));
+        ly += 24;
+        if (F.loading && !F.valid) { font(F_MD); text(gx, ly + 10, "loading...", FAINT); return; }
+        if (!F.valid || !F.n) {
+            font(F_MD);
+            text(gx, ly + 10, F.valid ? "no stored flights for this drone" : "no flights: the dashboard isn't reachable and none on the card", FAINT);
+            return;
+        }
+        int rh = min(64, (CB - 14 - ly) / F.n);
+        for (int i = 0; i < F.n; i++) {
+            const Flight &f = F.f[i];
+            int ry = ly + i * rh, rw = w - 36;
+            uint16_t fc = flight_color(&d, i);
+            bool on = A.flShow == i;
+            hit(gx, ry, rw, rh - 6, H_FLPICK, i);
+            fast_round(gx, ry, rw, rh - 6, 8, on ? dim(fc, 0.14f) : PANEL2);
+            if (on) glow_rect(gx, ry, rw, rh - 6, 8, fc);
+            else C.drawRoundRect(gx, ry, rw, rh - 6, 8, LINE2);
+            C.fillRoundRect(gx + 6, ry + 8, 5, rh - 22, 2, fc);
+            font(F_MD);
+            text(gx + 22, ry + 18, date_str(f.start), TEXT, middle_left);
+            text(gx + rw - 14, ry + 18, dur_str((uint32_t)max(60.0, f.end - f.start)), fc, middle_right);
+            char l[120], hh[24] = "", sp[20] = "", pm[32] = "no pilot position";
+            if (f.maxH >= 0) snprintf(hh, sizeof hh, "max %d m %s", (int)f.maxH, f.agl ? "AGL" : "MSL");
+            if (f.maxSpd >= 0) snprintf(sp, sizeof sp, "%.1f m/s top", f.maxSpd);
+            if (f.pilotMax >= 0) snprintf(pm, sizeof pm, "up to %ld m from pilot", (long)f.pilotMax);
+            snprintf(l, sizeof l, "%ld m flown   %s   %s   %s   %u report%s", (long)f.dist, hh, sp, pm, (unsigned)f.reports, f.reports == 1 ? "" : "s");
+            font(F_SM);
+            text(gx + 22, ry + rh - 22, fit(l, rw - 36), MUTED, middle_left);
+        }
+        return;
     }
     // Remote ID fields + a radar of its track around the pilot.
     int fy = gy + 3 * 56 + 8;
@@ -2493,7 +2711,7 @@ void draw_bottom() {
     font(F_SM);
     const char *hints = A.detail ? (A.editAlias || A.newGroup ? "type the name   ENTER save   ESC cancel" : "E name it   G new group   ESC close")
                         : A.view == V_METRICS ? "R range   D domain   N node   C clear"
-                        : A.view == V_MAP     ? "drag to pan   + - zoom   L layer   Z fit   O follow   tap a marker"
+                        : A.view == V_MAP     ? "drag to pan   + - zoom   L layer   Z fit   O lock card's drone   tap a marker"
                         : A.view == V_DRONES  ? "UP DN select   ENTER show on map   tap a tag to label it"
                         : A.searching         ? "type to filter   ENTER keep   ESC clear"
                                               : "/ search   ENTER details   D domain   N node   X mute   A ack";
@@ -3784,7 +4002,7 @@ void draw_help() {
     static const char *rows[][2] = {
         {"1 - 7,  TAB,  LEFT RIGHT", "switch view"},
         {"ENTER   (tap a row twice)", "everything about the device / drone"},
-        {"MAP:  + -  L  Z  O  UP DN", "zoom, layer, fit, follow drone, pan"},
+        {"MAP:  + -  L  Z  O  UP DN", "zoom, layer, fit, lock on the card's drone, pan"},
         {"DETAIL:  E   G", "name the device, put it in a new group"},
         {"UP  DOWN   (Ctrl: page)", "select a node / detection / target"},
         {"/", "search; ENTER keeps it, ESC clears"},
@@ -4681,8 +4899,12 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         if (ch == '+' || ch == '=') { map_zoom(1); return; }
         if (ch == '-' || ch == '_') { map_zoom(-1); return; }
         if (ch == 'l' || ch == 'L') { A.mapPrevLayer = A.mapLayer; A.mapLayer = (A.mapLayer + 1) % NLAYERS; maptiles_clear_requests(); return; }
-        if (ch == 'z' || ch == 'Z') { A.mapFollow = false, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); return; }
-        if (ch == 'o' || ch == 'O') { A.mapFollow = !A.mapFollow; return; }
+        if (ch == 'z' || ch == 'Z') { A.lockWhat = 0, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); return; }
+        if (ch == 'o' || ch == 'O') {   // lock on the open card's drone, or let go
+            if (A.lockWhat) A.lockWhat = 0;
+            else if (A.mapDrone[0]) A.lockWhat = 1, A.gpsFollow = false, strlcpy(A.lockId, A.mapDrone, sizeof A.lockId);
+            return;
+        }
         if (kc == 0x52 || kc == 0x51) {   // Up / Down pan; Left / Right still switch views
             double y = lat2y(A.mapLat, A.mapZoom) + (kc == 0x52 ? -200 : 200);
             A.mapLat = y2lat(y, A.mapZoom);
@@ -4958,7 +5180,12 @@ static void dispatch(const Hit &h) {
     case H_TGTMAP:
         if (h.arg < nTgt) open_detail(M->targets[tgtIdx[h.arg]].mac);
         break;
-    case H_DRONE: A.view = V_DRONES; A.sel[V_DRONES] = h.arg; break;
+    case H_DRONE:   // a drone or its pilot on the map: its card
+        if (h.arg < nDrone) {
+            strlcpy(A.mapDrone, M->drones[droneIdx[h.arg]].mac, sizeof A.mapDrone);
+            A.mapPop[0] = 0, A.mapMove = false;
+        }
+        break;
     case H_DRONEMAP:
         if (nDrone) {
             const Drone &d = M->drones[droneIdx[A.sel[V_DRONES]]];
@@ -4992,8 +5219,56 @@ static void dispatch(const Hit &h) {
             strlcpy(A.editBuf, M->drones[droneIdx[A.sel[V_DRONES]]].alias, sizeof A.editBuf);
         }
         break;
-    case H_FIT: A.mapFollow = false, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); break;
-    case H_FOLLOW: A.mapFollow = !A.mapFollow; toast(A.mapFollow ? "following the newest live drone" : "follow off"); break;
+    case H_FIT: A.lockWhat = 0, A.gpsFollow = false; map_fit(); maptiles_clear_requests(); break;
+    case H_DRCARDX: A.mapDrone[0] = 0; break;
+    case H_LOCKDRONE:
+    case H_LOCKPILOT: {
+        uint8_t w = h.act == H_LOCKDRONE ? 1 : 2;
+        if (A.lockWhat == w && !strcasecmp(A.lockId, A.mapDrone)) A.lockWhat = 0;
+        else A.lockWhat = w, A.gpsFollow = false, strlcpy(A.lockId, A.mapDrone, sizeof A.lockId);
+        break;
+    }
+    case H_LOCKNODE:
+        if (A.lockWhat == 3 && !strcmp(A.lockId, A.mapPop)) A.lockWhat = 0;
+        else A.lockWhat = 3, A.gpsFollow = false, strlcpy(A.lockId, A.mapPop, sizeof A.lockId);
+        break;
+    case H_UNLOCK: A.lockWhat = 0; break;
+    case H_DRTRACK: drone_track_set(A.mapDrone, !drone_track_on(A.mapDrone)); break;
+    case H_DRFLIGHTS:
+    case H_DRDETAILS:
+        for (int k = 0; k < nDrone; k++)
+            if (!strcasecmp(M->drones[droneIdx[k]].mac, A.mapDrone)) A.sel[V_DRONES] = k;
+        if (h.act == H_DRFLIGHTS) A.flOpen = true, net_want_flights(A.mapDrone);
+        A.view = V_DRONES;
+        break;
+    case H_FLOPEN:
+        if (nDrone) {
+            A.flOpen = !A.flOpen;
+            if (A.flOpen) net_want_flights(M->drones[droneIdx[A.sel[V_DRONES]]].mac);
+        }
+        break;
+    case H_FLPICK:
+        if (M->flights.valid && h.arg < M->flights.n) {
+            const Flight &f = M->flights.f[h.arg];
+            A.flShow = h.arg;
+            double la0 = 90, la1 = -90, lo0 = 180, lo1 = -180;
+            auto add = [&](double la, double lo) { la0 = min(la0, la), la1 = max(la1, la), lo0 = min(lo0, lo), lo1 = max(lo1, lo); };
+            for (int p = 0; p < f.nt; p++) add(f.tr[p][0], f.tr[p][1]);
+            for (int p = 0; p < f.np; p++) add(f.pt[p][0], f.pt[p][1]);
+            if (f.hasPilot) add(f.pilot[0], f.pilot[1]);
+            if (la0 <= la1) {
+                A.lockWhat = 0, A.gpsFollow = false;
+                A.mapLat = (la0 + la1) / 2, A.mapLon = (lo0 + lo1) / 2;
+                int z = 19;
+                while (z > ZMIN && (lon2x(lo1, z) - lon2x(lo0, z) > MW - 420 || lat2y(la0, z) - lat2y(la1, z) > MH - 260)) z--;
+                A.mapZoom = z;
+                A.mapInit = true;
+                maptiles_clear_requests();
+            }
+            A.view = V_MAP;
+        }
+        break;
+    case H_FLCLEAR: A.flShow = -1; break;
     case H_WD:
         A.wdScope = (A.wdScope + 1) % 3;
         toast(A.wdScope == 2 ? "wardrive: all history" : A.wdScope == 1 ? "wardrive: this session" : "wardrive off");
@@ -5002,7 +5277,7 @@ static void dispatch(const Hit &h) {
         GpsFix gf = gps_fix();
         A.gpsFollow = !A.gpsFollow;
         if (A.gpsFollow && !gf.valid) toast(gps_present() ? "following you once the GPS has a fix" : "no GPS on the Grove port");
-        else if (A.gpsFollow) { A.mapFollow = false; A.mapLat = gf.lat, A.mapLon = gf.lon; toast("following you"); }
+        else if (A.gpsFollow) { A.lockWhat = 0; A.mapLat = gf.lat, A.mapLon = gf.lon; toast("following you"); }
         else toast("follow off");
         break;
     }
@@ -5043,6 +5318,7 @@ static void dispatch(const Hit &h) {
     case H_NODEPIN:
         if (h.arg >= 0 && h.arg < M->nnodes) {
             strlcpy(A.mapPop, M->nodes[h.arg].id, sizeof A.mapPop);
+            A.mapDrone[0] = 0;
             A.mapMove = false;
         }
         break;
@@ -5163,7 +5439,7 @@ static void apply_drag(int dx, int dy) {
     if (a.list == L_MAP) {
         A.mapLon = x2lonf(T.mx0 - dx, gZoomShown);
         A.mapLat = y2latf(T.my0 - dy, gZoomShown);
-        A.mapFollow = false, A.gpsFollow = false;
+        A.lockWhat = 0, A.gpsFollow = false;
         return;
     }
     if (a.list == L_NETS) {
@@ -5499,7 +5775,7 @@ void ui_pinch(int phase, int x, int y, int dist, uint32_t ms) {
         hn = 0;
         ZA.on = true, ZA.x = x, ZA.y = y;
         screen_to_ll(x, y, gZoomShown, ZA.lat, ZA.lon);
-        A.mapFollow = false, A.gpsFollow = false;
+        A.lockWhat = 0, A.gpsFollow = false;
     } else if (phase == 1 && pinching) {
         float z = constrain(z0 + log2f((float)max(dist, 10) / d0), (float)ZMIN, (float)zmax_layer());
         A.mapZoomF = z;
@@ -5525,4 +5801,13 @@ void ui_pinch(int phase, int x, int y, int dist, uint32_t ms) {
     }
     dirty = true;
     model_unlock();
+}
+
+// A tap at screen (canvas) pixels, as a screenshot shows them: the console's "tap".
+void ui_tap(int x, int y) {
+    int px, py;
+    if (canvasRot() == 3) py = PH - 1 - x, px = y;
+    else py = x, px = PW - 1 - y;
+    ui_press(px, py);
+    ui_release(px, py);
 }

@@ -13,4 +13,7 @@ const char *store_state();   // "saved 12 s ago, 1.3 MB" for /info
 // The dashboard's record of each device, kept on the card (see store.cpp).
 void intel_put(const char *mac, JsonDocument &doc);
 bool intel_get(const char *mac, JsonDocument &doc);
+// A drone's past flights, as the dashboard sent them: /sdcard/flights/<12 hex>.json.
+void flights_put(const char *mac, const char *json, size_t n);
+bool flights_get(const char *mac, JsonDocument &doc);
 long intel_age(const char *mac);   // s since it was saved, -1 = not on the card

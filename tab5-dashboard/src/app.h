@@ -26,7 +26,11 @@ struct App {
     float mapZoomF = 17;        // displayed zoom, eases toward mapZoom
     uint8_t mapPrevLayer = 0;   // shown under the new layer until its tiles arrive
     bool mapInit = false;       // centred once on the fleet
-    bool mapFollow = false;     // keep the newest live drone centred
+    uint8_t lockWhat = 0;       // map: kept centred on 0 nothing, 1 a drone, 2 its pilot, 3 a node
+    char lockId[18] = "";       // ...that drone's MAC or that node's id
+    char mapDrone[18] = "";     // map: the tapped drone's card (its MAC)
+    bool flOpen = false;        // drones: the selected drone's past flights, in place of its Remote ID
+    int8_t flShow = -1;         // map: this past flight drawn (M->flights.f[i])
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
     bool droneTracks = true;    // map: every track (drones, pilots, our own trail)
     bool wdNaming = false;      // typing a wardriven device's alias (in editBuf)

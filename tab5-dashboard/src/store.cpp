@@ -292,6 +292,46 @@ void intel_put(const char *mac, JsonDocument &doc) {
     free(b);
 }
 
+static bool flights_path(const char *mac, char *out, size_t cap) {
+    char h[13];
+    int k = 0;
+    for (const char *p = mac; *p && k < 12; p++)
+        if (isxdigit((unsigned char)*p)) h[k++] = toupper(*p);
+    if (k != 12) return false;
+    h[12] = 0;
+    snprintf(out, cap, "/sdcard/flights/%s.json", h);
+    return true;
+}
+
+void flights_put(const char *mac, const char *json, size_t n) {
+    char p[48], tmp[52];
+    if (!sd_ok() || !flights_path(mac, p, sizeof p)) return;
+    mkdir("/sdcard/flights", 0775);
+    snprintf(tmp, sizeof tmp, "%s.tmp", p);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    bool ok = fwrite(json, 1, n, f) == n;
+    if (fclose(f) || !ok) { remove(tmp); return; }
+    remove(p);
+    rename(tmp, p);
+}
+
+bool flights_get(const char *mac, JsonDocument &doc) {
+    char p[48];
+    if (!sd_ok() || !flights_path(mac, p, sizeof p)) return false;
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *b = n > 0 && n < 65536 ? (char *)ps_malloc(n) : nullptr;
+    bool ok = b && fread(b, 1, n, f) == (size_t)n;
+    fclose(f);
+    ok = ok && !deserializeJson(doc, b, n);
+    free(b);
+    return ok;
+}
+
 bool intel_get(const char *mac, JsonDocument &doc) {
     char p[48];
     if (!sd_ok() || !intel_path(mac, p, sizeof p, false)) return false;

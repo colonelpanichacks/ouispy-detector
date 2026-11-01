@@ -1139,3 +1139,32 @@ void ingest_tri(JsonObjectConst f) {
     t->triTs = f["ts"] | 0.0;
     M->version++;
 }
+
+void ingest_flights(JsonDocument &doc) {
+    model_lock();
+    DroneFlights &F = M->flights;
+    F.n = 0;
+    for (JsonObjectConst o : doc["flights"].as<JsonArrayConst>()) {
+        if (F.n == FL_MAX) break;
+        Flight &f = F.f[F.n++];
+        memset(&f, 0, sizeof f);
+        f.start = o["start"] | 0.0;
+        f.end = o["end"] | f.start;
+        f.maxH = o["max_hagl"].isNull() ? -1 : o["max_hagl"].as<float>();
+        f.agl = o["agl"] | false;
+        f.maxSpd = o["max_spd"].isNull() ? -1 : o["max_spd"].as<float>();
+        f.dist = o["dist_m"] | 0;
+        f.pilotMax = o["pilot_max_m"].isNull() ? -1 : o["pilot_max_m"].as<int32_t>();
+        f.reports = o["reports"] | 0;
+        JsonArrayConst pl = o["pilot"];
+        if (pl.size() == 2) f.hasPilot = true, f.pilot[0] = pl[0], f.pilot[1] = pl[1];
+        for (JsonArrayConst p : o["track"].as<JsonArrayConst>())
+            if (f.nt < FL_PTS && p.size() == 2) f.tr[f.nt][0] = p[0], f.tr[f.nt][1] = p[1], f.nt++;
+        for (JsonArrayConst p : o["ptrack"].as<JsonArrayConst>())
+            if (f.np < FL_PPTS && p.size() == 2) f.pt[f.np][0] = p[0], f.pt[f.np][1] = p[1], f.np++;
+    }
+    F.loading = false;
+    F.valid = true;
+    M->version++;
+    model_unlock();
+}

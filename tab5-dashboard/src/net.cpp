@@ -793,6 +793,38 @@ bool http_post(const char *path, const char *body) {
     return code == 200;
 }
 
+// The open drone's past flights: from the dashboard (then onto the card), else the card.
+volatile bool wantFlights = false;
+void fetch_flights() {
+    char mac[18];
+    model_lock();
+    strlcpy(mac, M->flights.mac, sizeof mac);
+    model_unlock();
+    if (!mac[0]) return;
+    JsonDocument doc(&psram);
+    bool fresh = net_online() && http_json(String("/api/drones/") + mac + "/flights?compact=1&limit=5&pts=48", doc, nullptr);
+    if (fresh) {
+        size_t n = measureJson(doc);
+        if (char *b = (char *)ps_malloc(n + 1)) {
+            serializeJson(doc, b, n + 1);
+            flights_put(mac, b, n);
+            free(b);
+        }
+    }
+    if (fresh || flights_get(mac, doc)) {
+        ingest_flights(doc);
+        model_lock();
+        M->flights.cached = !fresh;
+        model_unlock();
+    } else {
+        model_lock();
+        M->flights.loading = false;
+        M->flights.valid = false;
+        M->version++;
+        model_unlock();
+    }
+}
+
 void fetch_detail() {
     char mac[18];
     model_lock();
@@ -861,6 +893,11 @@ void poll_task(void *) {
         if (strcmp(lastWdOpen, A.wdOpen)) {
             strlcpy(lastWdOpen, A.wdOpen, sizeof lastWdOpen);
             if (lastWdOpen[0]) fetch_wd_info();
+            continue;
+        }
+        if (wantFlights) {
+            wantFlights = false;
+            fetch_flights();
             continue;
         }
         if (strcmp(lastDetail, M->detail.mac) || wantDetail) {
@@ -988,4 +1025,16 @@ int net_scan_results(String *out, int *rssi, int max) {
         rssi[n] = scanRssi[i];
     }
     return scanCount < 0 ? -1 : n;
+}
+
+void net_want_flights(const char *mac) {
+    model_lock();
+    if (strcasecmp(M->flights.mac, mac)) {
+        memset(&M->flights, 0, sizeof M->flights);
+        strlcpy(M->flights.mac, mac, sizeof M->flights.mac);
+    }
+    M->flights.loading = true;
+    M->version++;
+    model_unlock();
+    wantFlights = true;
 }
