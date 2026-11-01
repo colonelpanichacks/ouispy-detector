@@ -4179,7 +4179,7 @@ function renderOverview(fromLoad) {
     $("ovFeedN").textContent = dets.length ? `${dets.length} latest` : "";
     $("ovFeed").innerHTML = dets.map((d) => `<div class="ov-det" data-mac="${esc(d.mac)}">
         <span class="ov-age">${ago(d.ts).replace(" ago", "")}</span>
-        <span class="ov-dev ${d.is_new ? "new" : ""}">${esc(d.alias || d.descr || d.match || "unknown")}</span>
+        <span class="ov-dev ${d.is_new ? "new" : ""}">${esc(devAlias(d.mac, d.alias) || d.descr || d.match || "unknown")}</span>
         <span class="ov-mac">${esc(d.mac)}</span>
         <span class="ov-r" style="color:${rssiTone(d.rssi)}">${d.rssi ?? ""}</span>
         <span class="ov-nd">${esc(nodeName(d.node))}${d.closest && d.closest !== d.node ? " > " + esc(nodeName(d.closest)) : ""}</span></div>`).join("") ||
@@ -4197,7 +4197,7 @@ function ovWdFeed() {
     const devs = ((S.ov.wd && S.ov.wd.devices) || []).filter((d) => !S.ov.dom || d.kind === S.ov.dom).slice(0, 80);
     $("ovFeedN").textContent = devs.length ? `${devs.length} latest wardriven` : "";
     $("ovFeed").innerHTML = devs.map((d) => {
-        const label = d.name || d.vendor || (d.kind === "wifi" ? "(hidden network)" : d.rnd ? "BLE (random address)" : "BLE device");
+        const label = devAlias(d.mac) || d.name || d.vendor || (d.kind === "wifi" ? "(hidden network)" : d.rnd ? "BLE (random address)" : "BLE device");
         const tag = d.kind === "wifi" ? `<span class="ov-wdk" style="color:#22d3ee">WIFI ${esc(d.sec || "")}</span>` : `<span class="ov-wdk" style="color:#ff2bd6">BLE</span>`;
         return `<div class="ov-det" data-mac="${esc(d.mac)}" data-kind="${d.kind}">
         <span class="ov-age">${ago(d.last).replace(" ago", "")}</span>
