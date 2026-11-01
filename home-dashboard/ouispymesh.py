@@ -266,12 +266,13 @@ store = Store(db_path)
 
 # Events only browsers draw: a Tab5 would receive each (one per serial line for the
 # console) whole into its internal RAM just to drop it.
-WEB_ONLY = {"console"}
+WEB_ONLY = {"console", "meshtastic"}   # the Tab5 never needs these
 
 
 def emit(event, payload):
     socketio.emit(event, payload, to="web" if event in WEB_ONLY else None)
-    if event in ("det", "drone", "lost_node", "node_event"):
+    # An edit (a drone's name, tag, notes) is not a sighting: never an alert.
+    if event in ("det", "drone", "lost_node", "node_event") and not (isinstance(payload, dict) and payload.get("meta")):
         try:
             rns.notify(event, payload)   # Reticulum alerts (when enabled)
             mesh.notify(event, payload)  # Meshtastic alerts (when enabled)
@@ -334,7 +335,8 @@ mesh = mesh_mod.Mesh(lambda: settings()["meshtastic"],
                      summary=_link_summary, feed_line=lambda line, src: fleet.feed_line(line, src),
                      feed_det=lambda d, src: fleet.feed_detection(d, src),
                      radio_serial=(lambda: store.get_setting("meshtastic_usb_serial", ""),
-                                   lambda sn: store.set_setting("meshtastic_usb_serial", sn)))
+                                   lambda sn: store.set_setting("meshtastic_usb_serial", sn)),
+                     on_change=lambda: emit("meshtastic", {}))
 sources = {}
 # Re-entrant: a source reports its status while being registered (set_state ->
 # on_source_status -> sources_status), and a plain Lock held by that same thread
@@ -634,14 +636,16 @@ def api_devices():
         if kind == "wardrive":
             node = sorted(set(node) | set(wardrive.node_ids()))
     limit = min(int(request.args.get("limit", 300)), 2000)
-    total, rows = store.devices(q=f["q"], node=node, dom=f["dom"], limit=limit)
+    src = request.args.get("src", "")   # "det": detected only, "wd": wardriven only, else both
+    total, rows = (0, []) if src == "wd" else store.devices(q=f["q"], node=node, dom=f["dom"], limit=limit)
     # Wardriven networks / devices are devices too: one list, the node picker decides
     # whose (any node, a firmware type, one node).
     wd_ids = {n["id"] for n in fleet.snapshot()["nodes"] if fw.node_kind((n.get("cfg") or {}).get("fw")) == "wardrive"}
     wd_ids |= set(wardrive.node_ids())   # right after a restart, before their status is in
     want = wd_ids if node is None else [x for x in ([node] if isinstance(node, str) else node) if x in wd_ids]
-    if want:
+    if want and src != "det":
         q = (f["q"] or "").lower()
+        aliases = store.mac_aliases() if q else {}
         for d in wardrive.devices("history", limit=limit):
             if d.get("node") not in want and not (node is None and d.get("node") is None):
                 continue
@@ -649,7 +653,8 @@ def api_devices():
             if f["dom"] in ("ble", "wifi") and dom != f["dom"]:
                 continue
             descr = d["name"] or d.get("vendor") or ("(hidden network)" if dom == "wifi" else "BLE device")
-            if q and q not in f"{d['mac']} {descr} {d.get('vendor') or ''}".lower():
+            al = (aliases.get(d["mac"]) or {}).get("alias", "") if q else ""
+            if q and q not in f"{d['mac']} {descr} {d.get('vendor') or ''} {al}".lower():
                 continue
             total += 1
             rows.append({"mac": d["mac"], "descr": descr, "type": "AP" if dom == "wifi" else "LE", "dom": dom,
@@ -738,7 +743,11 @@ def api_wardrive():
 @app.route("/api/wardrive/device/<mac>")
 def api_wardrive_device(mac):
     d = wardrive.detail(mac, "ble" if request.args.get("kind") == "ble" else "wifi")
-    return (jsonify(d), 200) if d else (jsonify({"error": "unknown device"}), 404)
+    if not d:
+        return jsonify({"error": "unknown device"}), 404
+    a = store.mac_aliases().get(mac.upper()) or {}
+    d["alias"], d["notes"] = a.get("alias") or "", a.get("notes") or ""   # yours, on every screen
+    return jsonify(d)
 
 
 @app.route("/api/wardrive/session", methods=["POST"])

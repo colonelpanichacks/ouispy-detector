@@ -3,7 +3,7 @@
 // Meshtastic link to a Tab5 in the field, and what is on this computer's USB. Two pills in
 // the top bar (MESH, LORA) say the same in a word and open it.
 (function () {
-    const { api, esc, $, nodeName, showTab } = window.OUISPY;
+    const { api, esc, $, nodeName, showTab, on } = window.OUISPY;
     const LINK_OK_S = 900;   // the field Tab5 says hello every 5 min: three missed is trouble
 
     const ago = (s) => s == null ? "never" : s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago`
@@ -96,6 +96,12 @@
             else tick.last = d;
         } catch (e) { /* the next tick tries again */ }
     }
+    // Instant: any change to the fleet, the USB feeds or the Meshtastic connector re-reads it
+    // (coalesced); the 5 s tick only keeps the "ago" times moving.
+    let soon = null;
+    const refresh = () => { clearTimeout(soon); soon = setTimeout(tick, 250); };
+    window.meshStatusRefresh = refresh;
+    ["fleet", "sources", "meshtastic", "node_event"].forEach((ev) => on(ev, refresh));
     document.querySelector('.tab[data-tab="fleet"]').addEventListener("click", () => { if (tick.last) panel(tick.last); tick(); });
     tick();
     setInterval(tick, 5000);

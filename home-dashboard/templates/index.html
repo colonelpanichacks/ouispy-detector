@@ -131,9 +131,8 @@
         <div class="tabs">
             <button class="tab active" data-tab="overview" style="--mo:1">Overview</button>
             <button class="tab" data-tab="fleet" style="--mo:2">Fleet</button>
-            <button class="tab" data-tab="feed" style="--mo:3">Live</button>
             <button class="tab" data-tab="map" style="--mo:4">Map</button>
-            <button class="tab" data-tab="devices" style="--mo:7">Devices</button>
+            <button class="tab" data-tab="devices" style="--mo:3">Live</button>
             <button class="tab" data-tab="drones" style="--mo:5">Drones <span class="tab-badge" id="droneBadge" hidden>0</span></button>
             <button class="tab" data-tab="fleetctl" style="--mo:8">Fleet Control</button>
             <button class="tab" data-tab="metrics" style="--mo:6">Metrics</button>
@@ -199,30 +198,27 @@
         </div>
 
         <div class="tab-body" id="tab-devices">
-            <div class="fleet-actions tab-cards two-cards">
-                <div class="fa">
-                    <h4>Search</h4>
-                    <input type="text" id="vQ" class="field" placeholder="Search MAC, alias, vendor...">
-                </div>
-                <div class="fa">
-                    <h4>Filter</h4>
-                    <div class="sel-row two">
-                        <select id="vNode" class="field"><option value="">Seen by any node</option></select>
-                        <select id="vDom" class="field">
-                            <option value="">BLE + WiFi</option><option value="ble">BLE</option><option value="wifi">WiFi</option>
-                        </select>
-                    </div>
-                </div>
+            <!-- Live, laid out like the Tab5's: filters, one row per device (newest first), and the
+                 selected device underneath. Detected and wardriven devices in one list. -->
+            <div class="lv-bar">
+                <input type="search" id="vQ" class="field lv-q" placeholder="Search name, MAC, vendor, node" autocomplete="off">
+                <div class="mx-seg" id="lvDom"><button data-v="" class="on">All</button><button data-v="ble">BLE</button><button data-v="wifi">WiFi</button></div>
+                <select id="vNode" class="field lv-node"><option value="">All nodes</option></select>
+                <div class="mx-seg" id="lvKind"><button data-v="" class="on">Everything</button><button data-v="det">Detected</button><button data-v="wd">Wardriven</button></div>
+                <select id="lvGroup" class="field lv-group"><option value="">All groups</option></select>
+                <button type="button" class="btn ghost lv-clear" id="lvClear" hidden>Clear</button>
+                <span class="lv-count" id="vTotal"></span>
             </div>
-            <div class="fa fa-table">
-                <h4><span>Devices</span><span class="fa-count" id="vTotal"></span></h4>
-                <div class="table-wrap">
-                    <table class="htable">
-                        <thead><tr><th>Device</th><th>MAC</th><th>Type</th><th>Hits</th><th>First seen</th><th>Last seen</th><th>Best</th><th>Seen by</th></tr></thead>
-                        <tbody id="vBody"></tbody>
-                    </table>
-                </div>
+            <div class="lv-table">
+                <table class="lv">
+                    <thead><tr>
+                        <th data-k="last">Last</th><th data-k="name">Device</th><th data-k="mac">MAC</th><th data-k="type">Type</th>
+                        <th data-k="src">Source</th><th data-k="best">Signal</th><th data-k="hits">Hits</th><th data-k="nodes">Heard by</th><th data-k="first">First</th>
+                    </tr></thead>
+                    <tbody id="vBody"></tbody>
+                </table>
             </div>
+            <div class="lv-sel" id="lvSel"></div>
         </div>
 
         <div class="tab-body" id="tab-drones">

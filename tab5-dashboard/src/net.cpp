@@ -94,6 +94,7 @@ uint32_t bridgeHelloMs = 0, bridgeSentMs = 0;
 bool bridging = false;
 volatile bool wantState = false;
 volatile bool wantDetail = false;   // re-read the open device's record
+volatile bool wantWdInfo = false;   // ...and the open wardriven device's card
 
 // Writes to the dashboard (alias, group), queued by the UI, sent by the poll task.
 struct PostJob { char path[64]; char body[200]; };
@@ -183,7 +184,7 @@ void on_event(uint8_t *payload, size_t len) {
         marks_ingest(body["marks"]);
         model_unlock();
     }
-    else if (!strcmp(name, "mac_aliases")) { ingest_names(body, JsonObjectConst(), JsonObjectConst()); wantDetail = true; }
+    else if (!strcmp(name, "mac_aliases")) { ingest_names(body, JsonObjectConst(), JsonObjectConst()); wantDetail = wantWdInfo = true; }
     else if (!strcmp(name, "groups")) { ingest_names(JsonObjectConst(), JsonObjectConst(), body["group_of"]); wantDetail = true; }
     else if (!strcmp(name, "node_event")) {
         model_lock();
@@ -723,7 +724,9 @@ void fetch_wd_info() {
         };
         JsonObjectConst dec = doc["decoded"];
         const char *name = doc["name"] | "";
-        strlcpy(w.title, *name ? name : kind == 1 ? "(hidden network)" : (doc["vendor"] | "BLE device"), sizeof w.title);
+        const char *al = doc["alias"] | "";
+        strlcpy(w.title, *al ? al : *name ? name : kind == 1 ? "(hidden network)" : (doc["vendor"] | "BLE device"), sizeof w.title);
+        if (const char *nt = doc["notes"] | ""; *nt) add("NOTES", nt);   // the dashboard's notes on it, first
         add("TYPE", kind == 1 ? "WiFi access point" : "Bluetooth LE");
         add("ADDRESS", String(dec["address"] | ""));
         add("MAKER (OUI)", String(doc["vendor"] | (doc["rnd"] | false ? "random address: no maker in it" : "not registered")));
@@ -890,7 +893,8 @@ void poll_task(void *) {
             continue;
         }
         static char lastWdOpen[18] = "";
-        if (strcmp(lastWdOpen, A.wdOpen)) {
+        if (strcmp(lastWdOpen, A.wdOpen) || (wantWdInfo && A.wdOpen[0])) {
+            wantWdInfo = false;
             strlcpy(lastWdOpen, A.wdOpen, sizeof lastWdOpen);
             if (lastWdOpen[0]) fetch_wd_info();
             continue;

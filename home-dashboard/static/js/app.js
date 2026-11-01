@@ -80,6 +80,7 @@ function metres(a, b) {
     return map.distance([a.lat, a.lon], [b.lat, b.lon]);
 }
 function fmtDist(m) {
+    if (m == null) return "-";
     return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
 }
 function ago(ts) {
@@ -323,7 +324,7 @@ function renderNodes() {
         nodes.map((n) => `<option value="${esc(n.id)}">${esc(n.alias ? `${n.alias} (${n.id})` : n.id)}</option>`).join("");
     sel.value = cur;
     const vs = $("vNode"), vcur = vs.value;
-    vs.innerHTML = `<option value="">Seen by any node</option>` +
+    vs.innerHTML = `<option value="">All nodes</option>` +
         `<optgroup label="By firmware"><option value="kind:detector">All detectors</option><option value="kind:skyspy">All Sky-Spy nodes</option>` +
         `<option value="kind:wardrive">All wardrivers</option></optgroup><optgroup label="One node">` +
         sel.innerHTML.replace(/^<option value="">All nodes<\/option>/, "") + `</optgroup>`;
@@ -338,7 +339,10 @@ function renderNodes() {
 const MAP_MAX_ZOOM = 22;
 const map = L.map("map", { zoomControl: false, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
 // What marks.js (its own file, outside this closure) needs from here.
-window.OUISPY = { map, api, esc, $, nodeName, showTab: (t) => showTab(t) };
+// Other scripts subscribe to socket events through OUISPY.on (the socket opens after boot).
+const sockHooks = [];
+window.OUISPY = { map, api, esc, $, nodeName, showTab: (t) => showTab(t),
+                  on: (name, fn) => (S.sock ? S.sock.on(name, fn) : sockHooks.push([name, fn])) };
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 // Map toolbar on the map itself (top right): layer, lines, traffic, full
@@ -2344,34 +2348,184 @@ $("fReboot").onclick = () => twoTap($("fReboot"), () => command("all", "reboot")
 // ------------------------------------------------------------------
 // devices (one row per MAC) + device drawer
 // ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Live: every device, detected or wardriven, one row each, newest first, laid out like the
+// Tab5's Live (filters, the table, the selected device underneath). Filter by domain, a node
+// or a kind of node, where it came from and its group; click a header to sort.
+// ------------------------------------------------------------------
+S.lv = { dom: "", kind: "", group: "", sort: "last", rev: false, rows: [], total: 0, sel: null, comp: {} };
+const lvName = (d) => devAlias(d.mac) || devName(d.mac, d.name) || d.descr || (d.wd === "wifi" ? "(hidden network)" : "BLE device");
+const lvType = (d) => d.wd ? (d.wd === "wifi" ? `WiFi AP${d.sec ? " " + d.sec : ""}${d.ch ? ", ch " + d.ch : ""}` : "BLE")
+    : `${d.dom === "wifi" ? "WiFi" : "BLE"}${d.type ? " " + d.type : ""}`;
+const lvSigCls = (r) => r == null ? "" : r >= -60 ? "s4" : r >= -72 ? "s3" : r >= -85 ? "s2" : "s1";
+function lvBars(r) {
+    const n = r == null ? 0 : r >= -60 ? 4 : r >= -72 ? 3 : r >= -85 ? 2 : 1;
+    return `<span class="ms-bars ${lvSigCls(r)}">${[1, 2, 3, 4].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</span>`;
+}
+function lvNodes(list, max) {
+    const chips = list.slice(0, max).map((n) => { const c = nodeColor(nodeById(n)); return `<span class="lv-node" style="${c ? `--nc:${c}` : ""}">${esc(nodeName(n))}</span>`; });
+    return chips.join("") + (list.length > max ? `<span class="lv-more">+${list.length - max}</span>` : "");
+}
+const LV_SORT = {
+    last: (d) => -(d.last || 0), first: (d) => d.first || 0, name: (d) => lvName(d).toLowerCase(), mac: (d) => d.mac,
+    type: (d) => lvType(d), src: (d) => (d.wd ? 1 : 0), best: (d) => -(d.best ?? -200), hits: (d) => -(d.hits || 0),
+    nodes: (d) => -(d.nodes || []).length,
+};
 async function loadDevices() {
-    const p = new URLSearchParams();
+    const p = new URLSearchParams({ limit: "1000" });
     if ($("vQ").value.trim()) p.set("q", $("vQ").value.trim());
     if ($("vNode").value) p.set("node", $("vNode").value);
-    if ($("vDom").value) p.set("dom", $("vDom").value);
-    const r = await api(`/api/devices?${p}`);
-    $("vTotal").textContent = `${r.total} device${r.total === 1 ? "" : "s"}${r.total > r.rows.length ? ` (showing ${r.rows.length})` : ""}`;
-    $("vBody").innerHTML = r.rows.map((d) => {
-        const al = devAlias(d.mac);
-        const nm = devName(d.mac, d.name);
-        if (d.wd) {   // a wardriven network / device
-            const c = wdColor({ kind: d.wd, sec: d.sec });
-            return `<tr data-mac="${esc(d.mac)}" data-wd="${esc(d.wd)}"><td class="v"><span class="ntag wd">WD</span> <span style="color:${c}">${esc(d.descr || "")}</span></td>
-            <td>${esc(d.mac)}</td><td>${d.wd === "wifi" ? `WiFi AP ${esc(d.sec || "")}${d.ch ? " ch " + d.ch : ""}` : "BLE"}</td><td>${d.hits}</td>
-            <td>${fullTime(d.first)}</td><td>${ago(d.last)}</td><td>${d.best ?? ""}</td>
-            <td class="nodes">${d.nodes.map((n) => esc(nodeName(n))).join(", ")}</td></tr>`;
-        }
-        return `<tr data-mac="${esc(d.mac)}"><td class="v">${al ? `<span class="mal">${esc(al)}</span> ` : ""}${nm ? `<span class="dname">"${esc(nm)}"</span> ` : ""}${groupTag(d.mac)}${esc(d.descr || "")}</td>
-            <td>${esc(d.mac)}</td><td>${d.dom === "wifi" ? "WiFi" : "BLE"} ${esc(d.type || "")}</td><td>${d.hits}</td>
-            <td>${fullTime(d.first)}</td><td>${ago(d.last)}</td><td>${d.best ?? ""}</td>
-            <td class="nodes">${d.nodes.map((n) => esc(nodeName(n))).join(", ")}</td></tr>`;
-    }).join("") || `<tr><td colspan="8" style="text-align:center;padding:20px">No devices</td></tr>`;
-    $("vBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () =>
-        tr.dataset.wd ? openWdDevice(tr.dataset.mac, tr.dataset.wd) : openDevice(tr.dataset.mac));
+    if (S.lv.dom) p.set("dom", S.lv.dom);
+    if (S.lv.kind) p.set("src", S.lv.kind);
+    let r;
+    try { r = await api(`/api/devices?${p}`); } catch (e) { return; }
+    S.lv.rows = r.rows;
+    S.lv.total = r.total;
+    renderLive();
+}
+function renderLive() {
+    const L = S.lv;
+    lvGroupOptions();
+    let rows = L.rows.filter((d) => (L.kind === "wd" ? d.wd : L.kind === "det" ? !d.wd : true)
+        && (!L.group || (L.group === "none" ? !devGroup(d.mac) : String((devGroup(d.mac) || {}).id) === L.group)));
+    const key = LV_SORT[L.sort] || LV_SORT.last;
+    rows = rows.slice().sort((a, b) => { const x = key(a), y = key(b); const c = x < y ? -1 : x > y ? 1 : 0; return L.rev ? -c : c; });
+    L.shown = rows;
+    const filtered = $("vQ").value.trim() || $("vNode").value || L.dom || L.kind || L.group;
+    $("lvClear").hidden = !filtered;
+    $("vTotal").innerHTML = `<b>${rows.length}</b> of ${L.total}${L.total > L.rows.length ? ` (newest ${L.rows.length})` : ""}`;
+    document.querySelectorAll(".lv thead th").forEach((th) => {
+        th.classList.toggle("sorted", th.dataset.k === L.sort);
+        th.classList.toggle("rev", th.dataset.k === L.sort && L.rev);
+    });
+    if (!L.sel || !rows.some((d) => d.mac === L.sel)) L.sel = rows.length ? rows[0].mac : null;
+    $("vBody").innerHTML = rows.map((d) => {
+        const g = devGroup(d.mac), al = devAlias(d.mac);
+        const dot = d.wd ? wdColor({ kind: d.wd, sec: d.sec }) : "#ff2bd6";
+        return `<tr data-mac="${esc(d.mac)}" class="${d.mac === L.sel ? "sel" : ""}">
+            <td class="lv-age">${esc(ago(d.last))}</td>
+            <td class="lv-name"><span class="lv-dot" style="--dc:${dot}"></span><span class="${al ? "al" : ""}">${esc(lvName(d))}</span>${g ? `<span class="gtag" style="--gh:${g.color ?? 280}">${esc(g.name)}</span>` : ""}</td>
+            <td class="lv-mac">${esc(d.mac)}</td>
+            <td>${esc(lvType(d))}</td>
+            <td><span class="lv-src ${d.wd ? "wd" : "det"}">${d.wd ? "wardriven" : "detected"}</span></td>
+            <td class="lv-sig ${lvSigCls(d.best)}">${lvBars(d.best)}<span>${d.best ?? "-"}</span></td>
+            <td class="lv-num">${d.hits}</td>
+            <td class="lv-by">${lvNodes(d.nodes || [], 3)}</td>
+            <td class="lv-age">${esc(fullTime(d.first))}</td></tr>`;
+    }).join("") || `<tr><td colspan="9" class="lv-empty">${L.rows.length ? "Nothing matches the filters" : "No devices yet"}</td></tr>`;
+    $("vBody").querySelectorAll("tr[data-mac]").forEach((tr) => {
+        tr.onclick = () => lvSelect(tr.dataset.mac);
+        tr.ondblclick = () => lvOpen(tr.dataset.mac);
+    });
+    renderLiveSel();
+}
+function lvRow(mac) { return S.lv.rows.find((d) => d.mac === mac); }
+function lvOpen(mac) {
+    const d = lvRow(mac);
+    if (d && d.wd) openWdDevice(mac, d.wd); else openDevice(mac);
+}
+function lvSelect(mac) {
+    S.lv.sel = mac;
+    document.querySelectorAll("#vBody tr").forEach((tr) => tr.classList.toggle("sel", tr.dataset.mac === mac));
+    renderLiveSel();
+}
+// The selected device: what it is, who heard it, its name and group, and what turns up with
+// it (tick some and group them under one name).
+async function renderLiveSel() {
+    const box = $("lvSel"), mac = S.lv.sel, d = mac && lvRow(mac);
+    // Mid-edit: a live refresh leaves the panel alone (only a new pick redraws it).
+    if (box.dataset.mac === mac && box.contains(document.activeElement) && /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+    box.dataset.mac = mac || "";
+    if (!d) { box.innerHTML = `<div class="lv-sel-empty">Pick a device</div>`; return; }
+    const g = devGroup(mac), al = devAlias(mac), bn = devName(mac, d.name);
+    box.innerHTML = `<div class="lv-sel-main">
+        <div class="lv-sel-title"><span class="lv-dot" style="--dc:${d.wd ? wdColor({ kind: d.wd, sec: d.sec }) : "#ff2bd6"}"></span>${esc(lvName(d))}
+            ${g ? `<span class="gtag" style="--gh:${g.color ?? 280}">${esc(g.name)}</span>` : ""}</div>
+        <div class="lv-sel-mac">${esc(mac)}${bn && bn !== lvName(d) ? ` <span class="dname">"${esc(bn)}"</span>` : ""}</div>
+        <div class="lv-sel-line">${esc(lvType(d))} | ${d.wd ? "wardriven" : "detected"} | ${d.hits} hit${d.hits === 1 ? "" : "s"} | best ${d.best ?? "-"} dBm | first ${esc(fullTime(d.first))} | last ${esc(ago(d.last))}</div>
+        <div class="lv-sel-by">${lvNodes(d.nodes || [], 8)}</div>
+        <div class="lv-sel-edit">
+            <input class="field lv-alias" id="lvAlias" maxlength="40" placeholder="Name it" value="${esc(al)}">
+            <textarea class="field lv-notes" id="lvNotes" rows="2" maxlength="500" placeholder="Notes: who, where, why...">${esc((S.macAliases[mac] || {}).notes || "")}</textarea>
+        </div>
+        <div class="lv-sel-actions">
+            <button class="btn" id="lvSave" type="button">Save</button>
+            <button class="btn ghost" id="lvDetails" type="button">Details</button>
+            ${d.wd ? `<button class="btn ghost" id="lvMap" type="button">Show on map</button>` : ""}
+        </div></div>
+        <div class="lv-sel-comp"><h4>Turns up with it</h4><div id="lvComp" class="lv-comp"><div class="sub">looking...</div></div></div>`;
+    $("lvSave").onclick = async () => {
+        await api(`/api/devices/${encodeURIComponent(mac)}`, { method: "POST",
+            body: { alias: $("lvAlias").value.trim(), notes: $("lvNotes").value.trim() } });
+        toast("good", "Saved", $("lvAlias").value.trim() || mac);
+    };
+    $("lvAlias").addEventListener("keydown", (e) => { if (e.key === "Enter") $("lvSave").click(); });
+    $("lvDetails").onclick = () => lvOpen(mac);
+    if ($("lvMap")) $("lvMap").onclick = async () => { await openWdDevice(mac, d.wd); $("wdShowMap").click(); };
+    let comps = S.lv.comp[mac];
+    if (!comps) {
+        try { comps = S.lv.comp[mac] = ((await api(`/api/devices/${encodeURIComponent(mac)}?limit=1`)).companions || []).slice(0, 6); }
+        catch (e) { comps = []; }
+    }
+    if (S.lv.sel !== mac || !$("lvComp")) return;
+    if (!comps.length) { $("lvComp").innerHTML = `<div class="sub">Nothing has turned up with it yet.</div>`; return; }
+    $("lvComp").innerHTML = comps.map((c) => {
+        const label = c.alias || c.name || c.descr || c.vendor || c.mac, inG = g && c.group && c.group.id === g.id;
+        return `<label class="lv-c"><input type="checkbox" data-mac="${esc(c.mac)}" ${inG ? "checked disabled" : ""}>
+            <span class="lv-c-n">${esc(label)}${c.group ? ` <span class="gtag" style="--gh:${c.group.color ?? 280}">${esc(c.group.name)}</span>` : ""}</span>
+            <span class="lv-c-t">together ${c.together} of ${c.occasions}x</span></label>`;
+    }).join("") + `<button class="btn" id="lvGroupIt" type="button" disabled>${g ? `Add to ${esc(g.name)}` : "Group these and name it"}</button>`;
+    const picks = () => [...$("lvComp").querySelectorAll("input:checked:not(:disabled)")].map((i) => i.dataset.mac);
+    $("lvComp").querySelectorAll("input").forEach((i) => i.onchange = () => { $("lvGroupIt").disabled = !picks().length; });
+    $("lvGroupIt").onclick = async () => {
+        const macs = [mac, ...picks()];
+        if (g) await saveGroup({ id: g.id, add: macs }); else await newGroupFor(macs);
+        S.lv.comp = {};
+    };
+}
+function lvGroupOptions() {
+    const sel = $("lvGroup"), want = ["", "none", ...(S.groups || []).map((g) => String(g.id))].join(",");
+    if (sel.dataset.sig === want + (S.groups || []).map((g) => g.name).join("|")) return;
+    sel.dataset.sig = want + (S.groups || []).map((g) => g.name).join("|");
+    sel.innerHTML = `<option value="">All groups</option><option value="none">Not in a group</option>` +
+        (S.groups || []).map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
+    sel.value = S.lv.group;
 }
 let devTimer = null;
 $("vQ").addEventListener("input", () => { clearTimeout(devTimer); devTimer = setTimeout(loadDevices, 250); });
-["vNode", "vDom"].forEach((id) => $(id).addEventListener("change", loadDevices));
+$("vNode").addEventListener("change", loadDevices);
+$("lvGroup").addEventListener("change", () => { S.lv.group = $("lvGroup").value; renderLive(); });
+[["lvDom", "dom", true], ["lvKind", "kind", true]].forEach(([id, k, reload]) => $(id).querySelectorAll("button").forEach((b) => b.onclick = () => {
+    S.lv[k] = b.dataset.v;
+    $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    if (reload) loadDevices(); else renderLive();
+}));
+$("lvClear").onclick = () => {
+    $("vQ").value = ""; $("vNode").value = ""; S.lv.dom = S.lv.kind = S.lv.group = "";
+    ["lvDom", "lvKind"].forEach((id) => $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", !x.dataset.v)));
+    loadDevices();
+};
+document.querySelectorAll(".lv thead th").forEach((th) => th.onclick = () => {
+    if (S.lv.sort === th.dataset.k) S.lv.rev = !S.lv.rev; else { S.lv.sort = th.dataset.k; S.lv.rev = false; }
+    renderLive();
+});
+// Up / down walk the list, Enter opens it (while nothing is being typed).
+document.addEventListener("keydown", (e) => {
+    if (!$("tab-devices").classList.contains("active") || /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
+    const list = S.lv.shown || [], i = list.findIndex((d) => d.mac === S.lv.sel);
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const n = list[Math.max(0, Math.min(list.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+        if (n) { lvSelect(n.mac); document.querySelector(`#vBody tr[data-mac="${n.mac}"]`)?.scrollIntoView({ block: "nearest" }); }
+    } else if (e.key === "Enter" && S.lv.sel) lvOpen(S.lv.sel);
+});
+// New sightings keep it current while it is open (at most every 2 s).
+let lvPokeAt = 0, lvPokeTimer = null;
+function lvPoke() {
+    if (!$("tab-devices").classList.contains("active")) return;
+    clearTimeout(lvPokeTimer);
+    lvPokeTimer = setTimeout(() => { lvPokeAt = Date.now(); loadDevices(); }, Math.max(0, 2000 - (Date.now() - lvPokeAt)));
+}
 
 async function openDevice(mac) {
     $("wdDrawer").classList.remove("open");
@@ -2898,7 +3052,31 @@ document.querySelectorAll(".tab").forEach((t) => t.onclick = () => {
 // Live fleet updates leave out the filter lists (they come in node_filters,
 // only when a list changes); keep each node's list from before.
 const FILTER_KEYS = ["filters", "filters_ok", "filters_ts", "filters_via"];
+// A name changed somewhere (a node, a device, a group, a drone): every view that shows names
+// redraws now, on this screen and every other (each gets the same socket event).
+let namesTimer = null;
+function refreshNames() {
+    clearTimeout(namesTimer);
+    namesTimer = setTimeout(() => {
+        renderFeed();
+        renderOverview();
+        renderTargets();
+        renderNodes();
+        renderMap();
+        renderDrones();
+        if (S.wdLayer) renderWd();
+        if ($("tab-drones").classList.contains("active")) loadDroneTable();
+        if ($("tab-metrics").classList.contains("active")) { mxNodeOptions(); mxLoad(); }
+        if ($("tab-devices").classList.contains("active")) loadDevices();
+        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+        if (S.wdOpen && $("wdDrawer").classList.contains("open")) openWdDevice(S.wdOpen.mac, S.wdOpen.kind);
+        if (S.droneOpen && $("drDrawer").classList.contains("open") && S.drones[S.droneOpen]) fillDroneLive(S.drones[S.droneOpen]);
+        if (window.meshStatusRefresh) meshStatusRefresh();
+    }, 60);
+}
+const nameSig = (f) => (f.nodes || []).map((n) => `${n.id}=${n.alias || ""}/${n.color ?? ""}`).join(",");
 function applyFleet(f) {
+    const namesChanged = S.fleet && nameSig(S.fleet) !== nameSig(f);
     const prev = {};
     if (S.fleet) S.fleet.nodes.forEach((n) => { prev[n.id] = n; });
     f.nodes.forEach((n) => {
@@ -2906,6 +3084,7 @@ function applyFleet(f) {
     });
     S.fleet = f;
     S.skew = Date.now() / 1000 - f.ts;
+    if (namesChanged) refreshNames();
     renderHome();
     renderNodes();
     renderMap();
@@ -3208,7 +3387,8 @@ async function boot() {
     renderFleetCtl();
     if (window.marksApply) marksApply(st.marks);   // marks.js (loads after this file)
 
-    const sock = io({ transports: ["websocket", "polling"] });
+    const sock = S.sock = io({ transports: ["websocket", "polling"] });
+    sockHooks.forEach(([n, fn]) => sock.on(n, fn));
     sock.on("fleet", applyFleet);
     sock.on("node_filters", (u) => {
         const n = S.fleet && S.fleet.nodes.find((x) => x.id === u.id);
@@ -3217,6 +3397,8 @@ async function boot() {
         applyFleet(S.fleet);
     });
     sock.on("det", onDetection);
+    sock.on("det", lvPoke);
+    sock.on("wd", lvPoke);
     sock.on("sighting", (s) => { if (s.name) S.deviceNames[s.mac] = s.name; onSighting(s); });
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
@@ -3228,15 +3410,11 @@ async function boot() {
     sock.on("groups", (g) => {
         S.groups = g.groups || [];
         S.groupOf = g.group_of || {};
-        renderFeed();
-        if ($("tab-devices").classList.contains("active")) loadDevices();
-        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+        refreshNames();
     });
     sock.on("mac_aliases", (m) => {
         S.macAliases = m;
-        renderFeed();
-        if ($("tab-devices").classList.contains("active")) loadDevices();
-        if (S.device && $("vDrawer").classList.contains("open")) openDevice(S.device);
+        refreshNames();
     });
     sock.on("settings", (s) => {
         // Reload tiles only when the layer itself changed (re-adding the tile
@@ -3462,6 +3640,12 @@ async function loadDroneTable() {
     $("drBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () => openDrone(tr.dataset.mac));
 }
 function onDrone(d) {
+    if (d.meta) {   // an edit (name, tag, notes) of a drone not in the air: no "detected" toast
+        if (S.drones[d.mac]) Object.assign(S.drones[d.mac], { alias: d.alias, tag: d.tag, notes: d.notes, faa: d.faa });
+        refreshNames();
+        if (S.droneOpen === d.mac && $("drDrawer").classList.contains("open")) openDrone(d.mac);
+        return;
+    }
     const fresh = !S.drones[d.mac] && !S.droneSeen.has(d.mac);
     d._rx = Date.now();
     S.drones[d.mac] = d;
@@ -3549,7 +3733,6 @@ function fmtDur(s) {
     s = Math.round(s || 0);
     return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s` : `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`;
 }
-function fmtDist(m) { return m == null ? "-" : m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`; }
 async function loadFlights(mac) {
     clearFlights();
     S.flights = { mac, list: [], shown: new Set(), layer: S.flights.layer };
@@ -3674,7 +3857,10 @@ S.wdSession = null;
 const WD_SEC_COLOR = { open: "#39ff88", WEP: "#ff4d6d", WPA: "#ffb020", WPA2: "#22d3ee", WPA3: "#a78bfa", "WPA2/WPA3": "#a78bfa" };
 function wdColor(d) { return d.kind === "ble" ? "#ff2bd6" : (WD_SEC_COLOR[d.sec] || "#7dd3fc"); }
 function wdKey(d) { return d.mac + "|" + d.kind; }
-function wdName(d) { return d.name || (d.kind === "wifi" ? "(hidden network)" : d.vendor || "BLE device"); }
+function wdName(d) {
+    const a = S.macAliases && S.macAliases[(d.mac || "").toUpperCase()];
+    return (a && a.alias) || d.name || (d.kind === "wifi" ? "(hidden network)" : d.vendor || "BLE device");
+}
 function syncWdBtn() {
     const b = $("mapWd");
     b.classList.toggle("on", S.wdScope !== "off");

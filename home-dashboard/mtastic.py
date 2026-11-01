@@ -61,7 +61,7 @@ def _clip(text):
 
 class Mesh:
     def __init__(self, get_settings, node_name, busy_ports, summary=None, feed_line=None, feed_det=None,
-                 radio_serial=None):
+                 radio_serial=None, on_change=None):
         self.get_settings = get_settings
         self.node_name = node_name
         self.busy_ports = busy_ports      # () -> serial ports our own nodes are on
@@ -71,6 +71,8 @@ class Mesh:
         # (get, set) of the radio's USB serial number: macOS renames a USB port when the radio
         # is plugged back in (or another board goes in first), so it is found by this instead.
         self.radio_serial = radio_serial
+        self.on_change = on_change        # () -> tell every screen (state, counters, the field link)
+        self._changed_at = 0
         self.link_heard = 0
         self.link_wifi = False     # its last hello said it's on Wi-Fi
         self.summary_at = 0
@@ -143,7 +145,19 @@ class Mesh:
 
     def _set(self, **kw):
         with self.lock:
+            changed = any(self.status.get(k) != v for k, v in kw.items())
             self.status.update(kw)
+        if changed:
+            self._changed()
+
+    def _changed(self):
+        # At most twice a second: a burst of sends is one refresh.
+        if self.on_change and time.time() - self._changed_at > 0.5:
+            self._changed_at = time.time()
+            try:
+                self.on_change()
+            except Exception:
+                pass
 
     def reload(self):
         self._wake.set()
@@ -330,6 +344,7 @@ class Mesh:
             self.status["link"] = {"from": frm, "ts": self.link_heard, "wifi": self.link_wifi,
                                    "node": node or prev.get("node"), "rssi": rx.get("rxRssi"), "snr": rx.get("rxSnr"),
                                    "msgs": (prev.get("msgs") or 0) + 1}
+        self._changed()
 
     def _on_text(self, packet, interface=None):
         try:

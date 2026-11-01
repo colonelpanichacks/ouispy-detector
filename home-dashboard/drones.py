@@ -475,6 +475,15 @@ class Drones:
                 if faa is not None:
                     s["faa"] = faa
                 self.emit("drone", self._public(s, time.time()))
+                return
+        # Not in memory (gone for hours): every screen still gets the new name, tag and notes,
+        # from its last stored report. "meta" marks it as an edit, not a sighting.
+        d = self.detail(mac)
+        if d:
+            d.pop("history", None)
+            d.pop("stats", None)
+            d["meta"] = True
+            self.emit("drone", d)
 
     def prune(self, keep_s=3600 * 6):
         now = time.time()
