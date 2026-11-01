@@ -6790,6 +6790,14 @@ void setup() {
         // settings and fleet key, when given over serial, still apply.)
         Serial.println("WARDRIVER: scanning everything (no filters, no setup)");
         startScanningMode();
+#ifdef SKYSPY_NODE
+    } else if (meshCfg.enabled) {
+        // Nor does a Sky-Spy once it is on the mesh: Remote ID is always on and it takes no
+        // filters, so it goes straight back to scanning after every power cut. (Before
+        // its first setup it still opens the portal.)
+        Serial.println("SKY-SPY: straight to scanning (mesh set up, nothing else to configure)");
+        startScanningMode();
+#endif
     } else {
         // Start in configuration mode
         Serial.println("Starting configuration mode...");
