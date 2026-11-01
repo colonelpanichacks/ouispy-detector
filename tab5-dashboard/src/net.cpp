@@ -424,7 +424,7 @@ void debug_poll() {
         char b[1200];
         snprintf(b, sizeof b,
                  "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
-                 "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
+                 "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"dma\":%u,\"dma_min\":%u,\"dma_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
                  "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
                  "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"tile_ms\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
                  "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
@@ -432,6 +432,10 @@ void debug_poll() {
                  (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
                  heap_caps_get_free_size(MALLOC_CAP_INTERNAL), heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                 // what the C6 link's receive buffers come from
+                 heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                 heap_caps_get_minimum_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+                 heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
                  heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                  (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,

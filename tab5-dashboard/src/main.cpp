@@ -242,6 +242,12 @@ const char *reset_name(int r) {
 }
 
 void setup() {
+    // Ordinary allocations from 256 bytes up go to PSRAM. The framework's default keeps
+    // everything under 4 KB internal (CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL), so thousands of
+    // Strings, JSON pieces and HTTP buffers fragmented the ~70 KB the C6 link needs for its
+    // DMA receive buffers, and esp_hosted asserted (sdio_rx_get_buffer) when it found none.
+    // Drivers that need internal or DMA memory ask for it by capability: unaffected.
+    heap_caps_malloc_extmem_enable(256);
     diagReset = esp_reset_reason();
     {
         Preferences p;
