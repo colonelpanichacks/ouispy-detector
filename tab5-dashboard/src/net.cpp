@@ -14,6 +14,7 @@
 #include "gfx.h"
 #include <Preferences.h>
 #include "maptiles.h"
+#include "meshlink.h"
 #include "sdcard.h"
 #include "store.h"
 #include "wd.h"
@@ -421,12 +422,14 @@ void debug_poll() {
         p.end();
         char tm[200];
         maptiles_timing(tm, sizeof tm);
-        char b[1200];
+        char lk[300];
+        meshlink_info(lk, sizeof lk);
+        char b[1500];
         snprintf(b, sizeof b,
                  "{\"up\":%lu,\"reset\":\"%s\",\"boots\":%lu,\"crashes\":%lu,"
                  "\"heap\":%u,\"heap_min\":%u,\"heap_big\":%u,\"dma\":%u,\"dma_min\":%u,\"dma_big\":%u,\"psram\":%u,\"psram_min\":%u,\"psram_big\":%u,"
                  "\"frame_worst\":%lu,\"draw\":%lu,\"push\":%lu,\"tiles\":%lu,\"tile_stack_free\":%lu,"
-                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"tile_ms\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,"
+                 "\"sd\":\"%s\",\"sd_tiles\":%lu,\"tile_cache\":\"%lu kept, %lu read\",\"store\":\"%s\",\"tile_ms\":\"%s\",\"link_stack_free\":%u,\"rssi\":%d,\"sock\":%d,\"ppa\":%d,\"link\":%s,"
                  "\"prof_us\":{\"clear\":%lu,\"view\":%lu,\"top\":%lu,\"bottom\":%lu,\"view_id\":%lu,"
                  "\"sync\":%lu,\"ppa_push\":%lu,\"m_unused\":%lu,\"m_tiles\":%lu,\"m_rings\":%lu,\"m_tgt_nodes\":%lu,\"m_drones\":%lu,\"m_chrome\":%lu}}\n",
                  (unsigned long)(millis() / 1000), reset_name(diagReset), (unsigned long)diagBoots, (unsigned long)crashes,
@@ -440,7 +443,7 @@ void debug_poll() {
                  heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                  (unsigned long)diagFrameWorst, (unsigned long)diagDrawWorst, (unsigned long)diagPushWorst,
                  (unsigned long)maptiles_cached(), (unsigned long)maptiles_stack_min(), sd_state(), (unsigned long)sd_tiles(), (unsigned long)sd_cache_puts(), (unsigned long)sd_cache_hits(), store_state(), tm,
-                 (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0,
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr), WiFi.RSSI(), M->sockUp ? 1 : 0, gfx_ok() ? 1 : 0, lk,
                  (unsigned long)ui_prof[0], (unsigned long)ui_prof[1], (unsigned long)ui_prof[2], (unsigned long)ui_prof[3],
                  (unsigned long)ui_prof[5], (unsigned long)ui_prof[4], (unsigned long)ui_prof[6], 0UL, (unsigned long)ui_prof[7], (unsigned long)ui_prof[8],
                  (unsigned long)ui_prof[9], (unsigned long)ui_prof[10], (unsigned long)ui_prof[11]);

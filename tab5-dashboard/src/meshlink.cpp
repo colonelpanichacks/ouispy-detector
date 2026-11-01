@@ -27,6 +27,8 @@ struct Sent { uint32_t h, ms; } sentDet[64];
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 char state[64] = "off";
 uint32_t heardMs = 0, sentMs = 0, posMs = 0, helloMs = 0, wdMs = 0, wdLast = 0;
+uint32_t nRx = 0, nSum = 0, nBatch = 0, nSent = 0, nSwap = 0;   // for /info: is home getting through?
+char lastRx[64] = "";
 double posLat = 0, posLon = 0;
 int rxPin = 53, txPin = 54;   // a straight Grove cable: the C6L's TX (GPIO 5) lands on 53
 
@@ -50,6 +52,7 @@ void send(const char *text) {
     Serial1.print(text);   // TEXTMSG: what arrives in one burst goes out as one message
     Serial1.flush();
     sentMs = millis();
+    nSent++;
 }
 
 double dist_m(double la1, double lo1, double la2, double lo2) {
@@ -88,8 +91,10 @@ void on_line(char *line) {
     char *t = strstr(line, ": ");
     t = t ? t + 2 : line;
     heardMs = millis();
-    if (!strncmp(t, "OSM1 S ", 7)) on_summary(t + 7);
-    else if (!strncmp(t, "OSM2 B", 6)) on_batch(t + 6);
+    nRx++;
+    strlcpy(lastRx, line, sizeof lastRx);
+    if (!strncmp(t, "OSM1 S ", 7)) nSum++, on_summary(t + 7);
+    else if (!strncmp(t, "OSM2 B", 6)) nBatch++, on_batch(t + 6);
     else if (!strncmp(t, "OUI-SPY", 7)) toast("%.90s", t);
     else if (!strncmp(t, "OSM", 3)) return;   // another Tab5's lines: not for us
     else toast("mesh: %.90s", t);   // a person typed it
@@ -196,6 +201,7 @@ void meshlink_run() {
             snprintf(state, sizeof state, "mesh link: waiting for home (port A %d/%d)", rxPin, txPin);
             if (now - openedMs > SWAP_MS) {   // the wires may be the other way round
                 std::swap(rxPin, txPin);
+                nSwap++;
                 Serial1.end();
                 Serial1.begin(BAUD, SERIAL_8N1, rxPin, txPin);
                 openedMs = now;
@@ -234,3 +240,16 @@ void meshlink_det(const char *node, const char *mac, int rssi, bool wifi, bool i
 }
 
 const char *meshlink_state() { return state; }
+
+void meshlink_info(char *out, size_t n) {
+    char safe[64];
+    int k = 0;
+    for (const char *c = lastRx; *c && k < (int)sizeof safe - 1; c++)
+        if (*c != '"' && *c != '\\') safe[k++] = *c;
+    safe[k] = 0;
+    snprintf(out, n,
+             "{\"on\":%d,\"state\":\"%s\",\"pins\":\"%d/%d\",\"rx\":%lu,\"summaries\":%lu,\"batches\":%lu,"
+             "\"sent\":%lu,\"swaps\":%lu,\"heard_s\":%ld,\"last_rx\":\"%s\"}",
+             S.meshLink ? 1 : 0, state, rxPin, txPin, (unsigned long)nRx, (unsigned long)nSum, (unsigned long)nBatch,
+             (unsigned long)nSent, (unsigned long)nSwap, heardMs ? (long)((millis() - heardMs) / 1000) : -1L, safe);
+}

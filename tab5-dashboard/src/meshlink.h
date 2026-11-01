@@ -15,3 +15,4 @@
 void meshlink_run();   // gps task, while S.meshLink: owns Serial1 on port A, returns when it's off
 void meshlink_det(const char *node, const char *mac, int rssi, bool wifi, bool isNew);   // our nodes' detections, to home
 const char *meshlink_state();   // for Settings and /info
+void meshlink_info(char *out, size_t n);   // /info "link": what came in and went out
