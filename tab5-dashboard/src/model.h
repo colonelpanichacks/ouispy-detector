@@ -119,6 +119,7 @@ struct Drone {
     char closest[7];
     char vendor[32];      // its radio's maker (MAC OUI)
     char maker[48];       // FAA registry: make + model (from the serial)
+    char notes[120];      // the dashboard's notes on it
     double lat, lon, plat, plon;
     float alt, hagl, spd, vspd, hdg;
     bool hasPos, hasPilot, hasAlt, hasHagl, hasSpd, hasHdg;
@@ -275,7 +276,9 @@ double server_now();                  // server epoch now, extrapolated
 const Node *node_by_id(const char *id);
 void node_local_fix(const char *id, double la, double lo);   // the GPS node on our USB: its live fix
 const char *node_name(const char *id);  // alias, else id
+const char *mac_alias(const char *mac);  // the dashboard's name for any MAC, or nullptr (model lock)
 uint16_t node_color565(const char *id);
+uint16_t hsl565(float h, float s, float l);   // h 0-360, s and l 0-1
 const Det *det_at(int i);             // 0 = newest
 bool mac_muted(const char *mac);
 void mute_toggle(const char *mac);

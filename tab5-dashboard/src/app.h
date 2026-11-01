@@ -29,6 +29,11 @@ struct App {
     bool mapFollow = false;     // keep the newest live drone centred
     bool triOn = true;          // map: devices at the dashboard's triangulated fix, lines to the nodes
     bool droneTracks = true;    // map: every track (drones, pilots, our own trail)
+    bool wdNaming = false;      // typing a wardriven device's alias (in editBuf)
+    char wdNode[7] = "";        // its ADD AS DETECTION target ("" = every node)
+    uint8_t markMode = 0;       // map: 1 dropping a pin, 2 drawing an area (tapping its corners)
+    bool markOpen = false;      // the map mark editor card is up
+    bool markNaming = false;    // ...and typing its name
     uint8_t mxMode = 0;         // metrics: 0 detections, 1 wardriving, 2 drones (follows the picked node's kind)
     char prox[18] = "";         // proximity mode: this device (MAC), LED + beeps by its signal
     bool ovWd = false;          // overview: wardriving instead of detections

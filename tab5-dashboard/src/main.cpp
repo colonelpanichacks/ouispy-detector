@@ -3,6 +3,7 @@
 // The Tab5 is a client of the home dashboard (home-dashboard/ouispymesh.py): fleet,
 // detections and sightings arrive over its Socket.IO feed, stats and metrics over HTTP.
 // No mesh radio and no firmware changes on the detectors.
+#include "marks.h"
 #include <M5Unified.h>
 #include <M5UnitUnified.h>
 #include <M5UnitUnifiedKEYBOARD.h>
@@ -267,6 +268,7 @@ void setup() {
     // The card before any feed: what was saved goes back in first, then live data lands on it.
     sd_begin();
     store_load();
+    marks_load();   // map pins and areas, unsent ones included
     if (S.source != SRC_NETWORK) feed_start();
     net_start();
     maptiles_start();

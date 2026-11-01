@@ -17,6 +17,7 @@
 #include "sdcard.h"
 #include "store.h"
 #include "wd.h"
+#include "marks.h"
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 #include <esp_core_dump.h>
@@ -126,7 +127,7 @@ void set_error(const char *fmt, ...) {
 // before it is parsed: the console alone is one event per serial line.
 bool wanted(const char *name) {
     static const char *keep[] = {"fleet", "det", "sighting", "node_filters", "node_event", "dets_cleared", "bridge_tx",
-                                 "drone", "groups", "mac_aliases", "tri", "wd", "wd_session"};
+                                 "drone", "groups", "mac_aliases", "tri", "wd", "wd_session", "marks"};
     for (auto k : keep)
         if (!strcmp(name, k)) return true;
     return false;
@@ -175,6 +176,11 @@ void on_event(uint8_t *payload, size_t len) {
     } else if (!strcmp(name, "wd_session")) {
         model_lock();
         wd_new_session();
+        model_unlock();
+    }
+    else if (!strcmp(name, "marks")) {
+        model_lock();
+        marks_ingest(body["marks"]);
         model_unlock();
     }
     else if (!strcmp(name, "mac_aliases")) { ingest_names(body, JsonObjectConst(), JsonObjectConst()); wantDetail = true; }
@@ -667,6 +673,7 @@ void fetch_state() {
     filter["mac_aliases"] = true;
     filter["device_names"] = true;
     filter["group_of"] = true;
+    filter["marks"] = true;
     filter["fleet"]["home"] = true;
     filter["fleet"]["ts"] = true;
     JsonObject nf = filter["fleet"]["nodes"][0].to<JsonObject>();
@@ -888,6 +895,7 @@ void poll_task(void *) {
         if (now - lastPrune > 5000) {
             lastPrune = now;
             prune_targets();
+            marks_sync();   // map marks made here: to the dashboard, and the card copy
         }
         static uint32_t lastPrefetch = 0;
         // Background work, so only with room to spare: one record every 15 s, never while
@@ -944,6 +952,8 @@ String net_target() {
 bool net_ota_enabled() { return otaReady; }
 bool net_online() { return M->sockUp && S.source != SRC_USB; }
 String net_base() { return addr.length() ? "http://" + addr + ":" + String(port) : String(); }
+
+bool net_post_now(const char *path, const char *body) { return http_post(path, body); }
 
 bool net_post(const char *path, const char *body) {
     if (!postQ || !net_online()) return false;

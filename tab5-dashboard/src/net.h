@@ -6,7 +6,8 @@ String net_ip();
 int net_rssi();
 String net_target();            // "host:port" as resolved
 bool net_ota_enabled();
-bool net_online();                       // talking to the dashboard (not USB-only)
+bool net_online();
+bool net_post_now(const char *path, const char *body);   // POST and wait (poll task only): true on 200                       // talking to the dashboard (not USB-only)
 void net_bulk_begin();                   // around any big HTTP download (see net.cpp)
 void net_bulk_end();
 String net_base();                       // "http://ip:port" of the dashboard, or ""

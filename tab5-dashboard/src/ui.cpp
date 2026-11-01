@@ -1,6 +1,7 @@
 // Rendering and input for the Tab5: one 1280x720 PSRAM canvas, redrawn when the model or
 // the view changes (or once a second for ages and the clock), pushed in one go so nothing
 // flickers or shifts. Every panel has a fixed size: new data fills it, never moves it.
+#include "marks.h"
 #include "ui.h"
 #include "app.h"
 #include "model.h"
@@ -79,7 +80,9 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND,
+    H_MKPIN, H_MKAREA, H_MKOPEN, H_MKHUE, H_MKICON, H_MKNAME, H_MKSAVE, H_MKDEL, H_MKCLOSE, H_MKUNDO, H_MKDONE, H_MKCANCEL,
+    H_WDNAME, H_WDNODE, H_WDADD
 };
 struct Hit {
     int16_t x, y, w, h;
@@ -791,6 +794,199 @@ void tile_blit(const uint16_t *t, int k, int tx, int ty, double ts, int sx0, int
     gfx_tile((uint16_t *)C.getBuffer(), t, su + cu0, sv + cv0, uw, vh, px, py, canvasRot() == 3, scale);
 }
 
+// ---- map marks: pins and named areas (marks.h) ----
+float mkDraft[MARK_PTS][2];   // the area being drawn: lat, lon
+int mkDraftN = 0;
+Mark mkEd;                    // the mark the editor card is on (a copy until SAVE)
+bool mkEdNew = false;
+
+uint16_t mark_color(int hue) { return hsl565(hue, 1.0f, 0.6f); }
+
+void thick_line(int x0, int y0, int x1, int y1, uint16_t c) {
+    C.drawLine(x0, y0, x1, y1, c);
+    C.drawLine(x0 + 1, y0, x1 + 1, y1, c);
+    C.drawLine(x0, y0 + 1, x1, y1 + 1, c);
+}
+
+// The dashboard's twelve mark icons (marks.js draws the same), s = half size.
+void mark_icon(int x, int y, int s, int icon, uint16_t c) {
+    switch (icon) {
+    case 1:   // flag
+        thick_line(x - s / 2, y - s, x - s / 2, y + s, c);
+        C.fillTriangle(x - s / 2, y - s, x + s, y - s / 2, x - s / 2, y, c);
+        break;
+    case 2:   // target
+        C.drawCircle(x, y, s * 3 / 4, c), C.drawCircle(x, y, s * 3 / 4 - 1, c);
+        C.fillCircle(x, y, s / 4, c);
+        C.drawFastHLine(x - s, y, s / 2, c), C.drawFastHLine(x + s / 2, y, s / 2, c);
+        C.drawFastVLine(x, y - s, s / 2, c), C.drawFastVLine(x, y + s / 2, s / 2, c);
+        break;
+    case 3:   // house
+        thick_line(x - s, y, x, y - s, c), thick_line(x, y - s, x + s, y, c);
+        C.drawRect(x - s * 3 / 4, y, s * 3 / 2, s, c), C.drawRect(x - s * 3 / 4 + 1, y + 1, s * 3 / 2 - 2, s - 2, c);
+        break;
+    case 4:   // car
+        C.drawRoundRect(x - s, y - s / 3, s * 2, s * 2 / 3 + 2, 3, c), C.drawRoundRect(x - s + 1, y - s / 3 + 1, s * 2 - 2, s * 2 / 3, 3, c);
+        thick_line(x - s * 2 / 3, y - s / 3, x - s / 3, y - s * 3 / 4, c), thick_line(x - s / 3, y - s * 3 / 4, x + s / 3, y - s * 3 / 4, c);
+        thick_line(x + s / 3, y - s * 3 / 4, x + s * 2 / 3, y - s / 3, c);
+        C.fillCircle(x - s / 2, y + s / 2, s / 4, c), C.fillCircle(x + s / 2, y + s / 2, s / 4, c);
+        break;
+    case 5:   // person
+        C.fillCircle(x, y - s * 2 / 3, s / 3, c);
+        thick_line(x, y - s / 3, x, y + s / 3, c), thick_line(x - s * 2 / 3, y - s / 8, x + s * 2 / 3, y - s / 8, c);
+        thick_line(x, y + s / 3, x - s / 2, y + s, c), thick_line(x, y + s / 3, x + s / 2, y + s, c);
+        break;
+    case 6:   // drone
+        thick_line(x - s * 2 / 3, y - s * 2 / 3, x + s * 2 / 3, y + s * 2 / 3, c), thick_line(x + s * 2 / 3, y - s * 2 / 3, x - s * 2 / 3, y + s * 2 / 3, c);
+        for (int dx = -1; dx <= 1; dx += 2)
+            for (int dy = -1; dy <= 1; dy += 2) C.drawCircle(x + dx * s * 2 / 3, y + dy * s * 2 / 3, s / 3, c);
+        C.fillRect(x - s / 4, y - s / 4, s / 2, s / 2, c);
+        break;
+    case 7:   // camera
+        C.drawRoundRect(x - s, y - s / 2, s * 2, s * 3 / 2, 3, c), C.drawRoundRect(x - s + 1, y - s / 2 + 1, s * 2 - 2, s * 3 / 2 - 2, 3, c);
+        C.drawCircle(x, y + s / 4, s / 2, c), C.drawCircle(x, y + s / 4, s / 2 - 1, c);
+        C.fillRect(x - s / 3, y - s * 3 / 4, s * 2 / 3, s / 4 + 1, c);
+        break;
+    case 8:   // warning
+        thick_line(x, y - s, x - s, y + s * 3 / 4, c), thick_line(x, y - s, x + s, y + s * 3 / 4, c);
+        thick_line(x - s, y + s * 3 / 4, x + s, y + s * 3 / 4, c);
+        C.fillRect(x - 1, y - s / 3, 3, s * 2 / 3, c), C.fillRect(x - 1, y + s / 2 - 1, 3, 3, c);
+        break;
+    case 9: {   // star
+        int px[10], py[10];
+        for (int k = 0; k < 10; k++) {
+            float a = -M_PI / 2 + k * M_PI / 5, r = k % 2 ? s * 0.42f : s;
+            px[k] = x + (int)(cosf(a) * r), py[k] = y + (int)(sinf(a) * r);
+        }
+        for (int k = 0; k < 10; k++) C.fillTriangle(x, y, px[k], py[k], px[(k + 1) % 10], py[(k + 1) % 10], c);
+        break;
+    }
+    case 10:   // camp
+        thick_line(x - s, y + s * 3 / 4, x, y - s, c), thick_line(x, y - s, x + s, y + s * 3 / 4, c);
+        thick_line(x - s, y + s * 3 / 4, x + s, y + s * 3 / 4, c);
+        C.fillTriangle(x - s / 3, y + s * 3 / 4, x, y + s / 6, x + s / 3, y + s * 3 / 4, c);
+        break;
+    case 11:   // radio
+        thick_line(x, y - s / 4, x, y + s, c), thick_line(x - s / 2, y + s, x + s / 2, y + s, c);
+        C.fillCircle(x, y - s / 3, s / 5 + 1, c);
+        C.drawArc(x, y - s / 3, s * 2 / 3, s * 2 / 3 - 2, 120, 240, c), C.drawArc(x, y - s / 3, s * 2 / 3, s * 2 / 3 - 2, 300, 420, c);
+        C.drawArc(x, y - s / 3, s, s - 2, 125, 235, c), C.drawArc(x, y - s / 3, s, s - 2, 305, 415, c);
+        break;
+    default:   // pin
+        C.fillCircle(x, y - s / 4, s * 2 / 3, c);
+        C.fillTriangle(x - s / 2, y, x + s / 2, y, x, y + s, c);
+        C.fillCircle(x, y - s / 4, s / 4, BG);
+        break;
+    }
+}
+
+// + PIN / + AREA on the map, or the bar for the one in progress.
+void draw_mark_tools() {
+    if (A.markOpen) return;
+    int x = MX + PAD, y = MY + MH - 64, w;
+    if (!A.markMode) {
+        chip(x, y, "+ PIN", rgb(0x22d3ee), false, &w, H_MKPIN);
+        chip(x + w + 10, y, "+ AREA", rgb(0xff2bd6), false, nullptr, H_MKAREA);
+        return;
+    }
+    int bw = A.markMode == 1 ? 560 : 760, bh = 56;
+    fast_round(x, y - 8, bw, bh, 10, dim(BG, 0.94f));
+    glow_rect(x, y - 8, bw, bh, 10, rgb(0x22d3ee));
+    hit(x, y - 8, bw, bh, H_NONE);
+    font(F_MD);
+    char b[64];
+    if (A.markMode == 1) snprintf(b, sizeof b, "TAP THE MAP TO DROP A PIN");
+    else snprintf(b, sizeof b, "AREA: TAP THE CORNERS  (%d)", mkDraftN);
+    text(x + 18, y + 20, b, TEXT, middle_left);
+    int bx = x + bw - 14;
+    font(F_SM);
+    auto btn = [&](const char *t, uint16_t c, int act, bool on) {
+        bx -= C.textWidth(t) + 28;
+        chip(bx, y + 4, t, on ? c : FAINT, false, nullptr, on ? act : -1);
+        bx -= 10;
+    };
+    btn("CANCEL", AMBER, H_MKCANCEL, true);
+    if (A.markMode == 2) {
+        btn("DONE", rgb(0x39ff88), H_MKDONE, mkDraftN >= 3);
+        btn("UNDO", SKY, H_MKUNDO, mkDraftN > 0);
+    }
+}
+
+// The card for a new or tapped mark: name, colour, icon (pins), SAVE / DELETE / CANCEL.
+void draw_mark_editor() {
+    uint16_t c = mark_color(mkEd.hue);
+    int cw = 700, x = MX + (MW - cw) / 2, y = MY + 20;
+    bool osk = A.markNaming && !kb_present();
+    int ch = osk ? 120 : (mkEd.kind ? 330 : 440);
+    fast_round(x, y, cw, ch, 12, dim(BG, 0.96f));
+    glow_rect(x, y, cw, ch, 12, c);
+    hit(x, y, cw, ch, H_NONE);
+    font(F_SM);
+    text(x + 20, y + 22, mkEdNew ? (mkEd.kind ? "NEW AREA" : "NEW PIN") : (mkEd.kind ? "AREA" : "PIN"), c, middle_left);
+    if (!mkEd.kind) {
+        char ll[40];
+        snprintf(ll, sizeof ll, "%.5f, %.5f", mkEd.lat, mkEd.lon);
+        text(x + cw - 20, y + 22, ll, FAINT, middle_right);
+    } else {
+        char pc[24];
+        snprintf(pc, sizeof pc, "%d corners", mkEd.npts);
+        text(x + cw - 20, y + 22, pc, FAINT, middle_right);
+    }
+    // Name: tap to type (the on-screen keyboard, or the Tab5 Keyboard).
+    int ny = y + 44;
+    fast_round(x + 20, ny, cw - 40, 54, 8, PANEL2);
+    if (A.markNaming) glow_rect(x + 20, ny, cw - 40, 54, 8, c);
+    else C.drawRoundRect(x + 20, ny, cw - 40, 54, 8, LINE2);
+    hit(x + 20, ny, cw - 40, 54, H_MKNAME);
+    font(F_MD);
+    char nb[48];
+    snprintf(nb, sizeof nb, "%s%s", mkEd.name, A.markNaming && (millis() / 500) % 2 ? "_" : "");
+    text(x + 36, ny + 27, nb[0] ? nb : "tap to name it", nb[0] ? TEXT : FAINT, middle_left);
+    if (osk) return;
+    // Colour: tap the strip.
+    int hy = ny + 76, hw = cw - 40, seg = hw / 36;
+    font(F_SM);
+    text(x + 20, hy - 8, "COLOUR", FAINT, middle_left);
+    for (int k = 0; k < 36; k++) {
+        int sx0 = x + 20 + k * seg;
+        C.fillRect(sx0, hy, seg, 34, mark_color(k * 10));
+        hit(sx0, hy - 8, seg, 50, H_MKHUE, k * 10);
+    }
+    int mx = x + 20 + (mkEd.hue / 10) * seg + seg / 2;
+    C.fillTriangle(mx - 8, hy + 46, mx + 8, hy + 46, mx, hy + 36, TEXT);
+    int by = hy + 62;
+    if (!mkEd.kind) {   // icons, pins only
+        text(x + 20, by - 4, "ICON", FAINT, middle_left);
+        int iw = (cw - 40 - 11 * 8) / 12;
+        for (int k = 0; k < MARK_ICONS; k++) {
+            int ix = x + 20 + k * (iw + 8), iy = by + 8;
+            bool on = k == mkEd.icon;
+            fast_round(ix, iy, iw, 64, 8, on ? dim(c, 0.2f) : PANEL2);
+            if (on) glow_rect(ix, iy, iw, 64, 8, c);
+            else C.drawRoundRect(ix, iy, iw, 64, 8, LINE2);
+            mark_icon(ix + iw / 2, iy + 32, 14, k, on ? c : MUTED);
+            hit(ix, iy, iw, 64, H_MKICON, k);
+        }
+        by += 96;
+    }
+    int bx = x + 20, w;
+    chip(bx, by, "SAVE", c, true, &w, H_MKSAVE);
+    bx += w + 12;
+    if (!mkEdNew) {
+        chip(bx, by, "DELETE", RED, false, &w, H_MKDEL);
+        bx += w + 12;
+    }
+    chip(bx, by, "CANCEL", MUTED, false, &w, H_MKCLOSE);
+}
+
+void mark_open(const Mark &m, bool isNew) {
+    mkEd = m;
+    mkEdNew = isNew;
+    A.markOpen = true;
+    A.markNaming = isNew;   // a new one: straight to its name
+    A.markMode = 0;
+}
+
 void draw_map() {
     if (!A.mapInit) {
         map_fit();
@@ -1087,6 +1283,57 @@ void draw_map() {
             drawn++;
         }
     }
+    // Map marks (marks.h): areas under pins, both under us; an area being drawn on top.
+    {
+        for (int i = 0; i < marks_count(); i++) {
+            const Mark &m = *mark_at(i);
+            if (m.deleted || !m.kind || m.npts < 3) continue;
+            uint16_t c = mark_color(m.hue);
+            int px0 = sx(m.pts[m.npts - 1][1]), py0 = sy(m.pts[m.npts - 1][0]);
+            for (int k = 0; k < m.npts; k++) {
+                int x1 = sx(m.pts[k][1]), y1 = sy(m.pts[k][0]);
+                thick_line(px0, py0, x1, y1, c);
+                px0 = x1, py0 = y1;
+            }
+            int cx = sx(m.lon), cy = sy(m.lat);
+            if (m.name[0] && cx > MX - 200 && cx < MX + MW + 200 && cy > MY - 40 && cy < MY + MH + 40) {
+                font(F_SM);
+                int tw = C.textWidth(m.name) + 20;
+                fast_round(cx - tw / 2, cy - 15, tw, 30, 6, dim(BG, 0.9f));
+                C.drawRoundRect(cx - tw / 2, cy - 15, tw, 30, 6, c);
+                text(cx, cy, m.name, c, middle_center);
+                hit(cx - tw / 2, cy - 15, tw, 30, H_MKOPEN, i);
+            }
+        }
+        for (int i = 0; i < marks_count(); i++) {
+            const Mark &m = *mark_at(i);
+            if (m.deleted || m.kind) continue;
+            int x = sx(m.lon), y = sy(m.lat);
+            if (x < MX - 30 || x > MX + MW + 30 || y < MY - 30 || y > MY + MH + 30) continue;
+            uint16_t c = mark_color(m.hue);
+            C.fillCircle(x, y, 20, BG);
+            C.drawCircle(x, y, 20, c);
+            C.drawCircle(x, y, 19, c);
+            C.drawCircle(x, y, 22, dim(c, 0.4f));
+            mark_icon(x, y, 11, m.icon, c);
+            if (m.name[0]) {
+                font(F_SM);
+                map_text(x + 28, y, m.name, c);
+            }
+            hit(x - 26, y - 26, 52, 52, H_MKOPEN, i);
+        }
+        if (A.markMode == 2) {
+            const uint16_t c = rgb(0x22d3ee);
+            for (int k = 0; k < mkDraftN; k++) {
+                int x = sx(mkDraft[k][1]), y = sy(mkDraft[k][0]);
+                if (k) thick_line(sx(mkDraft[k - 1][1]), sy(mkDraft[k - 1][0]), x, y, c);
+                C.fillCircle(x, y, 7, BG);
+                C.drawCircle(x, y, 7, c);
+                C.drawCircle(x, y, 6, c);
+            }
+            if (mkDraftN >= 3) thick_line(sx(mkDraft[mkDraftN - 1][1]), sy(mkDraft[mkDraftN - 1][0]), sx(mkDraft[0][1]), sy(mkDraft[0][0]), dim(c, 0.5f));
+        }
+    }
     // Us: where the Tab5 is (GPS), its trail, a pulse around the dot and which way we move.
     {
         GpsFix gf = gps_fix();
@@ -1209,6 +1456,8 @@ void draw_map() {
         glow(bx + bw / 2, by + bh / 2, k.t, k.on ? PINK : ACCENT, middle_center);
         by += bh + 10;
     }
+    draw_mark_tools();
+    if (A.markOpen) draw_mark_editor();
     uint32_t q6 = micros();
     (void)q0, (void)q1; ui_prof[7] = q2 - q1, ui_prof[8] = q3 - q2, ui_prof[9] = q4 - q3, ui_prof[10] = q5 - q4, ui_prof[11] = q6 - q5;
 }
@@ -1377,7 +1626,8 @@ void draw_drones() {
     else if (d.vendor[0]) snprintf(maker, sizeof maker, "%s (radio)", d.vendor);
     else maker[0] = 0;
     struct { const char *k; const char *v; } f[] = {{"MAKER", maker}, {"SERIAL / ID", d.id}, {"OPERATOR ID", d.op},
-                                                    {"DESCRIPTION", d.desc}, {"AIRCRAFT", d.ua}};
+                                                    {"DESCRIPTION", d.desc}, {"AIRCRAFT", d.ua},
+                                                    {"NOTES", d.notes}};
     // Values run up to the radar box and wrap onto a second line rather than being cut.
     int radarL = x + w - 18 - min(CB - (gy + 3 * 56) - 20, w / 2 - 40);
     int vw = radarL - (gx + 150) - 12;
@@ -1684,6 +1934,69 @@ void node_set(const char *id, const char *json) {
 }
 
 // A wardriven network / device: everything the dashboard decoded (long-press its row).
+void wd_save_alias() {
+    JsonDocument j;
+    j["alias"] = A.editBuf;
+    char body[96], path[48];
+    serializeJson(j, body, sizeof body);
+    snprintf(path, sizeof path, "/api/devices/%s", A.wdOpen);
+    if (net_post(path, body)) toast(A.editBuf[0] ? "named %s" : "name cleared", A.editBuf);
+    A.wdNaming = false;
+}
+
+// The wardriven device card's action bar: NAME (an alias on the dashboard, every screen
+// shows it) and ADD AS DETECTION: a filter on one node or all of them, so they alert on it.
+// The detectors match BLE by full MAC; WiFi only by maker prefix (beacon OUI), so a WiFi
+// device's filter catches every AP of that maker - the bar says so.
+void wd_actions(int x, int y, int w, uint16_t c, const char *title) {
+    bool can = net_online();
+    C.drawFastHLine(x + 16, y - 8, w - 32, LINE2);
+    int fx = x + 24, fw = 420, fh = 52;
+    fast_round(fx, y, fw, fh, 8, PANEL2);
+    if (A.wdNaming) glow_rect(fx, y, fw, fh, 8, PINK);
+    else C.drawRoundRect(fx, y, fw, fh, 8, LINE2);
+    hit(fx, y, fw, fh, can ? H_WDNAME : H_NONE);
+    char nb[48];
+    const char *al = mac_alias(A.wdOpen);
+    if (A.wdNaming) snprintf(nb, sizeof nb, "%s%s", A.editBuf, (millis() / 500) % 2 ? "_" : "");
+    else snprintf(nb, sizeof nb, "%s", al && *al ? al : can ? "tap to name it" : "naming needs the dashboard");
+    font(F_SM);
+    text(fx + 12, y + 12, "NAME", dim(ACCENT, 0.9f), middle_left);
+    font(F_MD);
+    text(fx + 12, y + 34, fit(nb, fw - 24), A.wdNaming ? PINK : (al && *al) ? TEXT : FAINT, middle_left);
+    int bx = fx + fw + 20, cw;
+    font(F_SM);
+    text(bx, y + 12, A.wdOpenKind == 2 ? "ALERT ON THIS DEVICE (BLE MAC)" : "ALERT ON THIS MAKER'S APS (WIFI OUI)", FAINT, middle_left);
+    const char *nl = A.wdNode[0] ? node_name(A.wdNode) : "ALL NODES";
+    chip(bx, y + 22, fit_name(nl, 170), A.wdNode[0] ? node_color565(A.wdNode) : ACCENT, A.wdNode[0] != 0, &cw, can ? H_WDNODE : -1);
+    chip(bx + cw + 10, y + 22, "ADD AS DETECTION", c, true, nullptr, can ? H_WDADD : -1);
+}
+
+void wd_add_detection() {
+    char hex[13];
+    int k = 0;
+    for (const char *p = A.wdOpen; *p && k < 12; p++)
+        if (isxdigit((unsigned char)*p)) hex[k++] = toupper(*p);
+    hex[k] = 0;
+    if (k != 12) return;
+    const char *al = mac_alias(A.wdOpen);
+    char desc[48];
+    snprintf(desc, sizeof desc, "%s", al && *al ? al : A.wdOpen);
+    JsonDocument j;
+    j["op"] = "filters_add";
+    JsonObject f = j["args"]["filters"].add<JsonObject>();
+    bool ble = A.wdOpenKind == 2;
+    if (ble) f["t"] = "MAC", f["id"] = hex;
+    else hex[6] = 0, f["t"] = "BEACON", f["id"] = hex;
+    f["d"] = desc;
+    char body[256], path[48];
+    serializeJson(j, body, sizeof body);
+    if (A.wdNode[0]) snprintf(path, sizeof path, "/api/nodes/%s/cmd", A.wdNode);
+    else snprintf(path, sizeof path, "/api/fleet/cmd");
+    if (net_post(path, body))
+        toast("%s: %s %s added on %s", desc, ble ? "MAC" : "WiFi maker", hex, A.wdNode[0] ? node_name(A.wdNode) : "all nodes");
+}
+
 void draw_wd_info() {
     int x = PAD + 120, y = CY + 10, w = W - 2 * PAD - 240, h = CB - CY - 20;
     fast_fill(0, TOP, W, H - TOP - BOT, dim(BG, 0.6f));
@@ -1711,13 +2024,16 @@ void draw_wd_info() {
     chip(x + w - 24 - (C.textWidth("CLOSE  ESC") + 28), y + 18, "CLOSE  ESC", ACCENT, false, &cw, H_WDCLOSE);
     int yy = y + 96;
     if (!here) {
+        wd_actions(x, y + h - 76, w, c, title);
         font(F_MD);
         text(x + w / 2, y + h / 2, wi.failed && !strcmp(wi.mac, A.wdOpen) ? "the dashboard doesn't know it yet"
                                    : net_online() ? "loading..." : "full details come from the dashboard (Wi-Fi)",
              FAINT, middle_center);
         return;
     }
-    for (int i = 0; i < wi.n && yy + 30 < y + h; i++) {
+    // Act on it: name it, or have the detector nodes alert on it (bottom bar).
+    wd_actions(x, y + h - 76, w, c, title);
+    for (int i = 0; i < wi.n && yy + 30 < y + h - 84; i++) {
         font(F_SM);
         text(x + 24, yy + 10, wi.k[i], dim(ACCENT, 0.9f), middle_left);
         font(F_MD);
@@ -2708,7 +3024,7 @@ void seen_bars(int x, int y, int w, const Seen *s, int n, int rowH, int maxRows)
 // On-screen keyboard for the search box when no keyboard is plugged in: letters, digits and
 // what MACs need, SPACE / DEL / CLEAR / DONE. It sits over the bottom of the page.
 void draw_osk() {
-    if (!A.searching || kb_present()) return;
+    if (!(A.searching || A.markNaming || A.wdNaming) || kb_present()) return;
     static const char *ROWS[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL:", "ZXCVBNM-._"};
     int kw = (W - 2 * PAD - 9 * 8) / 10, kh = 50, gap = 8;
     int h = 5 * kh + 4 * gap + 24, y0 = CB - h;
@@ -4250,6 +4566,23 @@ void ui_key(uint8_t kc, uint8_t mod, char ch) {
         return;
     }
     bool shift = mod & 0x22, ctrl = mod & 0x11;
+    if (A.wdNaming) {   // a wardriven device's alias: Enter saves, Esc drops it
+        size_t k = strlen(A.editBuf);
+        if (kc == 0x28 || kc == 0x58) wd_save_alias();
+        else if (kc == 0x29) A.wdNaming = false;
+        else if (kc == 0x2A || kc == 0x4C) { if (k) A.editBuf[k - 1] = 0; }
+        else if (ch >= 0x20 && ch < 0x7f && ch != '"' && ch != '\\' && k + 1 < 33) A.editBuf[k] = ch, A.editBuf[k + 1] = 0;
+        return;
+    }
+    if (A.markNaming) {   // a map mark's name from the keyboard: Enter done, Esc stops typing
+        size_t k = strlen(mkEd.name);
+        if (kc == 0x28 || kc == 0x58 || kc == 0x29) A.markNaming = false;
+        else if (kc == 0x2A || kc == 0x4C) { if (k) mkEd.name[k - 1] = 0; }
+        else if (ch >= 0x20 && ch < 0x7f && k + 1 < sizeof mkEd.name) mkEd.name[k] = ch, mkEd.name[k + 1] = 0;
+        return;
+    }
+    if (A.markOpen && kc == 0x29) { A.markOpen = false; return; }
+    if (A.markMode && kc == 0x29) { A.markMode = 0; mkDraftN = 0; return; }
     if (A.help) {
         A.help = false;
         return;
@@ -4683,6 +5016,22 @@ static void dispatch(const Hit &h) {
     case H_NODE: cycle_node(); break;
     case H_MXWD: A.mxMode = (A.mxMode + 1) % 3; break;
     case H_OSK: {
+        if (A.wdNaming) {   // a wardriven device's alias: DONE saves it
+            size_t k = strlen(A.editBuf);
+            if (h.arg == 8) { if (k) A.editBuf[k - 1] = 0; }
+            else if (h.arg == 27) A.editBuf[0] = 0;
+            else if (h.arg == 13) wd_save_alias();
+            else if (k + 1 < 33 && h.arg != '"' && h.arg != '\\') A.editBuf[k] = (char)h.arg, A.editBuf[k + 1] = 0;
+            break;
+        }
+        if (A.markNaming) {   // a map mark's name
+            size_t k = strlen(mkEd.name);
+            if (h.arg == 8) { if (k) mkEd.name[k - 1] = 0; }
+            else if (h.arg == 27) mkEd.name[0] = 0;
+            else if (h.arg == 13) A.markNaming = false;
+            else if (k + 1 < sizeof mkEd.name) mkEd.name[k] = (char)h.arg, mkEd.name[k + 1] = 0;
+            break;
+        }
         size_t n = strlen(A.search);
         if (h.arg == 8) { if (n) A.search[n - 1] = 0; }
         else if (h.arg == 27) A.search[0] = 0;
@@ -4712,6 +5061,53 @@ static void dispatch(const Hit &h) {
         A.mapMove = !A.mapMove;
         if (A.mapMove) toast("tap the map where %s is", node_name(A.mapPop));
         break;
+    case H_WDNAME: {
+        A.wdNaming = !A.wdNaming;
+        const char *al = mac_alias(A.wdOpen);
+        if (A.wdNaming) strlcpy(A.editBuf, al ? al : "", sizeof A.editBuf);
+        break;
+    }
+    case H_WDNODE: {   // ALL NODES, then each detector (not wardrivers / Sky-Spy: they don't take filters)
+        int cur = -1;
+        for (int i = 0; i < M->nnodes; i++)
+            if (!strcmp(M->nodes[i].id, A.wdNode)) cur = i;
+        A.wdNode[0] = 0;
+        for (int i = cur + 1; i < M->nnodes; i++)
+            if (node_kind(M->nodes[i].id) == 0) { strlcpy(A.wdNode, M->nodes[i].id, sizeof A.wdNode); break; }
+        break;
+    }
+    case H_WDADD: wd_add_detection(); break;
+    case H_MKPIN: A.markMode = 1; A.mapPop[0] = 0; break;
+    case H_MKAREA: A.markMode = 2; mkDraftN = 0; A.mapPop[0] = 0; break;
+    case H_MKCANCEL: A.markMode = 0; mkDraftN = 0; break;
+    case H_MKUNDO: if (mkDraftN) mkDraftN--; break;
+    case H_MKDONE:
+        if (mkDraftN >= 3) {
+            Mark m = {};
+            mark_new_id(m.id, sizeof m.id);
+            m.kind = 1, m.hue = 300, m.npts = mkDraftN;
+            memcpy(m.pts, mkDraft, sizeof(float) * 2 * mkDraftN);
+            mkDraftN = 0;
+            mark_open(m, true);
+        }
+        break;
+    case H_MKOPEN:
+        if (const Mark *m = mark_at(h.arg)) mark_open(*m, false);
+        break;
+    case H_MKNAME: A.markNaming = !A.markNaming; break;
+    case H_MKHUE: mkEd.hue = h.arg; break;
+    case H_MKICON: mkEd.icon = h.arg; break;
+    case H_MKSAVE:
+        mark_put(mkEd);
+        toast(net_online() ? "%s saved" : "%s saved here, goes to the dashboard when it's back", mkEd.name[0] ? mkEd.name : (mkEd.kind ? "area" : "pin"));
+        A.markOpen = A.markNaming = false;
+        break;
+    case H_MKDEL:
+        mark_delete(mkEd.id);
+        toast("%s deleted", mkEd.name[0] ? mkEd.name : (mkEd.kind ? "area" : "pin"));
+        A.markOpen = A.markNaming = false;
+        break;
+    case H_MKCLOSE: A.markOpen = A.markNaming = false; break;
     case H_PROXSTOP: A.prox[0] = 0; toast("proximity off"); break;
     case H_ZLOCK: A.liveZoomLock = !A.liveZoomLock; toast(A.liveZoomLock ? "list zoom locked" : "pinch the list to zoom it"); break;
     case H_OVDET:
@@ -4863,6 +5259,18 @@ void ui_release(int x, int y) {
         node_set(A.mapPop, body);
         toast("%s placed here", node_name(A.mapPop));
         A.mapMove = false;
+    } else if (A.markMode && !T.dragging && !T.hasPressed && T.scroll >= 0 && T.area.list == L_MAP && A.view == V_MAP) {
+        double la, lo;
+        screen_to_ll(x, y, gZoomShown, la, lo);
+        if (A.markMode == 1) {
+            Mark m = {};
+            mark_new_id(m.id, sizeof m.id);
+            m.kind = 0, m.hue = 190, m.icon = 0, m.lat = la, m.lon = lo;
+            mark_open(m, true);
+        } else if (mkDraftN < MARK_PTS) {
+            mkDraft[mkDraftN][0] = la, mkDraft[mkDraftN][1] = lo;
+            mkDraftN++;
+        }
     } else
     // Double tap on the map: zoom in around that spot.
     if (!T.dragging && !T.hasPressed && T.scroll >= 0 && T.area.list == L_MAP && A.view == V_MAP && !A.detail) {
@@ -5012,8 +5420,9 @@ void ui_frame() {
         default: break;
         }
         if (A.detail) draw_detail();
-        if (A.view == V_LIVE) draw_osk();
+        if (A.view == V_LIVE || (A.view == V_MAP && A.markNaming)) draw_osk();
         if (A.wdOpen[0]) draw_wd_info();
+        if (A.wdOpen[0] && A.wdNaming) draw_osk();
         if (A.nodeEdit[0]) draw_node_editor();
         uint32_t p2 = micros();
         cached_band(topBand, top_key(), draw_top);

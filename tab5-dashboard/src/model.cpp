@@ -2,6 +2,7 @@
 #include "settings.h"
 #include <M5GFX.h>
 #include <Preferences.h>
+#include "marks.h"
 void node_trail_add(const char *id, double la, double lo);
 
 Model *M = nullptr;
@@ -74,7 +75,7 @@ const char *node_name(const char *id) {
     return (id && *id) ? id : "?";
 }
 
-static uint16_t hsl565(float h, float s, float l) {
+uint16_t hsl565(float h, float s, float l) {
     float c = (1 - fabsf(2 * l - 1)) * s;
     float hp = fmodf(h, 360) / 60.0f;
     float x = c * (1 - fabsf(fmodf(hp, 2) - 1));
@@ -630,6 +631,7 @@ void ingest_stats(JsonDocument &doc) {
 
 void ingest_state(JsonDocument &doc) {
     Guard g;
+    if (doc["marks"].is<JsonArrayConst>()) marks_ingest(doc["marks"]);
     CPY(M->mode, doc["mode"]);
     if (!M->mode[0]) strlcpy(M->mode, "live", sizeof M->mode);
     fleet_locked(doc["fleet"]);
@@ -935,6 +937,7 @@ void ingest_drone(JsonObjectConst o) {
     if (o["src"].is<const char *>()) CPY(d->src, o["src"]);
     if (o["closest"].is<const char *>()) CPY(d->closest, o["closest"]);
     if (o["vendor"].is<const char *>()) CPY(d->vendor, o["vendor"]);
+    if (o["notes"].is<const char *>()) CPY(d->notes, o["notes"]);
     JsonVariantConst faa = o["faa"];
     if (!faa.isNull()) {   // FAA UAS DOC answer: data.items[0] (or items[0])
         JsonVariantConst it = faa["data"]["items"][0];
@@ -1027,6 +1030,11 @@ void ingest_detail(JsonDocument &doc) {
     dd.group[0] = 0;
     if (doc["group"].is<JsonObjectConst>()) CPY(dd.group, doc["group"]["name"]);
     dd.nrows = 0;
+    if (const char *nt = doc["notes"] | ""; *nt) {   // the dashboard's notes on it, first
+        strlcpy(dd.rows[0][0], "Notes", sizeof dd.rows[0][0]);
+        strlcpy(dd.rows[0][1], nt, sizeof dd.rows[0][1]);
+        dd.nrows = 1;
+    }
     for (JsonArrayConst r : doc["rows"].as<JsonArrayConst>()) {
         if (dd.nrows == 30) break;
         CPY(dd.rows[dd.nrows][0], r[0]);
@@ -1057,8 +1065,31 @@ void ingest_detail(JsonDocument &doc) {
 }
 
 // Dashboard renamed / regrouped devices: refresh what is on screen.
+// Every MAC the dashboard has a name for (any device, a wardriven one too).
+static struct AliasRow { char mac[18], alias[24]; } *aliasTab = nullptr;
+static int nAlias = 0;
+constexpr int MAX_ALIAS = 512;
+
+const char *mac_alias(const char *mac) {
+    for (int i = 0; i < nAlias; i++)
+        if (!strcasecmp(aliasTab[i].mac, mac)) return aliasTab[i].alias;
+    return nullptr;
+}
+
 void ingest_names(JsonObjectConst aliases, JsonObjectConst names, JsonObjectConst groupOf) {
     Guard g;
+    if (!aliases.isNull()) {
+        if (!aliasTab) aliasTab = (AliasRow *)ps_calloc(MAX_ALIAS, sizeof(AliasRow));
+        nAlias = 0;
+        for (JsonPairConst kv : aliases) {
+            if (!aliasTab || nAlias == MAX_ALIAS) break;
+            const char *a = kv.value()["alias"] | "";
+            if (!*a) continue;
+            strlcpy(aliasTab[nAlias].mac, kv.key().c_str(), sizeof aliasTab[nAlias].mac);
+            strlcpy(aliasTab[nAlias].alias, a, sizeof aliasTab[nAlias].alias);
+            nAlias++;
+        }
+    }
     for (int i = 0; i < M->ntargets; i++) {
         Target &t = M->targets[i];
         if (!aliases.isNull()) {
