@@ -281,11 +281,13 @@ def emit(event, payload):
 
 fleet = Fleet(store, emit)
 import drones as drones_mod
+import marks as marks_mod
 drones = drones_mod.Drones(store, emit)
 fleet.drones = drones
 drones.on_det = fleet.feed_detection
 import wardrive as wardrive_mod
 wardrive = wardrive_mod.Wardrive(store, emit)
+marks = marks_mod.Marks(store, emit)
 fleet.wardrive = wardrive
 import tri as tri_mod
 
@@ -548,7 +550,7 @@ def api_state():
                         "stats": store.detection_stats(), "hourly": store.hourly(),
                         "mac_aliases": store.mac_aliases(), "device_names": store.device_names(),
                         "drones": drones.snapshot(), "tri": list(fleet.tri_fixes.values()),
-                        "group_of": store.group_of(), "recent": recent,
+                        "group_of": store.group_of(), "recent": recent, "marks": marks.all(),
                         "mode": "demo" if args.demo else ("replay" if args.replay else "live")})
     return jsonify({"fleet": fleet.snapshot(), "sources": sources_status(),
                     "settings": public_settings(), "stats": store.detection_stats(),
@@ -556,7 +558,7 @@ def api_state():
                     "device_names": store.device_names(), "groups": store.groups(),
                     "drones": drones.snapshot(), "drone_tags": drones_mod.TAGS,
                     "tri": list(fleet.tri_fixes.values()),
-                    "group_of": store.group_of(),
+                    "group_of": store.group_of(), "marks": marks.all(), "mark_icons": marks_mod.ICONS,
                     "jobs": _jobs(None), "can_command": command_sender() is not None,
                     "filter_meta": _filter_meta(),
                     "recent": recent, "console": fleet.console_tail(),
@@ -680,6 +682,7 @@ def api_device_detail(mac):
     if request.args.get("flat"):
         info = {"intel": intel, "mac_kind": lookups.mac_kind(mac), "oui_vendor": lookups.oui_vendor(mac), "stats": agg}
         return jsonify({"mac": mac, "name": intel_name(rec.get("intel")) or "", "alias": alias.get("alias", ""),
+                        "notes": alias.get("notes", ""),
                         "group": groups.get(mac), "rows": _flat_intel(info, lookups),
                         "companions": [{"mac": c["mac"], "label": c["alias"] or c["name"] or c["descr"] or c["vendor"],
                                         "together": c["together"], "occasions": c["occasions"],
@@ -848,6 +851,29 @@ def _flat_intel(info, lookups):
     if st.get("n"):
         add("Detections", f'{st["n"]}  best {st.get("best")} dBm  avg {round(st.get("avg") or 0)} dBm')
     return rows
+
+
+@app.route("/api/marks", methods=["GET"])
+def api_marks():
+    return jsonify({"marks": marks.all(), "icons": marks_mod.ICONS})
+
+
+@app.route("/api/marks", methods=["POST"])
+def api_mark_save():
+    """{id?, kind: pin|area, name, hue, icon, lat, lon | pts} -> the saved mark. {id, delete: true}
+    removes it (a Tab5 can only POST)."""
+    data = request.get_json(silent=True) or {}
+    if data.get("delete"):
+        return jsonify({"ok": marks.delete(str(data.get("id") or ""))})
+    try:
+        return jsonify({"ok": True, "mark": marks.save(data)})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/marks/<mid>", methods=["DELETE"])
+def api_mark_delete(mid):
+    return jsonify({"ok": marks.delete(mid)})
 
 
 @app.route("/api/groups", methods=["GET"])

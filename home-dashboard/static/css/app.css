@@ -1030,6 +1030,9 @@ body.map-maxed .toasts { z-index: 1700; }
     background: linear-gradient(160deg, hsl(var(--h) 100% 50% / .10), transparent 60%); cursor: pointer; min-width: 0; }
 .dr-card.live { box-shadow: 0 0 14px hsl(var(--h) 100% 55% / .3), inset 0 0 0 1px hsl(var(--h) 100% 60% / .25); }
 .dr-card.stale { opacity: .6; }
+.dr-notes { margin-top: 8px; padding: 6px 8px; border-left: 2px solid var(--c); background: hsl(var(--h) 100% 60% / .07);
+    color: #dbe4ee; font-size: 12px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .dr-card:hover { border-color: var(--c); }
 .dr-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .dr-name { font-weight: 800; color: var(--c); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -1199,3 +1202,43 @@ body.map-maxed .toasts { z-index: 1700; }
     body[data-mv="fleet"] main.grid > .fleet-panel, body[data-mv="feed"] main.grid > .feed-panel { overflow-y: auto; }
     body[data-mv="fleet"] .node-list, body[data-mv="feed"] .feed { flex: none; overflow: visible; }
 }
+
+/* Map marks (marks.js): pins and named areas, in the mark's own neon. */
+.map-mk-btn.on { color: #22d3ee; border-color: rgba(34,211,238,0.6); box-shadow: 0 0 6px rgba(34,211,238,0.45); }
+.mk-placing { cursor: crosshair; }
+.mk-pin { position: relative; width: 34px; height: 34px; margin: -34px 0 0 -17px; display: grid; place-items: center;
+    border-radius: 50% 50% 50% 4px; transform: rotate(-45deg); background: rgba(6,8,11,0.88);
+    border: 2px solid var(--mc); box-shadow: 0 0 10px var(--mc), inset 0 0 6px var(--mc); }
+.mk-pin svg { width: 20px; height: 20px; transform: rotate(45deg); fill: none; stroke: var(--mc); stroke-width: 2;
+    stroke-linecap: round; stroke-linejoin: round; filter: drop-shadow(0 0 3px var(--mc)); }
+.mk-label { position: absolute; left: 28px; top: -4px; transform: rotate(45deg); transform-origin: left top; white-space: nowrap;
+    font: 600 12px/1.2 var(--mono, monospace); color: var(--mc); text-shadow: 0 0 6px var(--mc), 0 1px 2px #000;
+    background: rgba(6,8,11,0.75); padding: 2px 6px; border-radius: 4px; }
+.mk-area-label { background: rgba(6,8,11,0.78) !important; border: 1px solid currentColor !important; color: #e8f6ff !important;
+    font: 700 12px/1.2 var(--mono, monospace); letter-spacing: .06em; text-transform: uppercase; box-shadow: none !important; }
+.mk-area-label::before { display: none; }
+.mk-popup .leaflet-popup-content-wrapper { background: #0c0f14; color: #dbe4ee; border: 1px solid var(--mc, #22d3ee);
+    box-shadow: 0 0 14px rgba(34,211,238,0.35); }
+.mk-popup .leaflet-popup-tip { background: #0c0f14; }
+.mk-edit { display: grid; gap: 10px; min-width: 240px; }
+.mk-edit-head { font: 700 12px/1 var(--mono, monospace); letter-spacing: .12em; text-transform: uppercase; color: var(--mc); }
+.mk-name { background: #06080b; color: #e8f6ff; border: 1px solid #2b3542; border-radius: 6px; padding: 7px 9px; font-size: 14px; }
+.mk-name:focus { outline: none; border-color: var(--mc); box-shadow: 0 0 6px var(--mc); }
+.mk-hue-row { display: flex; align-items: center; gap: 10px; }
+.mk-swatch { width: 22px; height: 22px; border-radius: 50%; background: var(--mc); box-shadow: 0 0 10px var(--mc); flex: none; }
+.mk-hue { flex: 1; appearance: none; height: 10px; border-radius: 5px;
+    background: linear-gradient(90deg, hsl(0 100% 55%), hsl(60 100% 55%), hsl(120 100% 55%), hsl(180 100% 55%), hsl(240 100% 60%), hsl(300 100% 60%), hsl(359 100% 55%)); }
+.mk-hue::-webkit-slider-thumb { appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #06080b; border: 2px solid #fff; box-shadow: 0 0 6px var(--mc); }
+.mk-icons { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.mk-icons button { height: 34px; border-radius: 6px; background: #06080b; border: 1px solid #2b3542; color: #8593a6; display: grid; place-items: center; cursor: pointer; }
+.mk-icons button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.mk-icons button.on { color: var(--mc); border-color: var(--mc); box-shadow: 0 0 8px var(--mc); }
+.mk-btns { display: flex; gap: 8px; }
+.mk-btns button { flex: 1; height: 32px; border-radius: 6px; border: 1px solid #2b3542; background: #10141b; color: #dbe4ee; cursor: pointer; font-weight: 600; }
+.mk-btns .mk-save { border-color: var(--mc); color: var(--mc); box-shadow: 0 0 6px var(--mc); }
+.mk-btns .mk-del { color: #ff4d6d; border-color: rgba(255,77,109,0.6); }
+.mk-bar { display: flex; align-items: center; gap: 8px; background: rgba(12,15,20,0.94); border: 1px solid #22d3ee; border-radius: 8px;
+    padding: 6px 8px; color: #dbe4ee; font-size: 13px; box-shadow: 0 0 10px rgba(34,211,238,0.35); }
+.mk-bar[hidden] { display: none; }
+.mk-bar button { height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid #2b3542; background: #10141b; color: #22d3ee; cursor: pointer; }
+.mk-bar button:disabled { opacity: .4; cursor: default; }

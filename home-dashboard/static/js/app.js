@@ -337,6 +337,8 @@ function renderNodes() {
 // Leaflet enlarges its final tiles, so you can always zoom in close.
 const MAP_MAX_ZOOM = 22;
 const map = L.map("map", { zoomControl: true, attributionControl: true, worldCopyJump: true, maxZoom: MAP_MAX_ZOOM });
+// What marks.js (its own file, outside this closure) needs from here.
+window.OUISPY = { map, api, esc, $ };
 let tileLayer = null;
 map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
 // Map toolbar on the map itself (top right): layer, lines, traffic, full
@@ -348,7 +350,7 @@ map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
         const div = L.DomUtil.create("div", "map-tools");
         // Tracks and Wardrive too: in the panel header their on/off labels changed width and
         // reflowed the header, resizing the map on phones.
-        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapTracks", "mapTri", "mapWd", "mapLock", "mapMax"]
+        ["mapLayer", "mapLinks", "mapTraffic", "mapTargets", "mapTracks", "mapTri", "mapWd", "mapPin", "mapArea", "mapLock", "mapMax"]
             .forEach((id) => { const el = document.getElementById(id); if (el) div.appendChild(el); });
         L.DomEvent.disableClickPropagation(div);
         L.DomEvent.disableScrollPropagation(div);
@@ -3248,6 +3250,7 @@ async function boot() {
     renderDrones();
     renderJobs();
     renderFleetCtl();
+    if (window.marksApply) marksApply(st.marks);   // marks.js (loads after this file)
 
     const sock = io({ transports: ["websocket", "polling"] });
     sock.on("fleet", applyFleet);
@@ -3262,6 +3265,7 @@ async function boot() {
     sock.on("sources", (s) => { S.sources = s; renderSources(); });
     sock.on("console", (c) => { appendConsole(c.ts, c.source, c.line); if (c.source === "serial") serialBlink(); trafficFromLine(c.line); });
     sock.on("drone", onDrone);
+    sock.on("marks", (m) => { if (window.marksApply) marksApply(m.marks); });
     sock.on("lost_node", (e) => onLostNode(e));
     sock.on("wd", (e) => onWd(e));   // late-bound: the Live tab wraps onWd
     sock.on("wd_session", () => loadWd());
@@ -3465,6 +3469,7 @@ function droneCard(d) {
         <div class="dr-sub">${esc(d.ua_type || "UA type not sent")} | ${esc((d.src || "").toUpperCase())} | via ${esc(nodeName(d.closest))}</div>
         ${d.id ? `<div class="dr-id">${esc(d.id)}</div>` : ""}
         <div class="dr-cells">${cells.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join("")}</div>
+        ${d.notes ? `<div class="dr-notes" title="Notes (open the drone to edit)">${esc(d.notes)}</div>` : ""}
     </div>`;
 }
 let drRenderAt = 0, drRenderTimer = null;
