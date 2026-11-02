@@ -225,6 +225,8 @@
             <div class="drone-head">
                 <div class="drone-kpis" id="drKpis"></div>
                 <div class="drone-opts">
+                    <div class="mx-seg" id="drWin"><button data-h="1">1 h</button><button data-h="4">4 h</button><button data-h="8">8 h</button><button data-h="24" class="on">24 h</button><button data-h="span">Span</button></div>
+                    <span class="dr-span" id="drSpan" hidden><input type="datetime-local" id="drFrom"> to <input type="datetime-local" id="drTo"></span>
                     <label class="chk"><input type="checkbox" id="drShowPilot" checked> Pilots</label>
                     <label class="chk"><input type="checkbox" id="drShowTrack" checked> Flight tracks</label>
                     <label class="chk"><input type="checkbox" id="drFollow"> Follow live drone</label>
@@ -232,7 +234,7 @@
             </div>
             <div class="drone-grid" id="drCards"></div>
             <div class="fa fa-table">
-                <h4><span>Seen in the last 24 h</span><span class="fa-count" id="drTotal"></span></h4>
+                <h4><span id="drWinTitle">Seen in the last 24 h</span><span class="fa-count" id="drTotal"></span></h4>
                 <div class="table-wrap">
                     <table class="htable">
                         <thead><tr><th>Drone</th><th>MAC</th><th>Tag</th><th>Reports</th><th>Max alt</th><th>First seen</th><th>Last seen</th></tr></thead>

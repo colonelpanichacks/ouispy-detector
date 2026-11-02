@@ -835,6 +835,25 @@ void fetch_flights() {
     }
 }
 
+// The drones window (A.drWinH / span): every drone heard in it, with its tracks in it.
+volatile bool wantDroneWin = false;
+void fetch_drone_window() {
+    char q[96];
+    if (A.drWinH) snprintf(q, sizeof q, "hours=%d", A.drWinH);
+    else if (A.drUntil) snprintf(q, sizeof q, "since=%.0f&until=%.0f", A.drSince, A.drUntil);
+    else snprintf(q, sizeof q, "since=%.0f", A.drSince);
+    JsonDocument filter;
+    JsonObject f = filter["recent"][0].to<JsonObject>();
+    for (const char *k : {"mac", "alias", "id", "op", "desc", "ua_type", "status", "tag", "src", "closest", "vendor",
+                          "notes", "lat", "lon", "plat", "plon", "alt", "hagl", "spd", "vspd", "hdg", "rssi",
+                          "pilot_dist_m", "first", "last", "reports", "track", "ptrack"})
+        f[k] = true;
+    JsonDocument doc(&psram);
+    char path[160];
+    snprintf(path, sizeof path, "/api/drones?%s&track=0&rtrack=32&limit=%d", q, MAX_DRONES);
+    if (!http_json(path, doc, &filter)) return;
+    for (JsonObjectConst o : doc["recent"].as<JsonArrayConst>()) ingest_drone_win(o);
+}
 void fetch_detail() {
     char mac[18];
     model_lock();
@@ -909,6 +928,14 @@ void poll_task(void *) {
         if (wantFlights) {
             wantFlights = false;
             fetch_flights();
+            continue;
+        }
+        // The window slides: refreshed every minute while the drones list or the map is up.
+        static uint32_t lastDrWin = 0;
+        if (net_online() && (wantDroneWin || (now - lastDrWin > 60000 && (A.view == V_DRONES || A.view == V_MAP)))) {
+            wantDroneWin = false;
+            lastDrWin = now;
+            fetch_drone_window();
             continue;
         }
         if (strcmp(lastDetail, M->detail.mac) || wantDetail) {
@@ -1037,6 +1064,8 @@ int net_scan_results(String *out, int *rssi, int max) {
     }
     return scanCount < 0 ? -1 : n;
 }
+
+void net_want_drone_window() { wantDroneWin = true; }
 
 void net_want_flights(const char *mac) {
     model_lock();

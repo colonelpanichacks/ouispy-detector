@@ -3383,6 +3383,7 @@ async function boot() {
     loadHistory(false);
     S.booted = true;
     renderDrones();
+    loadDroneTable();   // the window's drones, for the map too
     renderJobs();
     renderFleetCtl();
     if (window.marksApply) marksApply(st.marks);   // marks.js (loads after this file)
@@ -3490,6 +3491,38 @@ S.droneLayer = null;
 S.droneMarks = {};      // mac -> {drone, pilot, link, track, ptrack}
 S.droneOpen = null;
 S.droneSeen = new Set();
+// The Drones window (1 / 4 / 8 / 24 h, or a span): the cards, the table and the map all follow it.
+S.drWin = (() => { try { return JSON.parse(localStorage.getItem("drWin")) || { h: 24 }; } catch (e) { return { h: 24 }; } })();
+S.drWinList = [];       // drones heard in the window (drones.py recent), with their tracks in it
+function drWinRange() {
+    const w = S.drWin, now = Date.now() / 1000;
+    if (w.h === "span" && w.since) return { since: w.since, until: w.until || null };
+    return { since: now - (+w.h || 24) * 3600, until: null };
+}
+function drInWin(d) {
+    const r = drWinRange();
+    return d.last != null && d.last >= r.since && (r.until == null || (d.first ?? d.last) <= r.until);
+}
+function drWinLabel() {
+    const w = S.drWin, r = drWinRange();
+    if (w.h !== "span" || !w.since) return `the last ${+w.h || 24} h`;
+    return `${fullTime(r.since)} to ${r.until ? fullTime(r.until) : "now"}`;
+}
+// Live state where we have it, else the drone as last heard in the window.
+function drWinDrones() {
+    const by = {};
+    for (const d of S.drWinList) by[d.mac] = d;
+    for (const d of Object.values(S.drones)) {
+        if (!drInWin(d)) continue;
+        const w = by[d.mac];
+        // Live objects stay themselves (renderDrones marks them); they borrow the window's
+        // tracks when their own are empty.
+        if (w && !(d.track && d.track.length)) d.track = w.track;
+        if (w && !(d.ptrack && d.ptrack.length)) d.ptrack = w.ptrack;
+        by[d.mac] = d;
+    }
+    return Object.values(by);
+}
 const TAG_HUE = { unknown: 190, friendly: 140, neutral: 50, suspicious: 30, hostile: 330 };
 function droneName(d) { return d.alias || d.desc || d.id || d.mac; }
 // Like mesh-mapper: every drone keeps its own colour (hashed from its MAC) so several in
@@ -3532,10 +3565,9 @@ function renderDroneMap() {
     if (!S.droneLayer) S.droneLayer = L.layerGroup().addTo(map);
     const showP = $("drShowPilot").checked, showT = $("drShowTrack").checked && S.tracksOn !== false;
     const keep = new Set();
-    for (const d of Object.values(S.drones)) {
+    for (const d of drWinDrones()) {
         if (d.lat == null && d.plat == null) continue;
         const live = droneLive(d);
-        if (!live && droneAge(d) > 1800) continue;
         keep.add(d.mac);
         const m = S.droneMarks[d.mac] = S.droneMarks[d.mac] || {};
         const hue = droneHue(d);
@@ -3611,8 +3643,9 @@ function renderDrones() {
     const now = Date.now();
     if (now - drRenderAt < 400) { clearTimeout(drRenderTimer); drRenderTimer = setTimeout(renderDrones, 400); return; }
     drRenderAt = now;
-    for (const d of Object.values(S.drones)) d.live = droneLive(d);
-    const all = Object.values(S.drones).sort((a, b) => (b.live - a.live) || (droneAge(a) - droneAge(b)));
+    const all = drWinDrones();
+    for (const d of all) d.live = droneLive(d);
+    all.sort((a, b) => (b.live - a.live) || ((b.last || 0) - (a.last || 0)));
     const live = all.filter((d) => d.live);
     const badge = $("droneBadge");
     badge.hidden = !live.length;
@@ -3623,20 +3656,26 @@ function renderDrones() {
     const pilots = live.filter((d) => d.plat != null).length;
     const hi = live.reduce((m, d) => Math.max(m, d.hagl ?? -1), -1);
     $("drKpis").innerHTML = [["Live", live.length, live.length ? "hot" : ""], ["Airborne", airborne], ["Pilots located", pilots],
-        ["Highest", hi >= 0 ? `${Math.round(hi)} m` : "-"], ["Seen today", all.length]]
+        ["Highest", hi >= 0 ? `${Math.round(hi)} m` : "-"], ["In window", all.length]]
         .map(([k, v, c]) => `<div class="hs"><div class="k">${k}</div><div class="v ${c || ""}">${v}</div></div>`).join("");
     $("drCards").innerHTML = all.slice(0, 12).map(droneCard).join("") ||
         `<div class="empty">No drones yet. Every node on firmware with Remote ID decodes drones (WiFi beacon, WiFi NAN and Bluetooth) and they show up here and on the map with their pilot.</div>`;
     $("drCards").querySelectorAll(".dr-card").forEach((el) => el.onclick = () => openDrone(el.dataset.mac));
 }
 async function loadDroneTable() {
-    const r = await api("/api/drones?hours=24&track=0");
+    const w = drWinRange();
+    const q = S.drWin.h === "span" && S.drWin.since ? `since=${w.since}${w.until ? `&until=${w.until}` : ""}` : `hours=${+S.drWin.h || 24}`;
+    const r = await api(`/api/drones?${q}&track=0&rtrack=60`);
+    const at = Date.now();
+    S.drWinList = r.recent.map((d) => Object.assign(d, { _rx: at }));
+    $("drWinTitle").textContent = `Seen ${S.drWin.h === "span" && S.drWin.since ? "from " : "in "}${drWinLabel()}`;
+    renderDrones();
     $("drTotal").textContent = `${r.recent.length} drone${r.recent.length === 1 ? "" : "s"}`;
     $("drBody").innerHTML = r.recent.map((d) => `<tr data-mac="${esc(d.mac)}">
         <td class="v">${esc(d.alias || (S.drones[d.mac] && droneName(S.drones[d.mac])) || "")}</td><td>${esc(d.mac)}</td>
         <td><span class="dtag" style="--h:${TAG_HUE[d.tag || "unknown"]}">${esc(d.tag || "unknown")}</span></td><td>${d.n}</td>
         <td>${fmtM(d.max_alt)}</td><td>${fullTime(d.first)}</td><td>${ago(d.last)}</td></tr>`).join("") ||
-        `<tr><td colspan="7" style="text-align:center;padding:20px">No drones in the last 24 h</td></tr>`;
+        `<tr><td colspan="7" style="text-align:center;padding:20px">No drones in ${esc(drWinLabel())}</td></tr>`;
     $("drBody").querySelectorAll("tr[data-mac]").forEach((tr) => tr.onclick = () => openDrone(tr.dataset.mac));
 }
 function onDrone(d) {
@@ -3807,6 +3846,32 @@ function clearFlights() {
     if (S.flights) S.flights.shown = new Set();
 }
 $("drFlAll").onclick = () => { S.flights.list.forEach((_, i) => S.flights.shown.add(i)); drawFlights(null); renderFlightList(); };
+function drWinUi() {
+    $("drWin").querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.h === String(S.drWin.h)));
+    $("drSpan").hidden = S.drWin.h !== "span";
+    const loc = (t) => { if (!t) return ""; const d = new Date(t * 1000); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+    if (S.drWin.h === "span") { $("drFrom").value = loc(S.drWin.since); $("drTo").value = loc(S.drWin.until); }
+}
+function drWinSet(w) {
+    S.drWin = w;
+    try { localStorage.setItem("drWin", JSON.stringify(w)); } catch (e) { /* private window */ }
+    drWinUi();
+    loadDroneTable();
+}
+$("drWin").querySelectorAll("button").forEach((b) => b.onclick = () => {
+    if (b.dataset.h !== "span") return drWinSet({ h: +b.dataset.h });
+    const now = Date.now() / 1000;
+    drWinSet({ h: "span", since: S.drWin.since || now - 24 * 3600, until: S.drWin.until || null });
+});
+const drSpanEdit = () => {
+    const t = (el) => el.value ? new Date(el.value).getTime() / 1000 : null;
+    const since = t($("drFrom")), until = t($("drTo"));
+    if (since && (!until || until > since)) drWinSet({ h: "span", since, until });
+};
+$("drFrom").onchange = drSpanEdit;
+$("drTo").onchange = drSpanEdit;
+drWinUi();
+setInterval(() => { if (S.booted) loadDroneTable(); }, 60000);   // the window slides; the map follows it on every tab
 $("drFlNone").onclick = () => { clearFlights(); renderFlightList(); };
 $("drClose").onclick = () => { $("drDrawer").classList.remove("open"); S.droneOpen = null; clearFlights(); S.flights.mac = null; };
 $("drSave").onclick = async () => {

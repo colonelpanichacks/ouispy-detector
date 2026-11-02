@@ -80,7 +80,7 @@ enum HitAct : uint8_t {
     H_NONE, H_ZOOMIN, H_ZOOMOUT, H_LAYER, H_FIT, H_FOLLOW, H_DRONE, H_TGTMAP, H_DETAIL,
     H_DCLOSE, H_DALIAS, H_DGROUP, H_DNEWGROUP, H_DUNGROUP, H_DCOMP, H_DRONEMAP, H_DRONETAG,
     H_LAYERMENU, H_LAYERPICK, H_DRALIAS,
-    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DRCARDX, H_LOCKDRONE, H_LOCKPILOT, H_LOCKNODE, H_UNLOCK, H_DRTRACK, H_DRFLIGHTS, H_DRDETAILS, H_FLOPEN, H_FLPICK, H_FLCLEAR, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND,
+    H_NODEROW, H_NCLOSE, H_NALIAS, H_NCOLOR, H_NBUZZ, H_NLED, H_NIDENT, H_NSTATUS, H_NREBOOT, H_TRI, H_TRACKS, H_PILOT, H_WD, H_ME, H_NWDON, H_NWDCH, H_NBEEP, H_NLOCATE, H_NFW, H_KIND, H_SORT, H_WDCLOSE, H_OVDET, H_ZLOCK, H_OSK, H_NODEPIN, H_POPSET, H_POPMOVE, H_POPCLOSE, H_MXWD, H_OVWD, H_POPTRACK, H_DRCARDX, H_LOCKDRONE, H_LOCKPILOT, H_LOCKNODE, H_UNLOCK, H_DRTRACK, H_DRFLIGHTS, H_DRDETAILS, H_FLOPEN, H_FLPICK, H_FLCLEAR, H_DRWIN, H_DRSPAN, H_DPROX, H_PROXSTOP, H_SOUNDPG, H_SND,
     H_MKPIN, H_MKAREA, H_MKOPEN, H_MKHUE, H_MKICON, H_MKNAME, H_MKSAVE, H_MKDEL, H_MKCLOSE, H_MKUNDO, H_MKDONE, H_MKCANCEL,
     H_WDNAME, H_WDNODE, H_WDADD
 };
@@ -660,9 +660,24 @@ uint16_t flight_color(const Drone *d, int i) {
     static const uint32_t ALT[4] = {0xff2bd6, 0xffb020, 0x39ff88, 0xa78bfa};
     return i == 0 && d ? drone_color(*d) : rgb(ALT[(i + 3) % 4]);
 }
+// The drones window: the list and the map show the drones heard in it (the dashboard has
+// the same picker). Last 1 / 4 / 8 / 24 h, or a span (0 hours).
+const int DRWIN_H[] = {1, 4, 8, 24, 0};
+const char *DRWIN_NAME[] = {"1H", "4H", "8H", "24H", "SPAN"};
+void drwin_range(double &since, double &until) {
+    double now = server_now();
+    if (A.drWinH) since = now - A.drWinH * 3600.0, until = 0;
+    else since = A.drSince ? A.drSince : now - 86400, until = A.drUntil;
+}
+bool drone_in_win(const Drone &d) {
+    double s, u;
+    drwin_range(s, u);
+    return d.last >= s && (!u || !d.first || d.first <= u);
+}
 void build_drones() {
     nDrone = 0;
-    for (int i = 0; i < M->ndrones; i++) droneIdx[nDrone++] = i;
+    for (int i = 0; i < M->ndrones; i++)
+        if (drone_in_win(M->drones[i])) droneIdx[nDrone++] = i;
     std::sort(droneIdx, droneIdx + nDrone, [](int a, int b) {
         bool la = drone_live(M->drones[a]), lb = drone_live(M->drones[b]);
         if (la != lb) return la;
@@ -1320,7 +1335,6 @@ void draw_map() {
     for (int k = nDrone - 1; k >= 0; k--) {
         const Drone &d = M->drones[droneIdx[k]];
         bool live = drone_live(d);
-        if (!live && now - d.last > 1800) continue;
         uint16_t c = drone_color(d);
         // Pilot track: dashed, in the drone's colour (mesh-mapper's pilot path).
         bool tracks = A.droneTracks && drone_track_on(d.mac);
@@ -1675,15 +1689,52 @@ const char *fmt_m(char *b, size_t n, bool ok, float v, const char *unit) {
     return b;
 }
 
+void drwin_time(char *b, size_t n, double t) {
+    if (!t) { strlcpy(b, "NOW", n); return; }
+    time_t tt = (time_t)t;
+    struct tm lt;
+    localtime_r(&tt, &lt);
+    strftime(b, n, "%b %d  %H:%M", &lt);
+}
+
 void draw_drones() {
     int y = CY;
-    int lw = 500, rows = 7, rh = 78;
+    int lw = 500, rh = 78;
     panel(PAD, y, lw, CB - y, "DRONES  REMOTE ID");
+    // The window: 1H 4H 8H 24H SPAN, and for a span its two ends with steppers.
+    int cx = PAD + 14, cy = y + 34;
+    for (int i = 0; i < 5; i++) {
+        int cw;
+        chip(cx, cy, DRWIN_NAME[i], AMBER, A.drWinH == DRWIN_H[i], &cw, H_DRWIN, i);
+        cx += cw + 8;
+    }
+    int listY = cy + 44;
+    if (!A.drWinH) {
+        static const char *STEP[] = {"-1D", "-1H", "+1H", "+1D"};
+        for (int r = 0; r < 2; r++) {
+            int ry = cy + 44 + r * 42;
+            char t[24];
+            drwin_time(t, sizeof t, r ? A.drUntil : (A.drSince ? A.drSince : server_now() - 86400));
+            font(F_SM);
+            text(PAD + 18, ry + 15, r ? "TO" : "FROM", dim(AMBER, 0.9f), middle_left);
+            font(F_MD);
+            text(PAD + 70, ry + 15, t, TEXT, middle_left);
+            int sx = PAD + lw - 14;
+            for (int k = 3; k >= 0; k--) {
+                font(F_SM);
+                sx -= C.textWidth(STEP[k]) + 28;
+                chip(sx, ry, STEP[k], SKY, false, nullptr, H_DRSPAN, r * 4 + k);
+                sx -= 6;
+            }
+        }
+        listY += 84;
+    }
+    int rows = max(1, (CB - 8 - listY) / rh);
     A.sel[V_DRONES] = constrain(A.sel[V_DRONES], 0, max(0, nDrone - 1));
     A.top[V_DRONES] = constrain(A.top[V_DRONES], 0, max(0, nDrone - rows));
     if (A.sel[V_DRONES] < A.top[V_DRONES]) A.top[V_DRONES] = A.sel[V_DRONES];
     if (A.sel[V_DRONES] >= A.top[V_DRONES] + rows) A.top[V_DRONES] = A.sel[V_DRONES] - rows + 1;
-    int ry = y + 34;
+    int ry = listY;
     scroll_area(PAD, ry, lw, rows * rh, V_DRONES, rh, rows);
     for (int k = 0; k < rows; k++, ry += rh) {
         int i = A.top[V_DRONES] + k;
@@ -1719,9 +1770,9 @@ void draw_drones() {
     }
     if (!nDrone) {
         font(F_MD);
-        text(PAD + lw / 2, (y + CB) / 2 - 14, "no drones yet", FAINT, middle_center);
+        text(PAD + lw / 2, (listY + CB) / 2 - 14, M->ndrones ? "no drones in this window" : "no drones yet", FAINT, middle_center);
         font(F_SM);
-        text(PAD + lw / 2, (y + CB) / 2 + 14, "every node decodes Remote ID (WiFi + Bluetooth)", FAINT, middle_center);
+        text(PAD + lw / 2, (listY + CB) / 2 + 14, "every node decodes Remote ID (WiFi + Bluetooth)", FAINT, middle_center);
     }
 
     // Selected drone.
@@ -5269,6 +5320,27 @@ static void dispatch(const Hit &h) {
         }
         break;
     case H_FLCLEAR: A.flShow = -1; break;
+    case H_DRWIN:
+        A.drWinH = DRWIN_H[h.arg];
+        if (!A.drWinH && !A.drSince) A.drSince = server_now() - 86400, A.drUntil = 0;
+        A.sel[V_DRONES] = A.top[V_DRONES] = 0;
+        net_want_drone_window();
+        break;
+    case H_DRSPAN: {
+        static const double STEP[] = {-86400, -3600, 3600, 86400};
+        double now = server_now();
+        if (h.arg < 4) {
+            A.drSince += STEP[h.arg & 3];
+        } else {
+            A.drUntil = (A.drUntil ? A.drUntil : now) + STEP[h.arg & 3];
+            if (A.drUntil >= now) A.drUntil = 0;   // past now: up to now
+        }
+        double end = A.drUntil ? A.drUntil : now;
+        if (A.drSince > end - 3600) A.drSince = end - 3600;   // at least an hour wide
+        A.sel[V_DRONES] = A.top[V_DRONES] = 0;
+        net_want_drone_window();
+        break;
+    }
     case H_WD:
         A.wdScope = (A.wdScope + 1) % 3;
         toast(A.wdScope == 2 ? "wardrive: all history" : A.wdScope == 1 ? "wardrive: this session" : "wardrive off");

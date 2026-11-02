@@ -11,7 +11,7 @@ constexpr int MAX_SEEN = 6;        // nodes kept per seen_by list
 constexpr int MAX_BARS = 24;       // vendor / node / type rows kept from /api/metrics
 constexpr int MAX_BUCKETS = 192;
 constexpr int MAX_MUTED = 32;
-constexpr int MAX_DRONES = 16;
+constexpr int MAX_DRONES = 24;
 constexpr int DRONE_TRACK = 48;    // flight track points kept per drone
 constexpr float DRONE_LIVE_S = 60;   // mesh-mapper's staleout: dimmed after this
 constexpr float DRONE_TX_S = 5;     // transmitting now
@@ -321,6 +321,7 @@ size_t node_trails_raw(void **buf, int **count);   // all trails as one block (s
 void ingest_stats(JsonDocument &doc);
 void ingest_cleared(JsonObjectConst e);
 void ingest_drone(JsonObjectConst d);          // dashboard "drone" event shape
+void ingest_drone_win(JsonObjectConst d);      // /api/drones "recent": a drone as heard in the window
 void ingest_tri(JsonObjectConst f);            // dashboard "tri" event: a triangulated fix
 void ingest_rid(JsonObjectConst r, const char *homeId);   // a node's raw "RID {...}" line (USB mode)
 void ingest_detail(JsonDocument &doc);

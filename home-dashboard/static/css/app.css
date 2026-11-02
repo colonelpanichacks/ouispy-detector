@@ -1024,7 +1024,10 @@ body.map-maxed .toasts { z-index: 1700; }
 .drone-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .drone-kpis { display: grid; grid-template-columns: repeat(5, minmax(70px, 1fr)); gap: 6px; flex: 1 1 380px; }
 .drone-kpis .v.hot { color: #ff2bd6; text-shadow: 0 0 8px #ff2bd6; }
-.drone-opts { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; }
+.drone-opts { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+.dr-span { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+.dr-span[hidden] { display: none; }
+.dr-span input { background: var(--panel2, #0b0f17); color: var(--text); border: 1px solid var(--line2, #2a3344); border-radius: 6px; padding: 3px 6px; font: inherit; color-scheme: dark; }
 .drone-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-bottom: 12px; }
 .dr-card { --c: hsl(var(--h) 100% 62%); border: 1px solid hsl(var(--h) 100% 60% / .35); border-radius: 6px; padding: 10px;
     background: linear-gradient(160deg, hsl(var(--h) 100% 50% / .10), transparent 60%); cursor: pointer; min-width: 0; }

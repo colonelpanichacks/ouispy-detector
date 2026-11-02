@@ -765,8 +765,11 @@ def api_wardrive_csv():
 
 @app.route("/api/drones")
 def api_drones():
-    return jsonify({"live": drones.snapshot(track=int(request.args.get("track", 60))),
-                    "recent": drones.recent(hours=float(request.args.get("hours", 24))),
+    a = request.args
+    num = lambda k: float(a[k]) if a.get(k) else None
+    return jsonify({"live": drones.snapshot(track=int(a.get("track", 60))),
+                    "recent": drones.recent(hours=num("hours") or 24, since=num("since"), until=num("until"),
+                                            limit=int(a.get("limit", 200)), track=int(a.get("rtrack", 0))),
                     "tags": drones_mod.TAGS})
 
 

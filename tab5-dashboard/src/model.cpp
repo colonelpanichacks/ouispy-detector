@@ -969,6 +969,26 @@ void ingest_drone(JsonObjectConst o) {
     M->version++;
 }
 
+// A drone from the window query: as it was last heard in the window. One we already hold
+// newer (live, or heard since) keeps its own state and only borrows the window's tracks.
+void ingest_drone_win(JsonObjectConst o) {
+    const char *mac = o["mac"] | "";
+    double last = o["last"] | 0.0;
+    {
+        Guard g;
+        for (int i = 0; i < M->ndrones; i++) {
+            Drone &d = M->drones[i];
+            if (strcasecmp(d.mac, mac) || d.last < last) continue;
+            JsonArrayConst tr = o["track"], ptr = o["ptrack"];
+            if (!d.ntrack && !tr.isNull() && tr.size()) track_parse(d.track, d.ntrack, tr);
+            if (!d.nptrack && !ptr.isNull() && ptr.size()) track_parse(d.ptrack, d.nptrack, ptr);
+            M->version++;
+            return;
+        }
+    }
+    ingest_drone(o);
+}
+
 static const char *UA_NAMES[] = {"None", "Aeroplane", "Multirotor", "Gyroplane", "Hybrid VTOL", "Ornithopter",
                                  "Glider", "Kite", "Free balloon", "Captive balloon", "Airship", "Parachute",
                                  "Rocket", "Tethered", "Ground obstacle", "Other"};

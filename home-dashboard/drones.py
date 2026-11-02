@@ -439,14 +439,52 @@ class Drones:
                 "series": series, "unique_series": [len(x) for x in seen],
                 "by_node": [[r["node"] or "?", r["u"]] for r in by_node], "drones": out}
 
-    def recent(self, hours=24, limit=200):
+    def recent(self, hours=24, since=None, until=None, limit=200, track=0):
+        """Every drone heard between since and until (default: the last `hours`), newest
+        first: its counts in that window, where it was last seen in it (the full Remote ID
+        state of that report), and with track > 0 its drone and pilot paths in the window,
+        thinned to that many points."""
+        until = until or time.time()
+        since = since if since is not None else until - hours * 3600
         st = self.store
         with st.lock:
             rows = st.db.execute(
-                "SELECT m.mac, m.alias, m.tag, m.first, m.last, COUNT(r.id) n, MAX(r.alt) max_alt "
-                "FROM drone_meta m LEFT JOIN drone_reports r ON r.mac=m.mac WHERE m.last>=? "
-                "GROUP BY m.mac ORDER BY m.last DESC LIMIT ?", (time.time() - hours * 3600, limit)).fetchall()
-        return [dict(r) for r in rows]
+                "SELECT r.mac, MIN(r.ts) first, MAX(r.ts) last, COUNT(*) n, MAX(r.alt) max_alt, MAX(r.hagl) max_hagl, "
+                "m.alias, m.tag, m.notes FROM drone_reports r LEFT JOIN drone_meta m ON m.mac=r.mac "
+                "WHERE r.ts BETWEEN ? AND ? GROUP BY r.mac ORDER BY last DESC LIMIT ?",
+                (since, until, limit)).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                last = st.db.execute("SELECT data FROM drone_reports WHERE mac=? AND ts BETWEEN ? AND ? "
+                                     "ORDER BY ts DESC LIMIT 1", (d["mac"], since, until)).fetchone()
+                if track:
+                    pts = st.db.execute("SELECT ts, lat, lon, alt, hagl, plat, plon FROM drone_reports "
+                                        "WHERE mac=? AND ts BETWEEN ? AND ? ORDER BY ts",
+                                        (d["mac"], since, until)).fetchall()
+                    # [ts, lat, lon], rounded: the Tab5 pulls this over Wi-Fi
+                    d["track"] = _thin(_dedupe([[round(p["ts"]), round(p["lat"], 5), round(p["lon"], 5)]
+                                                for p in pts if p["lat"] is not None]), track)
+                    d["ptrack"] = _thin(_dedupe([[round(p["ts"]), round(p["plat"], 5), round(p["plon"], 5)]
+                                                 for p in pts if p["plat"] is not None]), track)
+                out.append((d, last["data"] if last else None))
+        now = time.time()
+        res = []
+        for d, data in out:
+            try:
+                s = json.loads(data) if data else {}
+            except ValueError:
+                s = {}
+            s.update({"mac": d["mac"], "track": [], "ptrack": [], "first": d["first"], "last": d["last"]})
+            pub = self._public(s, now, track=0)
+            pub.pop("nodes", None)
+            pub.update({k: v for k, v in d.items() if k not in ("alias", "tag", "notes")})
+            for k in ("alias", "tag", "notes"):
+                if d[k] is not None:
+                    pub[k] = d[k]
+            pub["reports"] = d["n"]
+            res.append(pub)
+        return res
 
     def set_meta(self, mac, alias=None, tag=None, notes=None, faa=None):
         mac = mac.upper()
