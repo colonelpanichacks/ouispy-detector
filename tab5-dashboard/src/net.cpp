@@ -839,7 +839,8 @@ void fetch_flights() {
 volatile bool wantDroneWin = false;
 void fetch_drone_window() {
     char q[96];
-    if (A.drWinH) snprintf(q, sizeof q, "hours=%d", A.drWinH);
+    if (A.drWinH < 0) snprintf(q, sizeof q, "since=0");
+    else if (A.drWinH) snprintf(q, sizeof q, "hours=%d", A.drWinH);
     else if (A.drUntil) snprintf(q, sizeof q, "since=%.0f&until=%.0f", A.drSince, A.drUntil);
     else snprintf(q, sizeof q, "since=%.0f", A.drSince);
     JsonDocument filter;

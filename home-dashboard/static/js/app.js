@@ -3497,6 +3497,7 @@ S.drWinList = [];       // drones heard in the window (drones.py recent), with t
 function drWinRange() {
     const w = S.drWin, now = Date.now() / 1000;
     if (w.h === "span" && w.since) return { since: w.since, until: w.until || null };
+    if (w.h === "all") return { since: 0, until: null };
     return { since: now - (+w.h || 24) * 3600, until: null };
 }
 function drInWin(d) {
@@ -3505,6 +3506,7 @@ function drInWin(d) {
 }
 function drWinLabel() {
     const w = S.drWin, r = drWinRange();
+    if (w.h === "all") return "all time";
     if (w.h !== "span" || !w.since) return `the last ${+w.h || 24} h`;
     return `${fullTime(r.since)} to ${r.until ? fullTime(r.until) : "now"}`;
 }
@@ -3664,11 +3666,12 @@ function renderDrones() {
 }
 async function loadDroneTable() {
     const w = drWinRange();
-    const q = S.drWin.h === "span" && S.drWin.since ? `since=${w.since}${w.until ? `&until=${w.until}` : ""}` : `hours=${+S.drWin.h || 24}`;
+    const q = S.drWin.h === "all" ? "since=0&limit=500"
+        : S.drWin.h === "span" && S.drWin.since ? `since=${w.since}${w.until ? `&until=${w.until}` : ""}` : `hours=${+S.drWin.h || 24}`;
     const r = await api(`/api/drones?${q}&track=0&rtrack=60`);
     const at = Date.now();
     S.drWinList = r.recent.map((d) => Object.assign(d, { _rx: at }));
-    $("drWinTitle").textContent = `Seen ${S.drWin.h === "span" && S.drWin.since ? "from " : "in "}${drWinLabel()}`;
+    $("drWinTitle").textContent = S.drWin.h === "all" ? "Seen all time" : `Seen ${S.drWin.h === "span" && S.drWin.since ? "from " : "in "}${drWinLabel()}`;
     renderDrones();
     $("drTotal").textContent = `${r.recent.length} drone${r.recent.length === 1 ? "" : "s"}`;
     $("drBody").innerHTML = r.recent.map((d) => `<tr data-mac="${esc(d.mac)}">
@@ -3859,6 +3862,7 @@ function drWinSet(w) {
     loadDroneTable();
 }
 $("drWin").querySelectorAll("button").forEach((b) => b.onclick = () => {
+    if (b.dataset.h === "all") return drWinSet({ h: "all" });
     if (b.dataset.h !== "span") return drWinSet({ h: +b.dataset.h });
     const now = Date.now() / 1000;
     drWinSet({ h: "span", since: S.drWin.since || now - 24 * 3600, until: S.drWin.until || null });

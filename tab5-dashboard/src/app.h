@@ -29,7 +29,7 @@ struct App {
     uint8_t lockWhat = 0;       // map: kept centred on 0 nothing, 1 a drone, 2 its pilot, 3 a node
     char lockId[18] = "";       // ...that drone's MAC or that node's id
     char mapDrone[18] = "";     // map: the tapped drone's card (its MAC)
-    int8_t drWinH = 24;         // drones window: the last this many hours, 0 = the span below
+    int8_t drWinH = 24;         // drones window: the last this many hours, 0 = the span below, -1 = all time
     double drSince = 0, drUntil = 0;   // span, server time (drUntil 0 = now)
     bool flOpen = false;        // drones: the selected drone's past flights, in place of its Remote ID
     int8_t flShow = -1;         // map: this past flight drawn (M->flights.f[i])

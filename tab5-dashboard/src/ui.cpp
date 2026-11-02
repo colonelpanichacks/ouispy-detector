@@ -661,12 +661,13 @@ uint16_t flight_color(const Drone *d, int i) {
     return i == 0 && d ? drone_color(*d) : rgb(ALT[(i + 3) % 4]);
 }
 // The drones window: the list and the map show the drones heard in it (the dashboard has
-// the same picker). Last 1 / 4 / 8 / 24 h, or a span (0 hours).
-const int DRWIN_H[] = {1, 4, 8, 24, 0};
-const char *DRWIN_NAME[] = {"1H", "4H", "8H", "24H", "SPAN"};
+// the same picker). Last 1 / 4 / 8 / 24 h, all time (-1), or a span (0 hours).
+const int DRWIN_H[] = {1, 4, 8, 24, -1, 0};
+const char *DRWIN_NAME[] = {"1H", "4H", "8H", "24H", "ALL", "SPAN"};
 void drwin_range(double &since, double &until) {
     double now = server_now();
-    if (A.drWinH) since = now - A.drWinH * 3600.0, until = 0;
+    if (A.drWinH < 0) since = 0, until = 0;
+    else if (A.drWinH) since = now - A.drWinH * 3600.0, until = 0;
     else since = A.drSince ? A.drSince : now - 86400, until = A.drUntil;
 }
 bool drone_in_win(const Drone &d) {
@@ -1701,9 +1702,9 @@ void draw_drones() {
     int y = CY;
     int lw = 500, rh = 78;
     panel(PAD, y, lw, CB - y, "DRONES  REMOTE ID");
-    // The window: 1H 4H 8H 24H SPAN, and for a span its two ends with steppers.
+    // The window: 1H 4H 8H 24H ALL SPAN, and for a span its two ends with steppers.
     int cx = PAD + 14, cy = y + 34;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         int cw;
         chip(cx, cy, DRWIN_NAME[i], AMBER, A.drWinH == DRWIN_H[i], &cw, H_DRWIN, i);
         cx += cw + 8;
