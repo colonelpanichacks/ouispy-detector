@@ -753,7 +753,12 @@ body.map-maxed .toasts { z-index: 1700; }
     border-radius: 6px; cursor: pointer; background: rgba(255,79,216,0.05); }
 .near-name { color: #ffd1f5; font-weight: 600; }
 .near-mac { color: var(--soft); font-family: var(--mono, monospace); font-size: 11px; }
-.near-close { color: #39ff88; font-weight: 600; }
+.near-what { color: #00f0ff; }
+.near-trend { color: var(--soft); }
+.near-trend.in { color: #ff2bd6; font-weight: 600; text-shadow: 0 0 6px rgba(255,43,214,.5); }
+.near-trend.out { color: #39ff88; }
+.near-hist { color: var(--soft); font-size: 11px; }
+.near-hist.new { color: #ff2bd6; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .near-other { color: #fbbf24; }
 
 .map-tgt-btn.on { opacity: 1; color: #ff4fd8; border-color: rgba(255,79,216,0.5) !important; box-shadow: 0 0 5px rgba(255,79,216,0.25); }

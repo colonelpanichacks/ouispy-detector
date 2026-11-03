@@ -687,7 +687,15 @@ def api_device_detail(mac):
         c["vendor"] = lookups.oui_vendor(c["mac"])
     from fleet import intel_name
     if request.args.get("flat"):
-        info = {"intel": intel, "mac_kind": lookups.mac_kind(mac), "oui_vendor": lookups.oui_vendor(mac), "stats": agg}
+        with store.lock:
+            by_node = [dict(r) for r in store.db.execute(
+                "SELECT d.node, COALESCE(n.alias, d.node) name, COUNT(*) n, MAX(d.rssi) best FROM detections d "
+                "LEFT JOIN nodes n ON n.id=d.node WHERE d.mac=? GROUP BY d.node ORDER BY n DESC", (mac,))]
+            wd = [dict(r) for r in store.db.execute(
+                "SELECT kind, name, sec, ch, seen, first, last, lat, lon FROM wd_devices WHERE mac=? "
+                "ORDER BY last DESC", (mac,))]
+        info = {"intel": intel, "mac_kind": lookups.mac_kind(mac), "oui_vendor": lookups.oui_vendor(mac), "stats": agg,
+                "by_node": by_node, "wardrive": wd}
         return jsonify({"mac": mac, "name": intel_name(rec.get("intel")) or "", "alias": alias.get("alias", ""),
                         "notes": alias.get("notes", ""),
                         "group": groups.get(mac), "rows": _flat_intel(info, lookups),
@@ -888,8 +896,18 @@ def _flat_intel(info, lookups):
     add("Country", it.get("cc"))
     add("Vendor IEs", ", ".join(f'{v["oui"]} {v["name"]}'.strip() for v in it.get("vie_named") or []))
     st = info.get("stats") or {}
+    when = lambda t: time.strftime("%b %d %H:%M", time.localtime(t)) if t else ""
     if st.get("n"):
         add("Detections", f'{st["n"]}  best {st.get("best")} dBm  avg {round(st.get("avg") or 0)} dBm')
+        add("First seen", when(st.get("first")))
+        add("Last seen", when(st.get("last")))
+    add("Heard by", ", ".join(f'{b["name"]} {b["n"]}x {b["best"]} dBm' for b in (info.get("by_node") or [])[:6]))
+    wd = info.get("wardrive") or []
+    if wd:
+        w = wd[0]
+        add("Wardriven", f'{sum(x["seen"] or 0 for x in wd)} sightings, {when(min(x["first"] for x in wd))} to {when(w["last"])}')
+        if w.get("lat") is not None:
+            add("Wardrive spot", f'{w["lat"]:.5f}, {w["lon"]:.5f}')
     return rows
 
 

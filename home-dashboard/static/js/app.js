@@ -1473,6 +1473,37 @@ function liveTargets() {
         return t;
     }).sort((a, b) => b.last - a.last);
 }
+// Live intel: the dashboard's record of a device (flat rows), fetched once per 5 min.
+S.liveIntel = {};
+function liveIntel(mac) {
+    const c = S.liveIntel[mac];
+    if (c && Date.now() - c.at < 300000) return c;
+    if (!c || !c.busy) {
+        S.liveIntel[mac] = Object.assign(c || {}, { busy: true, at: c ? c.at : 0 });
+        api(`/api/devices/${encodeURIComponent(mac)}?flat=1`).then((r) => {
+            const row = (k) => ((r.rows || []).find((x) => x[0] === k) || [])[1] || "";
+            const cid = row("Company ID").replace(/^0x[0-9a-fA-F]+\s*/, "");
+            const svc = row("Services").split(", ").map((s) => s.replace(/^[0-9a-fA-F]+\s*/, ""))
+                .filter((s) => s && !/^(Battery|Device Information|Generic Access|Generic Attribute|Tx Power)$/i.test(s))[0] || "";
+            const what = row("Appearance") || [cid, svc].filter(Boolean).join(", ") || row("SSID") ||
+                (row("Looks for") ? `looks for ${row("Looks for").split(", ")[0]}` : "") || row("MAC vendor");
+            const n = parseInt(row("Detections")) || 0, first = row("First seen");
+            S.liveIntel[mac] = { at: Date.now(), what, isNew: n <= 3,
+                hist: n <= 3 ? "new" : `since ${first}, ${n} hits` };
+            renderTargets();
+        }).catch(() => { S.liveIntel[mac].busy = false; S.liveIntel[mac].at = Date.now(); });
+    }
+    return S.liveIntel[mac] || {};
+}
+// Coming or going: the strongest node's signal, oldest vs newest reading in the window.
+function liveTrend(t) {
+    const s = (t.samples[t.seen[0].node] || []);
+    if (s.length < 3) return { txt: "steady", cls: "" };
+    const d = s[0].rssi - s[s.length - 1].rssi;     // newest first
+    if (d >= 5) return { txt: `closing in +${d} dB`, cls: "in" };
+    if (d <= -5) return { txt: `moving off ${d} dB`, cls: "out" };
+    return { txt: "steady", cls: "" };
+}
 function targetPoint(t) {
     let sw = 0, lat = 0, lon = 0;
     for (const s of t.seen) {
@@ -1537,16 +1568,22 @@ function renderTargets() {
     // Labels moved, appeared or changed text: lay every label out again.
     const sig = Object.keys(S.targets).map((m) => { const g = S.targets[m], ll = g.marker.getLatLng(); return `${m}${ll.lat.toFixed(6)}${ll.lng.toFixed(6)}${g.marker.getElement() ? g.marker.getElement().querySelector(".tgt-label").innerHTML : ""}`; }).join("|");
     if (sig !== S.tgtSig) { S.tgtSig = sig; declutterLabels(); }
-    // The list under the map: closest node per live device, every node's signal.
+    // The list under the map: what each live device is, whether it is coming or going,
+    // how far back it goes and how many nodes hear it.
     const box = $("nearest");
-    const html = live.length ? live.slice(0, 8).map((t) => `
+    const html = live.length ? live.slice(0, 8).map((t) => {
+        const li = liveIntel(t.mac), tr = liveTrend(t);
+        return `
         <div class="near-row ${S.tgtOn && !S.tgtHidden.has(t.mac) ? "" : "hidden-tgt"}" data-mac="${esc(t.mac)}">
             <button class="near-eye" data-mac="${esc(t.mac)}" title="${S.tgtHidden.has(t.mac) ? "Show this device on the map" : "Hide this device on the map"}">${S.tgtHidden.has(t.mac) ? "Hidden" : "On map"}</button>
             <span class="near-name">${esc(t.name)}</span>
+            <span class="near-what">${esc(li.what || (t.dom === "wifi" ? "WiFi" : "BLE"))}</span>
+            <span class="near-trend ${tr.cls}" title="Change in its strongest signal over the last minute">${tr.txt}</span>
+            <span class="near-other">${t.seen.length} node${t.seen.length > 1 ? "s" : ""}, best ${t.seen[0].rssi} dBm</span>
+            <span class="near-hist ${li.isNew ? "new" : ""}">${esc(li.hist || "")}</span>
             <span class="near-mac">${esc(t.mac)}</span>
-            <span class="near-close">${esc(nodeName(t.closest))} ${t.seen[0].rssi} dBm</span>
-            ${t.seen.slice(1).map((s) => `<span class="near-other">${esc(nodeName(s.node))} ${s.rssi}</span>`).join("")}
-        </div>`).join("") : "";
+        </div>`;
+    }).join("") : "";
     if (box.innerHTML !== html) {
         box.innerHTML = html;
         box.querySelectorAll(".near-row").forEach((r) => r.onclick = () => openDevice(r.dataset.mac));
