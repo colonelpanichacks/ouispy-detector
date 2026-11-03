@@ -402,7 +402,6 @@ void apply_link_nodes() {
             ev["mac"] = dq[i].mac;
             ev["rssi"] = dq[i].rssi;
             ev["type"] = dq[i].wifi ? "WIFI" : "BLE";
-            ev["descr"] = "via mesh link";
             ev["dom"] = dq[i].wifi ? "wifi" : "ble";
             ev["source"] = "link";
             ev["is_new"] = known_add(dq[i].mac) || dq[i].isNew;

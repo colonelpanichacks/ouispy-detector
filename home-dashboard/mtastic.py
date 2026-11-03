@@ -294,8 +294,10 @@ class Mesh:
         for k in range(0, len(raw) - REC + 1, REC):
             r = raw[k:k + REC]
             rssi = r[9] - 256 if r[9] > 127 else r[9]
+            # The batch has no name or vendor: desc stays empty (never a placeholder, it would
+            # become the device's name); source "meshtastic" marks it as relayed.
             d = {"mac": ":".join(f"{b:02X}" for b in r[0:6]), "node": r[6:9].hex().upper(), "rssi": rssi,
-                 "dom": "wifi" if r[10] & 1 else "ble", "desc": "via mesh link", "ts": now - r[11]}
+                 "dom": "wifi" if r[10] & 1 else "ble", "desc": "", "ts": now - r[11]}
             if self.feed_det:
                 self.feed_det(d, "meshtastic")
             n += 1
