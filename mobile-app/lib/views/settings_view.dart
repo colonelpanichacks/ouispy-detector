@@ -8,9 +8,13 @@ import '../data/model.dart';
 import '../data/tiles.dart';
 import '../data/rid_lookup.dart';
 import '../data/updater.dart';
+import 'tri_view.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'connectors_view.dart';
+import 'meshtastic_view.dart';
+import 'sound_view.dart';
 
 class SettingsView extends StatefulWidget {
   const SettingsView({super.key});
@@ -224,7 +228,13 @@ class _SettingsViewState extends State<SettingsView> {
               children: [
                 _sw(Ph.bell, 'Notifications', 'One for each alert', s.notify, (v) => s.notify = v),
                 _sw(Ph.vibrate, 'Vibrate', 'Buzz on an alert', s.vibrate, (v) => s.vibrate = v),
-                _sw(Ph.speakerHigh, 'Sound', 'Notification sound', s.alertSound, (v) => s.alertSound = v),
+                Tile(
+                  icon: s.alertSound ? Ph.speakerHigh : Ph.speakerX,
+                  color: s.alertSound && !m.muteAll ? C.accent : C.muted,
+                  title: 'Sound',
+                  subtitle: Text(_soundSummary(), style: T.meta),
+                  onTap: () => _open(const SoundView()),
+                ),
                 _sw(Ph.speakerSlash, 'Silence everything', 'No banner, buzz or notification', m.muteAll, (v) => m.setMuteAll(v)),
               ],
             ),
@@ -252,6 +262,23 @@ class _SettingsViewState extends State<SettingsView> {
                 ],
               ),
             Group(
+              title: 'Dashboard connectors',
+              children: [
+                Tile(
+                  icon: Ph.broadcast,
+                  title: 'Meshtastic',
+                  subtitle: Text('Link status, inbox, test message, settings', style: T.meta),
+                  onTap: () => _open(const MeshtasticView()),
+                ),
+                Tile(
+                  icon: Ph.plugs,
+                  title: 'Connectors and data',
+                  subtitle: Text('MQTT, TAK, Reticulum; history retention', style: T.meta),
+                  onTap: () => _open(const ConnectorsView()),
+                ),
+              ],
+            ),
+            Group(
               title: 'Map',
               children: [
                 KV('Layer', s.tileLayer, monoValue: true),
@@ -274,6 +301,18 @@ class _SettingsViewState extends State<SettingsView> {
                       _usage();
                     }
                   },
+                ),
+              ],
+            ),
+            Group(
+              title: 'Triangulation',
+              children: [
+                Tile(
+                  icon: Ph.crosshair,
+                  color: C.green,
+                  title: 'Model and calibrations',
+                  subtitle: Text('How signal turns into distance, per-node offsets, calibrated devices', style: T.meta),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TriView())),
                 ),
               ],
             ),
@@ -356,6 +395,17 @@ class _SettingsViewState extends State<SettingsView> {
         ),
       ),
     );
+  }
+
+  void _open(Widget page) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => page)).then((_) {
+    if (mounted) setState(() {});
+  });
+
+  String _soundSummary() {
+    if (App.I.m.muteAll) return 'Silenced';
+    if (!s.alertSound) return 'Off';
+    final n = [s.sndDetect, s.sndWatch, s.sndDrone, s.sndNodeDown, s.sndNodeUp].where((x) => x).length;
+    return '$n of 5 events, volume ${s.volume}${s.proxBeep ? ', find-it beep' : ''}';
   }
 
   Widget _sw(IconData i, String t, String sub, bool v, ValueChanged<bool> f) => Padding(

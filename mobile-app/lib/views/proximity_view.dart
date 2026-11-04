@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../data/sounds.dart';
 import '../main.dart';
 import '../theme.dart';
 
@@ -20,7 +21,8 @@ class ProximityView extends StatefulWidget {
 class _ProximityViewState extends State<ProximityView> with SingleTickerProviderStateMixin {
   final _hist = <(double, int)>[]; // (ts, rssi)
   Timer? _pulse;
-  bool buzz = true, beep = false;
+  bool buzz = true;
+  late bool beep = App.I.s.proxBeep;
   double _lastBest = 0;
   late final AnimationController ring = AnimationController(vsync: this, duration: const Duration(milliseconds: 700));
 
@@ -70,7 +72,7 @@ class _ProximityViewState extends State<ProximityView> with SingleTickerProvider
       if (r != null) {
         ring.forward(from: 0);
         if (buzz) r > -60 ? HapticFeedback.heavyImpact() : HapticFeedback.mediumImpact();
-        if (beep) SystemSound.play(SystemSoundType.click);
+        if (beep) Sounds.I.proxTick();
       }
       _schedule();
     });

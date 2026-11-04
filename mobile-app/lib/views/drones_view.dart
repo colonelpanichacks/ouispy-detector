@@ -226,10 +226,11 @@ class _DroneCard extends StatelessWidget {
           const SizedBox(height: 12),
           Row(
             children: [
-              _stat('Last', live ? agoText(d.last) : clock(d.last, date: true), live ? C.green : C.soft),
-              if (h != null) _stat(d.hagl != null ? 'Height' : 'Alt', '${h.round()} m', C.text),
-              if (d.spd != null) _stat('Speed', '${d.spd!.toStringAsFixed(1)} m/s', C.text),
-              if (d.pilotDist != null) _stat('Pilot', '${d.pilotDist} m', C.orange),
+              // compact: five of these share a 360 dp card; the full time is on the detail page
+              _stat('Last', shortAge(d.last), live ? C.green : C.soft),
+              if (h != null) _stat(d.hagl != null ? 'Height' : 'Alt', '${h.round()}m', C.text),
+              if (d.spd != null) _stat('Speed', '${d.spd!.toStringAsFixed(d.spd! < 10 ? 1 : 0)}m/s', C.text),
+              if (d.pilotDist != null) _stat('Pilot', d.pilotDist! >= 10000 ? '${(d.pilotDist! / 1000).round()}km' : '${d.pilotDist}m', C.orange),
               if (d.rssi != null) _stat('Signal', '${d.rssi}', C.rssi(d.rssi)),
             ],
           ),
@@ -239,7 +240,9 @@ class _DroneCard extends StatelessWidget {
               children: [
                 Dot(C.hue(m.nodes[d.closest]?.hue), size: 6),
                 const SizedBox(width: 6),
-                Text('Closest node: ${m.nodeName(d.closest)}', style: T.meta),
+                Flexible(
+                  child: Text('Closest node: ${m.nodeName(d.closest)}', maxLines: 1, overflow: TextOverflow.ellipsis, style: T.meta),
+                ),
               ],
             ),
           ],
@@ -252,17 +255,32 @@ class _DroneCard extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(k, style: T.meta.copyWith(fontSize: 11.5)),
+        Text(k, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.meta.copyWith(fontSize: 11.5)),
         const SizedBox(height: 2),
-        Text(
-          v,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: T.code.copyWith(color: c, fontSize: 13, fontWeight: FontWeight.w600),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerLeft,
+          child: Text(
+            v,
+            maxLines: 1,
+            style: T.code.copyWith(color: c, fontSize: 13, fontWeight: FontWeight.w600),
+          ),
         ),
       ],
     ),
   );
+}
+
+/// A compact age for tight cells: now, 12s, 5m, 3h, 2d, 6w.
+String shortAge(double ts, [double? now]) {
+  if (ts <= 0) return '-';
+  final s = ((now ?? App.I.m.now) - ts).round();
+  if (s < 5) return 'now';
+  if (s < 60) return '${s}s';
+  if (s < 3600) return '${s ~/ 60}m';
+  if (s < 86400) return '${s ~/ 3600}h';
+  if (s < 86400 * 14) return '${s ~/ 86400}d';
+  return '${s ~/ (86400 * 7)}w';
 }
 
 String _cap(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
@@ -494,7 +512,7 @@ class _DroneDetailState extends State<DroneDetail> {
               Group(
                 title: live ? 'In the air' : 'Last report',
                 children: [
-                  KV('Last heard', live ? agoText(d.last) : clock(d.last, date: true), color: live ? C.green : C.text),
+                  KV('Last heard', '${clock(d.last, date: true)}  (${agoText(d.last)})', color: live ? C.green : C.text),
                   KV('First heard', clock(d.first, date: true)),
                   if (d.status.isNotEmpty) KV('Status', d.status),
                   if (d.serial.isNotEmpty) KV('Remote ID', d.serial, monoValue: true, color: C.accent),
@@ -653,7 +671,7 @@ class _Kpis extends StatelessWidget {
                   child: cell(Stat('Live', '${live.length}', icon: Ph.drone, color: live.isNotEmpty ? C.hot : C.text)),
                 ),
                 Expanded(child: cell(Stat('Airborne', '$airborne', color: airborne > 0 ? C.hot : C.text))),
-                Expanded(child: cell(Stat('Pilots located', '$pilots', color: pilots > 0 ? C.orange : C.text), right: false)),
+                Expanded(child: cell(Stat('Pilots', '$pilots', color: pilots > 0 ? C.orange : C.text), right: false)),
               ],
             ),
           ),

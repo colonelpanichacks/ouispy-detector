@@ -4,12 +4,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../data/dashboard.dart';
+import '../data/export.dart';
+import '../data/tri.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import '../data/watch.dart';
 import 'map_view.dart';
 import 'proximity_view.dart';
+import 'tri_view.dart';
 import 'watch_view.dart';
 
 class DeviceDetail extends StatefulWidget {
@@ -22,6 +26,8 @@ class DeviceDetail extends StatefulWidget {
 class _DeviceDetailState extends State<DeviceDetail> {
   Map<String, dynamic>? d;
   bool loading = true;
+  TriCal? cal; // its calibration, when it has one
+  bool calKnown = false;
 
   @override
   void initState() {
@@ -30,12 +36,51 @@ class _DeviceDetailState extends State<DeviceDetail> {
   }
 
   Future<void> _load() async {
+    _loadCal();
     final r = await App.I.link.device(widget.mac);
     if (!mounted) return;
     setState(() {
       d = r;
       loading = false;
     });
+  }
+
+  Future<void> _loadCal() async {
+    final t = await fetchTriModel();
+    if (!mounted) return;
+    setState(() {
+      calKnown = t != null;
+      cal = t?.devices[widget.mac];
+    });
+  }
+
+  Future<void> _calibrate() async {
+    final t = App.I.m.targets[widget.mac];
+    final near = t != null && t.triOk ? LatLng(t.triLat, t.triLon) : null;
+    final c = await calibrateDevice(context, widget.mac, near: near);
+    if (c != null) _loadCal();
+  }
+
+  Future<void> _resetCal() async {
+    if (!await confirm(context, 'Reset calibration?', 'This device goes back to the generic model.', yes: 'Reset')) return;
+    final ok = await resetCalibration(widget.mac);
+    App.I.m.toast(ok ? 'calibration reset' : "didn't reset");
+    _loadCal();
+  }
+
+  Future<void> _clear() async {
+    final n = App.I.m.dets.where((x) => x.mac == widget.mac).length;
+    if (!await confirm(
+      context,
+      'Clear its detections?',
+      'Every stored detection of ${widget.mac}${n > 0 ? ' ($n in the feed)' : ''} is deleted${App.I.link is Dashboard ? ' on the dashboard' : ' from this phone'}. Its name, notes and group stay.',
+      yes: 'Clear',
+    )) {
+      return;
+    }
+    final r = await clearDetections(App.I.link, App.I.m, mac: widget.mac);
+    App.I.m.toast(r == null ? "didn't clear" : '$r detection${r == 1 ? '' : 's'} cleared');
+    _load();
   }
 
   Future<void> _rename() async {
@@ -117,7 +162,7 @@ class _DeviceDetailState extends State<DeviceDetail> {
           final last = m.dets.where((x) => x.mac == widget.mac).firstOrNull;
           final alias = m.aliasOf(widget.mac);
           final name = '${d?['name'] ?? ''}'.isNotEmpty ? '${d!['name']}' : m.nameOf(widget.mac);
-          final descr = (t?.descr.isNotEmpty == true ? t!.descr : last?.descr ?? '').replaceFirst(RegExp(r'^DRONE '), '');
+          final descr = (t?.descr.isNotEmpty == true ? t!.descr : last?.descr ?? '').replaceFirst(RegExp(r'^DRONE\s+'), '');
           final vendor = _row('MAC vendor');
           final muted = m.muted.contains(widget.mac);
           final group = (d?['group'] as Map?)?['name'] ?? m.groupOf[widget.mac];
@@ -130,6 +175,7 @@ class _DeviceDetailState extends State<DeviceDetail> {
           final title = [alias, name, descr, vendor].firstWhere((x) => x.isNotEmpty && x != 'not registered' && x != 'random address', orElse: () => 'Unknown device');
           final sub = [if (alias.isNotEmpty && name.isNotEmpty) 'calls itself "$name"', if (title != descr && descr.isNotEmpty) descr].join('  ·  ');
           final c = drone ? C.hot : C.dom(dom);
+          final trail = TriTrails.I.of(widget.mac);
           return RefreshIndicator(
             color: C.accent,
             onRefresh: _load,
@@ -265,17 +311,20 @@ class _DeviceDetailState extends State<DeviceDetail> {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                  child: Btn(
-                    'Find it',
-                    icon: Ph.crosshairSimple,
-                    kind: BtnKind.tonal,
-                    expand: true,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => ProximityView(mac: widget.mac, title: title),
+                  child: ActionStrip([
+                    (
+                      'Find it',
+                      Ph.crosshairSimple,
+                      C.accent,
+                      () => Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => ProximityView(mac: widget.mac, title: title),
+                        ),
                       ),
                     ),
-                  ),
+                    ('Calibrate', Ph.target, C.text, _calibrate),
+                    ('Clear', Ph.trash, C.red, _clear),
+                  ]),
                 ),
                 if (t != null && t.seen.isNotEmpty)
                   Group(
@@ -302,10 +351,12 @@ class _DeviceDetailState extends State<DeviceDetail> {
                         ),
                     ],
                   ),
-                if (t != null && t.triOk) ...[
+                if ((t != null && t.triOk) || trail.isNotEmpty) ...[
                   SectionHead(
                     'Position',
-                    trailing: Text('±${t.triErr.round()} m${t.triRough ? ' rough' : ''}'.toUpperCase(), style: T.silk.copyWith(color: t.triRough ? C.amber : C.green)),
+                    trailing: t != null && t.triOk
+                        ? Text('±${t.triErr.round()} m${t.triRough ? ' rough' : ''}'.toUpperCase(), style: T.silk.copyWith(color: t.triRough ? C.amber : C.green))
+                        : Text('LAST FIX ${ago(trail.last.ts).toUpperCase()}', style: T.silk),
                   ),
                   Panel(
                     padding: EdgeInsets.zero,
@@ -313,27 +364,76 @@ class _DeviceDetailState extends State<DeviceDetail> {
                     child: SizedBox(
                       height: 220,
                       child: MiniMap(
-                        center: LatLng(t.triLat, t.triLon),
+                        center: t != null && t.triOk ? LatLng(t.triLat, t.triLon) : LatLng(trail.last.lat, trail.last.lon),
                         zoom: 17,
                         layers: [
-                          CircleLayer(
-                            circles: [
-                              CircleMarker(
-                                point: LatLng(t.triLat, t.triLon),
-                                radius: t.triErr,
-                                useRadiusInMeter: true,
-                                color: (t.triRough ? C.amber : C.green).withValues(alpha: 0.16),
-                                borderColor: t.triRough ? C.amber : C.green,
-                                borderStrokeWidth: 1.5,
-                              ),
-                            ],
-                          ),
+                          // its trail: the fixes this session, oldest faintest
+                          if (trail.length > 1)
+                            PolylineLayer(
+                              polylines: [
+                                Polyline(points: [for (final p in trail) LatLng(p.lat, p.lon)], color: C.accent.withValues(alpha: 0.55), strokeWidth: 2),
+                              ],
+                            ),
+                          if (trail.isNotEmpty)
+                            CircleLayer(
+                              circles: [
+                                for (final (i, p) in trail.indexed)
+                                  CircleMarker(
+                                    point: LatLng(p.lat, p.lon),
+                                    radius: 2.5,
+                                    color: C.accent.withValues(alpha: 0.25 + 0.6 * (i + 1) / trail.length),
+                                  ),
+                              ],
+                            ),
+                          if (t != null && t.triOk)
+                            CircleLayer(
+                              circles: [
+                                CircleMarker(
+                                  point: LatLng(t.triLat, t.triLon),
+                                  radius: t.triErr,
+                                  useRadiusInMeter: true,
+                                  color: (t.triRough ? C.amber : C.green).withValues(alpha: 0.16),
+                                  borderColor: t.triRough ? C.amber : C.green,
+                                  borderStrokeWidth: 1.5,
+                                ),
+                              ],
+                            ),
                           nodeMarkers(),
                         ],
                       ),
                     ),
                   ),
                 ],
+                if (calKnown)
+                  Group(
+                    title: 'Calibration',
+                    trailing: cal == null ? null : Text('CALIBRATED', style: T.silk.copyWith(color: C.green)),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                cal == null
+                                    ? 'Generic model: its position can be off by several metres. Put it somewhere you can point to on the map, then Calibrate.'
+                                    : 'Calibrated: ${calText(cal!)}.',
+                                style: T.meta.copyWith(fontSize: 13, color: cal == null ? C.muted : C.soft),
+                              ),
+                            ),
+                            if (cal != null)
+                              TextButton(
+                                onPressed: _resetCal,
+                                child: const Text(
+                                  'Reset',
+                                  style: TextStyle(color: C.red, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 if ('${d?['notes'] ?? ''}'.isNotEmpty)
                   Group(
                     title: 'Notes',

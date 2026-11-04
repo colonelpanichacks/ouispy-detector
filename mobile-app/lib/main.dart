@@ -14,6 +14,7 @@ import 'data/lookup.dart';
 import 'data/model.dart';
 import 'data/settings.dart';
 import 'data/rid_lookup.dart';
+import 'data/tri.dart';
 import 'data/updater.dart';
 import 'data/usb_link.dart';
 import 'data/wardrive.dart';
@@ -85,6 +86,8 @@ Future<void> main() async {
   await Watch.I.load();
   await Updater.I.load();
   await RidLookup.I.load();
+  await loadTriModel();
+  TriTrails.I.attach(m);
   m.watcher = (d) => Watch.I.match(d, m.targets[d.mac]);
   AlertOut(m, s).start();
   // a node plugged in or pulled out switches the source (auto / usb)

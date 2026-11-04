@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../data/model.dart';
+import '../data/tri.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
@@ -17,13 +18,25 @@ class FeedView extends StatefulWidget {
 
 class _FeedViewState extends State<FeedView> {
   String dom = ''; // '', ble, wifi, rid
+  String node = ''; // '', kind:<detector|skyspy|wardrive>, or a node id
+
+  @override
+  void initState() {
+    super.initState();
+    // the feed is always built: it starts the device trails the device page draws
+    TriTrails.I.attach(App.I.m);
+  }
+
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
     return ListenableBuilder(
       listenable: m,
       builder: (context, _) {
-        final list = m.dets.where((d) => dom == 'rid' ? isDrone(d) : (dom.isEmpty || d.dom == dom)).toList();
+        final list = m.dets.where((d) => (dom == 'rid' ? isDrone(d) : (dom.isEmpty || d.dom == dom)) && nodePasses(d.node, node)).toList();
+        final kinds = {for (final n in m.nodes.values) nodeKindKey(n)};
+        final nodes = m.nodes.values.toList()..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+        if (node.isNotEmpty && !node.startsWith('kind:') && !m.nodes.containsKey(node)) node = '';
         return RefreshIndicator(
           color: C.accent,
           backgroundColor: C.panel,
@@ -41,6 +54,19 @@ class _FeedViewState extends State<FeedView> {
                   ),
                 ),
               ),
+              if (m.nodes.length > 1 || kinds.length > 1)
+                SliverToBoxAdapter(
+                  child: ChipRow(
+                    padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+                    children: [
+                      for (final (k, l) in nodeKinds)
+                        if (kinds.contains(k)) Chip2(l, on: node == 'kind:$k', onTap: () => setState(() => node = node == 'kind:$k' ? '' : 'kind:$k')),
+                      if (kinds.isNotEmpty) Container(width: 1, height: 22, color: C.silkLine),
+                      for (final (i, n) in nodes.indexed)
+                        Chip2(n.label, on: node == n.id, color: C.hue(n.hue, i), onTap: () => setState(() => node = node == n.id ? '' : n.id)),
+                    ],
+                  ),
+                ),
               if (list.isEmpty)
                 SliverFillRemaining(hasScrollBody: false, child: linkEmpty(context, 'Nothing heard yet', 'Detections show up here the moment a node hears something.'))
               else

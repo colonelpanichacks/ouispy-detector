@@ -159,9 +159,17 @@ class Dashboard implements FeedSource, Backend {
     on('mac_aliases', m.ingestAliases);
     on('groups', m.ingestGroups);
     on('marks', m.ingestMarks);
-    on('node_event', (b) => m.toast('${m.nodeName('${b['id']}')} ${b['event']}'));
+    // a node joining or dropping: a toast (the sound comes from the fleet's online flag
+    // flipping, model.dart, which also toasts unless this one said it first)
+    on('node_event', (b) {
+      final id = '${b['id']}', name = m.nodeName(id);
+      final ev = '${b['event']}';
+      if (m.nodes[id]?.isHome == true || m.toastedLately(name)) return;
+      m.toast(ev == 'offline' ? '$name dropped off the mesh' : (ev == 'online' ? '$name joined' : '$name $ev'));
+    });
     on('node_filters', (b) => m.toast(b['filters_ok'] == true ? '${m.nodeName('${b['id']}')} filters updated' : '${m.nodeName('${b['id']}')} filter push failed'));
-    on('lost_node', (b) => m.toast('${m.nodeName('${b['node']}')} reported lost'));
+    on('lost_node', m.lostNode);
+    on('sources', m.ingestSources);
     on('job', (b) {
       final st = '${b['state']}';
       if (st == 'done' || st == 'error' || st == 'failed') m.toast('${b['label'] ?? b['op']}: $st');
@@ -240,6 +248,29 @@ class Dashboard implements FeedSource, Backend {
       return null;
     }
   }
+
+  /// A POST whose refusal matters to the page: (reply, null) or (null, why), the
+  /// dashboard's own error text when it gave one. No toasts.
+  Future<(Map<String, dynamic>?, String?)> postChecked(String path, Map<String, dynamic> body) async {
+    if (base.isEmpty) return (null, 'not connected to the dashboard');
+    try {
+      final r = await _client.post(uri(path), headers: {..._headers, 'Content-Type': 'application/json'}, body: jsonEncode(body)).timeout(const Duration(seconds: 10));
+      Object? j;
+      try {
+        j = jsonDecode(utf8.decode(r.bodyBytes));
+      } catch (_) {}
+      if (r.statusCode != 200) {
+        final why = j is Map && j['error'] != null ? '${j['error']}' : 'HTTP ${r.statusCode}';
+        return (null, why);
+      }
+      return (j is Map ? j.cast<String, dynamic>() : <String, dynamic>{}, null);
+    } catch (_) {
+      return (null, 'no reply from the dashboard');
+    }
+  }
+
+  /// The dashboard reachable now (the app's source is the dashboard and its socket is up).
+  bool get reachable => base.isNotEmpty && _running && m.link == Link.up;
 
   @override
   Future<void> fetchState() async {

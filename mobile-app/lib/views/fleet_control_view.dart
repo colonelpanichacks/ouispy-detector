@@ -10,6 +10,8 @@ import '../data/model.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'firmware_view.dart';
+import 'fleet_view.dart';
 
 /// One command and how it went.
 class CmdLogEntry {
@@ -131,6 +133,18 @@ class _FleetControlViewState extends State<FleetControlView> {
       return;
     }
     await fleetCmd('rechan', {'ch': ch}, 'Re-channel to $ch');
+  }
+
+  Future<void> _wipeAll() async {
+    if (!await askTyped(
+      context,
+      'Wipe EVERY node?',
+      'All fleet keys, settings, filters, logs and firmware are erased, the home last. No node works again until it is reflashed over USB.',
+      'WIPE ALL',
+    )) {
+      return;
+    }
+    await fleetCmd('wipe', {'confirm': 'WIPE ALL'}, 'WIPE ALL');
   }
 
   Future<void> _push() async {
@@ -319,6 +333,21 @@ class _FleetControlViewState extends State<FleetControlView> {
                     onTap: _push,
                   ),
                   Tile(icon: Ph.power, color: C.red, title: 'Reboot all remotes', titleColor: C.red, onTap: _rebootAll),
+                  Tile(
+                    icon: Ph.lightning,
+                    color: C.accent,
+                    title: 'Update firmware',
+                    subtitle: Text('A library build or a .bin, to the nodes you pick, one at a time', style: T.meta),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FirmwareView())),
+                  ),
+                  Tile(
+                    icon: Ph.eraser,
+                    color: C.red,
+                    title: 'Wipe every node',
+                    titleColor: C.red,
+                    subtitle: Text('The remotes, then the home', style: T.meta),
+                    onTap: _wipeAll,
+                  ),
                 ],
               ),
               SectionHead('Wardrivers', trailing: Text('${wds.length}', style: T.meta)),

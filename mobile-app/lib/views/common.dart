@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 
+import '../data/lookup.dart';
 import '../data/model.dart';
 import '../main.dart';
 import '../theme.dart';
@@ -38,6 +40,18 @@ String dur(num s) {
 
 void openDevice(BuildContext context, String mac) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => DeviceDetail(mac: mac.toUpperCase())));
 
+final _macRe = RegExp(r'^([0-9A-Fa-f]{2}[:-]?){5}[0-9A-Fa-f]{2}$');
+
+/// A device's title in a list: its name or what it says it is, without the "DRONE " the
+/// icon already shows; never just its MAC again (that is on the line under it): the maker,
+/// or "Random address" / "Unknown device".
+String deviceTitle(String mac, [String descr = '']) {
+  final m = App.I.m;
+  final l = m.labelOf(mac, descr.replaceFirst(RegExp(r'^DRONE\s+'), '').trim()).trim();
+  if (l.isNotEmpty && !_macRe.hasMatch(l) && l.toUpperCase() != mac.toUpperCase()) return l;
+  return Lookup.I.vendor(mac) ?? (Lookup.randomMac(mac) ? 'Random address' : 'Unknown device');
+}
+
 bool isDrone(Det d) => d.type.toUpperCase() == 'RID' || d.descr.startsWith('DRONE');
 
 Color typeColor(Det d) => isDrone(d) ? C.hot : C.dom(d.dom);
@@ -53,7 +67,7 @@ class DetRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     final tc = typeColor(d);
-    final label = m.labelOf(d.mac, d.descr.isNotEmpty ? d.descr : d.mac);
+    final label = deviceTitle(d.mac, d.descr);
     final group = m.groupOf[d.mac] ?? d.group;
     return InkWell(
       onTap: () => openDevice(context, d.mac),
@@ -190,3 +204,180 @@ Future<bool> confirm(BuildContext context, String title, String body, {String ye
       ),
     ) ??
     false;
+
+// ------------------------------------------------------------ node / kind filters
+
+/// The node picker's kinds, as the dashboard's (`node=kind:detector|skyspy|wardrive`).
+const nodeKinds = [('detector', 'Detectors'), ('skyspy', 'Sky-Spy'), ('wardrive', 'Wardrivers')];
+
+/// The dashboard's kind key for a node: detector, skyspy or wardrive.
+String nodeKindKey(FleetNode? n) {
+  final k = n?.kind ?? 'detector';
+  if (k.startsWith('wardriver')) return 'wardrive';
+  if (k == 'sky-spy') return 'skyspy';
+  return 'detector';
+}
+
+/// A node filter: '' every node, `kind:detector` (etc.) every node of a kind, else one node id.
+bool nodePasses(String id, String filter) {
+  if (filter.isEmpty) return true;
+  if (filter.startsWith('kind:')) return nodeKindKey(App.I.m.nodes[id]) == filter.substring(5);
+  return id == filter;
+}
+
+/// Any of [ids] passes the node filter.
+bool nodesPass(Iterable<String> ids, String filter) => filter.isEmpty || ids.any((i) => nodePasses(i, filter));
+
+String nodeFilterLabel(String f) {
+  if (f.isEmpty) return 'All nodes';
+  if (f.startsWith('kind:')) return nodeKinds.where((k) => k.$1 == f.substring(5)).firstOrNull?.$2 ?? f.substring(5);
+  return App.I.m.nodeName(f);
+}
+
+/// The node picker's choices: every node, each kind, each node (by name).
+List<(String, String)> nodeFilterItems() {
+  final m = App.I.m;
+  final ns = m.nodes.values.toList()..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+  return [('', 'All nodes'), for (final (k, l) in nodeKinds) ('kind:$k', l), for (final n in ns) (n.id, n.label)];
+}
+
+/// A compact drop-down in a printed box: "SORT  LAST", lit when it is not the default.
+class PickChip<V> extends StatelessWidget {
+  const PickChip({super.key, required this.label, required this.value, required this.items, required this.onChanged, this.icon, this.lit, this.dots});
+  final String label;
+  final V value;
+  final List<(V, String)> items;
+  final ValueChanged<V> onChanged;
+  final IconData? icon;
+
+  /// Lit (accent) when true; by default when [value] is not the first item's.
+  final bool? lit;
+
+  /// A colour dot per item (a node's hue).
+  final Color? Function(V v)? dots;
+
+  @override
+  Widget build(BuildContext context) {
+    final on = lit ?? (items.isNotEmpty && value != items.first.$1);
+    final cur = items.where((i) => i.$1 == value).firstOrNull?.$2 ?? '';
+    return PopupMenuButton<V>(
+      tooltip: label,
+      color: C.panel,
+      position: PopupMenuPosition.under,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(4),
+        side: const BorderSide(color: C.silkLine),
+      ),
+      onSelected: onChanged,
+      itemBuilder: (_) => [
+        for (final (v, l) in items)
+          PopupMenuItem<V>(
+            value: v,
+            height: 40,
+            child: Row(
+              children: [
+                if (dots?.call(v) case final c?) ...[Dot(c, size: 7), const SizedBox(width: 9)],
+                Expanded(
+                  child: Text(
+                    l,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: T.row.copyWith(fontSize: 14, color: v == value ? C.accent : C.text),
+                  ),
+                ),
+                if (v == value) const Icon(Ph.check, size: 15, color: C.accent),
+              ],
+            ),
+          ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: on ? C.accent.withValues(alpha: 0.1) : C.bg.withValues(alpha: 0.72),
+          borderRadius: BorderRadius.circular(3),
+          border: Border.all(color: on ? C.accent.withValues(alpha: 0.75) : C.silkLine),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[Icon(icon, size: 13, color: on ? C.accent : C.silk), const SizedBox(width: 5)],
+            Text(
+              label.toUpperCase(),
+              style: const TextStyle(fontFamily: mono, color: C.silk, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 1),
+            ),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 120),
+              child: Text(
+                cur.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontFamily: mono, color: on ? C.accent : C.soft, fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.8),
+              ),
+            ),
+            const SizedBox(width: 3),
+            Icon(Ph.caretDown, size: 11, color: on ? C.accent : C.silk),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The node picker as a [PickChip]: all, a kind, or one node, dotted in its colour.
+class NodePick extends StatelessWidget {
+  const NodePick({super.key, required this.value, required this.onChanged});
+  final String value;
+  final ValueChanged<String> onChanged;
+  @override
+  Widget build(BuildContext context) {
+    final m = App.I.m;
+    final items = nodeFilterItems();
+    return PickChip<String>(
+      label: 'Node',
+      icon: Ph.graph,
+      value: items.any((i) => i.$1 == value) ? value : '',
+      items: items,
+      dots: (v) => v.isEmpty || v.startsWith('kind:') ? null : C.hue(m.nodes[v]?.hue),
+      onChanged: onChanged,
+    );
+  }
+}
+
+/// The groups the devices are in, as picker items: any, none, then each name.
+List<(String, String)> groupFilterItems() {
+  final names = App.I.m.groupOf.values.where((g) => g.isNotEmpty).toSet().toList()..sort();
+  return [('', 'Any'), ('none', 'No group'), for (final g in names) (g, g)];
+}
+
+bool groupPasses(String mac, String filter) {
+  if (filter.isEmpty) return true;
+  final g = App.I.m.groupOf[mac.toUpperCase()] ?? '';
+  return filter == 'none' ? g.isEmpty : g == filter;
+}
+
+/// Writes a path where the user can find it: a dialog with the path and a copy button.
+Future<void> showPath(BuildContext context, String title, String path) => showDialog<void>(
+  context: context,
+  builder: (c) => AlertDialog(
+    title: Text(title),
+    content: SelectableText(path, style: T.code.copyWith(color: C.soft)),
+    actions: [
+      TextButton(
+        onPressed: () {
+          Clipboard.setData(ClipboardData(text: path));
+          Navigator.pop(c);
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('path copied')));
+        },
+        child: const Text(
+          'Copy path',
+          style: TextStyle(color: C.accent, fontWeight: FontWeight.w600),
+        ),
+      ),
+      TextButton(
+        onPressed: () => Navigator.pop(c),
+        child: const Text('Close', style: TextStyle(color: C.muted)),
+      ),
+    ],
+  ),
+);

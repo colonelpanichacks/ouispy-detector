@@ -145,8 +145,10 @@ Future<Position?> phonePosition() async {
   }
 }
 
-/// A node's card on the map: what it is, and moving, placing, colouring it.
-Future<String?> nodeCard(BuildContext context, FleetNode n) => showModalBottomSheet<String>(
+/// A node's card on the map: what it is, and moving, placing, colouring it. [tracking]
+/// (a GPS node's trail shown, or null when it has none) adds TRACK; [locked] lights LOCK.
+/// Returns move / here / colour / settings / unplace / track / lock.
+Future<String?> nodeCard(BuildContext context, FleetNode n, {bool? tracking, bool locked = false}) => showModalBottomSheet<String>(
   context: context,
   builder: (c) => SafeArea(
     child: Padding(
@@ -204,6 +206,39 @@ Future<String?> nodeCard(BuildContext context, FleetNode n) => showModalBottomSh
               ],
             ),
           ),
+          if (n.hasPos) ...[
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Row(
+                children: [
+                  if (tracking != null) ...[
+                    Expanded(
+                      child: Btn(
+                        tracking ? 'Track on' : 'Track off',
+                        icon: Ph.path,
+                        kind: tracking ? BtnKind.tonal : BtnKind.ghost,
+                        color: tracking ? C.green : C.silk,
+                        expand: true,
+                        onTap: () => Navigator.pop(c, 'track'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Expanded(
+                    child: Btn(
+                      locked ? 'Locked' : 'Lock',
+                      icon: locked ? PhF.lockSimple : Ph.lockSimple,
+                      kind: locked ? BtnKind.tonal : BtnKind.ghost,
+                      color: locked ? C.hot : C.text,
+                      expand: true,
+                      onTap: () => Navigator.pop(c, 'lock'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     ),
@@ -273,4 +308,55 @@ Future<bool> nodeAction(BuildContext context, FleetNode n, String? a) async {
       return false;
   }
   return false;
+}
+
+/// A drone's card on the map: what it is, how high and fast, its pilot; LOCK on the drone or
+/// the pilot (the map keeps it centred), its track on / off, past FLIGHTS, DETAILS (its page).
+/// Returns lockDrone / lockPilot / track / flights / details.
+Future<String?> droneCard(BuildContext context, Drone d, {required bool lockedDrone, required bool lockedPilot, required bool tracking}) {
+  final m = App.I.m;
+  final live = m.now - d.last < droneLiveS;
+  final facts = [
+    if (d.hagl != null) '${d.hagl!.round()} m AGL' else if (d.alt != null) '${d.alt!.round()} m MSL',
+    if (d.spd != null) '${d.spd!.toStringAsFixed(1)} m/s',
+    if (d.pilotDist != null) 'pilot ${d.pilotDist} m',
+    if (d.rssi != null) '${d.rssi} dBm',
+    live ? 'live' : 'seen ${ago(d.last)}',
+  ];
+  return showModalBottomSheet<String>(
+    context: context,
+    builder: (c) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(PhF.drone, size: 18, color: live ? C.hot : C.soft),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(d.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.title.copyWith(fontSize: 20)),
+                ),
+                Tag(d.tag, color: C.droneTag(d.tag)),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text([if (d.maker.isNotEmpty) d.maker, d.mac].join('  ·  '), style: T.code),
+            const SizedBox(height: 4),
+            Text(facts.join('  ·  '), style: T.meta),
+            const SizedBox(height: 12),
+            ActionStrip([
+              (lockedDrone ? 'Locked' : 'Lock drone', lockedDrone ? PhF.lockSimple : Ph.lockSimple, C.hot, d.hasPos ? () => Navigator.pop(c, 'lockDrone') : null),
+              (lockedPilot ? 'Locked' : 'Lock pilot', lockedPilot ? PhF.user : Ph.user, C.amber, d.hasPilot ? () => Navigator.pop(c, 'lockPilot') : null),
+              (tracking ? 'Track on' : 'Track off', Ph.path, tracking ? C.green : C.text, () => Navigator.pop(c, 'track')),
+              ('Flights', Ph.clockCounterClockwise, C.sky, () => Navigator.pop(c, 'flights')),
+              ('Details', Ph.info, C.text, () => Navigator.pop(c, 'details')),
+            ]),
+          ],
+        ),
+      ),
+    ),
+  );
 }

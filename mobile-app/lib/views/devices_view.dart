@@ -4,7 +4,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../data/dashboard.dart';
+import '../data/export.dart';
+import '../data/lookup.dart';
 import '../data/model.dart';
+import '../data/wardrive.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
@@ -24,6 +28,10 @@ class _DevicesViewState extends State<DevicesView> {
   bool wardrive = false;
   String dom = '';
   String q = '';
+  String sort = 'last'; // last | signal | hits | name
+  String node = ''; // '', kind:<k>, or a node id
+  String group = ''; // '', none, or a group name
+  String src = ''; // history: '' both, det, wd
   List<Map<String, dynamic>> rows = [];
   int total = 0;
   bool loading = false;
@@ -31,13 +39,57 @@ class _DevicesViewState extends State<DevicesView> {
 
   Future<void> _load() async {
     setState(() => loading = true);
-    final j = await App.I.link.history(q: q, dom: dom);
+    final j = await _fetch();
     if (!mounted) return;
     setState(() {
       loading = false;
       rows = [for (final r in (j?['rows'] as List? ?? const [])) (r as Map).cast<String, dynamic>()];
       total = (j?['total'] as num?)?.toInt() ?? rows.length;
     });
+  }
+
+  /// The history: the dashboard's /api/devices with every filter it takes; on USB the
+  /// phone's store, plus what the wardriver heard, filtered here.
+  Future<Map<String, dynamic>?> _fetch() async {
+    final b = App.I.link;
+    if (b is Dashboard) {
+      final p = StringBuffer('/api/devices?limit=1000');
+      if (src.isNotEmpty) p.write('&src=$src');
+      if (q.isNotEmpty) p.write('&q=${Uri.encodeQueryComponent(q)}');
+      if (dom.isNotEmpty) p.write('&dom=$dom');
+      if (node.isNotEmpty) p.write('&node=${Uri.encodeQueryComponent(node)}');
+      final j = await b.getJson(p.toString());
+      return j is Map ? j.cast<String, dynamic>() : null;
+    }
+    final out = <Map<String, dynamic>>[];
+    if (src != 'wd') {
+      final j = await b.history(q: q, dom: dom, limit: 1000);
+      out.addAll([for (final r in (j?['rows'] as List? ?? const [])) (r as Map).cast<String, dynamic>()]);
+    }
+    if (src != 'det') {
+      final ql = q.toLowerCase();
+      for (final d in Wardrive.I.devices.values) {
+        final dd = d.isWifi ? 'wifi' : 'ble';
+        if (dom.isNotEmpty && dd != dom) continue;
+        if (ql.isNotEmpty && !'${d.mac} ${d.label} ${d.maker} ${App.I.m.aliasOf(d.mac)}'.toLowerCase().contains(ql)) continue;
+        out.add({
+          'mac': d.mac,
+          'dom': dd,
+          'descr': d.label,
+          'name': '',
+          'last': d.last,
+          'first': d.first,
+          'hits': d.seen,
+          'best': d.rssi,
+          'nodes': [if (d.node.isNotEmpty) d.node],
+          'wd': d.kind,
+          'sec': d.sec,
+          'ch': d.ch,
+        });
+      }
+    }
+    final l = out.where((r) => nodesPass([for (final n in (r['nodes'] as List? ?? const [])) '$n'], node)).toList();
+    return {'rows': l, 'total': l.length};
   }
 
   void _query(String v) {
@@ -48,6 +100,12 @@ class _DevicesViewState extends State<DevicesView> {
     } else {
       setState(() {});
     }
+  }
+
+  @override
+  void dispose() {
+    _deb?.cancel();
+    super.dispose();
   }
 
   @override
@@ -88,40 +146,115 @@ class _DevicesViewState extends State<DevicesView> {
     );
   }
 
-  List<Widget> _lists(Model m) => [
-    ChipRow(
-      children: [
-        for (final (k, l, ic) in [('', 'Everything', null), ('ble', 'Bluetooth', Ph.bluetooth), ('wifi', 'Wi-Fi', Ph.wifiHigh)])
-          Chip2(
-            l,
-            icon: ic,
-            on: dom == k,
-            onTap: () {
-              setState(() => dom = k);
-              if (history) _load();
+  /// One compact row of drop-downs: radio, sort, node, group (and on History the source
+  /// and the tools).
+  Widget _controls() {
+    void reload() {
+      if (history) _load();
+    }
+
+    return ListenableBuilder(
+      listenable: App.I.m,
+      builder: (_, _) => ChipRow(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 6),
+        children: [
+          PickChip<String>(
+            label: 'Radio',
+            value: dom,
+            items: const [('', 'All'), ('ble', 'Bluetooth'), ('wifi', 'Wi-Fi')],
+            onChanged: (v) {
+              setState(() => dom = v);
+              reload();
             },
           ),
-      ],
-    ),
+          PickChip<String>(
+            label: 'Sort',
+            icon: Ph.sortDescending,
+            value: sort,
+            lit: false,
+            items: const [('last', 'Last heard'), ('signal', 'Signal'), ('hits', 'Hits'), ('name', 'Name')],
+            onChanged: (v) => setState(() => sort = v),
+          ),
+          NodePick(
+            value: node,
+            onChanged: (v) {
+              setState(() => node = v);
+              reload();
+            },
+          ),
+          PickChip<String>(
+            label: 'Group',
+            icon: Ph.folderSimple,
+            value: groupFilterItems().any((g) => g.$1 == group) ? group : '',
+            items: groupFilterItems(),
+            onChanged: (v) => setState(() => group = v),
+          ),
+          if (history)
+            PickChip<String>(
+              label: 'Source',
+              value: src,
+              items: const [('', 'All'), ('det', 'Detected'), ('wd', 'Wardriven')],
+              onChanged: (v) {
+                setState(() => src = v);
+                _load();
+              },
+            ),
+          if (history)
+            Chip2(
+              'Export',
+              icon: Ph.export,
+              onTap: () => historyTools(
+                context,
+                filter: ExportFilter(q: q, node: node, dom: dom),
+                node: node,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  int Function(R, R) _cmp<R>(double Function(R) last, int? Function(R) best, int Function(R) hits, String Function(R) name) => switch (sort) {
+    'signal' => (a, b) => (best(b) ?? -200).compareTo(best(a) ?? -200),
+    'hits' => (a, b) => hits(b).compareTo(hits(a)),
+    'name' => (a, b) => name(a).toLowerCase().compareTo(name(b).toLowerCase()),
+    _ => (a, b) => last(b).compareTo(last(a)),
+  };
+
+  List<Widget> _lists(Model m) => [
+    _controls(),
     Expanded(
       child: history
           ? RefreshIndicator(
               color: C.accent,
               onRefresh: _load,
-              child: loading && rows.isEmpty
-                  ? const Center(child: CircularProgressIndicator())
-                  : rows.isEmpty
-                  ? ListView(children: [linkEmpty(context, 'No matches', 'Nothing in the history matches that.', icon: Ph.magnifyingGlass)])
-                  : ListView.separated(
-                      itemCount: rows.length + 1,
-                      separatorBuilder: (_, i) => i == 0 ? const SizedBox() : const Divider(indent: 64),
-                      itemBuilder: (_, i) => i == 0
-                          ? Padding(
-                              padding: const EdgeInsets.fromLTRB(20, 2, 16, 6),
-                              child: Text('$total devices', style: T.meta),
-                            )
-                          : _HistRow(rows[i - 1]),
-                    ),
+              child: Builder(
+                builder: (context) {
+                  final shown = rows.where((r) => groupPasses('${r['mac']}', group)).toList()
+                    ..sort(
+                      _cmp<Map<String, dynamic>>(
+                        (r) => (r['last'] as num?)?.toDouble() ?? 0,
+                        (r) => (r['best'] as num?)?.toInt(),
+                        (r) => (r['hits'] as num?)?.toInt() ?? 0,
+                        (r) => deviceTitle('${r['mac']}', '${r['name'] ?? ''}'.isNotEmpty ? '${r['name']}' : '${r['descr'] ?? ''}'),
+                      ),
+                    );
+                  if (loading && rows.isEmpty) return const Center(child: CircularProgressIndicator());
+                  if (shown.isEmpty) {
+                    return ListView(children: [linkEmpty(context, 'No matches', 'Nothing in the history matches that.', icon: Ph.magnifyingGlass)]);
+                  }
+                  return ListView.separated(
+                    itemCount: shown.length + 1,
+                    separatorBuilder: (_, i) => i == 0 ? const SizedBox() : const Divider(indent: 64),
+                    itemBuilder: (_, i) => i == 0
+                        ? Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 2, 16, 6),
+                            child: Text(shown.length == total ? '$total devices' : '${shown.length} of $total devices', style: T.meta),
+                          )
+                        : _HistRow(shown[i - 1]),
+                  );
+                },
+              ),
             )
           : ListenableBuilder(
               listenable: m,
@@ -129,14 +262,18 @@ class _DevicesViewState extends State<DevicesView> {
                 final ql = q.toLowerCase();
                 final list = m.liveTargets.where((t) {
                   if (dom.isNotEmpty && t.dom != dom) return false;
+                  if (!nodesPass(t.seen.map((s) => s.node), node)) return false;
+                  if (!groupPasses(t.mac, group)) return false;
                   if (ql.isEmpty) return true;
-                  return '${t.mac} ${t.name} ${t.descr} ${m.aliasOf(t.mac)}'.toLowerCase().contains(ql);
-                }).toList();
+                  return '${t.mac} ${t.name} ${t.descr} ${m.aliasOf(t.mac)} ${Lookup.I.vendor(t.mac) ?? ''}'.toLowerCase().contains(ql);
+                }).toList()..sort(_cmp<Target>((t) => t.last, (t) => t.best, (t) => t.hits, (t) => deviceTitle(t.mac, t.descr)));
                 if (list.isEmpty) {
                   return linkEmpty(
                     context,
                     'Nothing nearby',
-                    'No device heard in the last 10 minutes. History has everything the mesh has ever heard.',
+                    node.isNotEmpty || group.isNotEmpty || dom.isNotEmpty
+                        ? 'Nothing heard in the last 10 minutes matches the filters.'
+                        : 'No device heard in the last 10 minutes. History has everything the mesh has ever heard.',
                     icon: Ph.broadcast,
                   );
                 }
@@ -145,6 +282,80 @@ class _DevicesViewState extends State<DevicesView> {
             ),
     ),
   ];
+}
+
+/// The History tools: export detections (CSV / JSON, with the list's filters), the
+/// sightings CSV, and clearing detections (the node picked, or all). Writes to the app's
+/// documents folder and shows the path.
+Future<void> historyTools(BuildContext context, {ExportFilter filter = const ExportFilter(), String node = ''}) async {
+  final m = App.I.m;
+  final dash = App.I.link is Dashboard;
+  final one = node.isNotEmpty && !node.startsWith('kind:');
+  final pick = await showModalBottomSheet<String>(
+    context: context,
+    builder: (c) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          const SectionHead('Export'),
+          Tile(
+            icon: Ph.fileCsv,
+            color: C.accent,
+            title: 'Detections CSV',
+            subtitle: Text(_filterText(filter), style: T.meta),
+            onTap: () => Navigator.pop(c, 'csv'),
+          ),
+          Tile(
+            icon: Ph.fileCode,
+            color: C.accent,
+            title: 'Detections JSON',
+            subtitle: Text(_filterText(filter), style: T.meta),
+            onTap: () => Navigator.pop(c, 'json'),
+          ),
+          Tile(
+            icon: Ph.fileCsv,
+            color: C.accent,
+            title: dash ? 'Sightings CSV' : 'Devices CSV',
+            subtitle: Text(dash ? 'every node join / leave the dashboard logged' : 'every device this phone has heard', style: T.meta),
+            onTap: () => Navigator.pop(c, 'sightings'),
+          ),
+          const SectionHead('Clear'),
+          if (one) Tile(icon: Ph.trash, color: C.red, title: "Clear ${m.nodeName(node)}'s detections", titleColor: C.red, onTap: () => Navigator.pop(c, 'clear-node')),
+          Tile(icon: Ph.trash, color: C.red, title: 'Clear all detections', titleColor: C.red, onTap: () => Navigator.pop(c, 'clear-all')),
+          const SizedBox(height: 8),
+        ],
+      ),
+    ),
+  );
+  if (pick == null || !context.mounted) return;
+  if (pick.startsWith('clear')) {
+    final who = pick == 'clear-node' ? "${m.nodeName(node)}'s detections" : 'every detection';
+    if (!await confirm(
+      context,
+      'Clear $who?',
+      'They are deleted ${dash ? 'on the dashboard' : 'from this phone'} for good. Names, notes and groups stay.',
+      yes: 'Clear',
+    )) {
+      return;
+    }
+    final n = await clearDetections(App.I.link, m, node: pick == 'clear-node' ? node : null);
+    m.toast(n == null ? "didn't clear" : '$n detection${n == 1 ? '' : 's'} cleared');
+    return;
+  }
+  m.toast('exporting…');
+  try {
+    final path = pick == 'sightings'
+        ? await exportSightings(App.I.link)
+        : await exportDetections(App.I.link, fmt: pick, filter: filter, nodeOk: (id) => nodePasses(id, filter.node));
+    if (context.mounted) await showPath(context, 'Export written', path);
+  } catch (e) {
+    m.toast("couldn't export ($e)");
+  }
+}
+
+String _filterText(ExportFilter f) {
+  final p = [if (f.q.isNotEmpty) '"${f.q}"', if (f.node.isNotEmpty) nodeFilterLabel(f.node), if (f.dom.isNotEmpty) f.dom == 'ble' ? 'Bluetooth' : 'Wi-Fi'];
+  return p.isEmpty ? 'everything stored' : 'only ${p.join(', ')}';
 }
 
 class _TargetRow extends StatelessWidget {
@@ -169,7 +380,7 @@ class _TargetRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(m.labelOf(t.mac, t.descr.isNotEmpty ? t.descr : t.mac), maxLines: 1, overflow: TextOverflow.ellipsis, style: T.row),
+                    Text(deviceTitle(t.mac, t.descr), maxLines: 1, overflow: TextOverflow.ellipsis, style: T.row),
                     const SizedBox(height: 3),
                     Text(t.mac, style: T.code),
                   ],
@@ -235,20 +446,22 @@ class _HistRow extends StatelessWidget {
     final d = '${r['dom']}';
     final best = (r['best'] as num?)?.toInt();
     final nodes = (r['nodes'] as List? ?? const []).map((n) => m.nodeName('$n')).join(', ');
+    final wd = '${r['wd'] ?? ''}';
+    final wdDev = wd.isEmpty ? null : Wardrive.I.devices['$wd|$mac'];
     return InkWell(
-      onTap: () => openDevice(context, mac),
+      onTap: () => wdDev != null ? wardriveDeviceSheet(context, wdDev) : openDevice(context, mac),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
         child: Row(
           children: [
-            IconTile(domIcon(d), C.dom(d)),
+            IconTile(domIcon(d), wd.isEmpty ? C.dom(d) : (wdDev != null ? wdColor(wdDev) : C.muted)),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    m.labelOf(mac, '${r['name'] ?? ''}'.isNotEmpty ? '${r['name']}' : '${r['descr'] ?? mac}'),
+                    deviceTitle(mac, '${r['name'] ?? ''}'.isNotEmpty ? '${r['name']}' : '${r['descr'] ?? ''}'),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: T.row,

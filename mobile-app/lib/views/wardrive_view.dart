@@ -9,8 +9,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../data/local_mesh.dart';
 import '../data/lookup.dart';
 import '../data/wardrive.dart';
+import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import 'map_view.dart';
@@ -596,6 +598,7 @@ class _DeviceSheet extends StatelessWidget {
             ],
           ),
         ),
+        _WdActions(d: d),
         Group(children: rows),
         FutureBuilder<List<WdObs>>(
           future: w.sightings(d),
@@ -659,6 +662,119 @@ class _DeviceSheet extends StatelessWidget {
           child: Btn('Open device page', icon: Ph.arrowSquareOut, kind: BtnKind.ghost, expand: true, onTap: () => openDevice(context, d.mac)),
         ),
       ],
+    );
+  }
+}
+
+/// The Tab5's action bar on a wardriven device: NAME (an alias, every screen shows it) and
+/// ADD AS DETECTION, a filter on one node or all of them so they alert on it. The
+/// detectors match BLE by full MAC, Wi-Fi only by maker prefix (beacon OUI), so a Wi-Fi
+/// device's filter catches every AP of that maker; the bar says so.
+class _WdActions extends StatefulWidget {
+  const _WdActions({required this.d});
+  final WdDevice d;
+  @override
+  State<_WdActions> createState() => _WdActionsState();
+}
+
+class _WdActionsState extends State<_WdActions> {
+  String node = 'all';
+
+  Future<void> _name() async {
+    final m = App.I.m;
+    final v = await askText(context, 'Name it', m.aliasOf(widget.d.mac), hint: 'blank clears it');
+    if (v == null) return;
+    await App.I.link.setAlias(widget.d.mac, v);
+  }
+
+  Future<void> _add() async {
+    final m = App.I.m;
+    final d = widget.d;
+    final ble = d.kind == 'ble';
+    final hex = d.mac.replaceAll(RegExp('[^0-9A-Fa-f]'), '').toUpperCase();
+    if (hex.length != 12) return;
+    final al = m.aliasOf(d.mac);
+    var desc = al.isNotEmpty ? al : (d.name.isNotEmpty ? d.name : d.mac);
+    if (desc.length > 40) desc = desc.substring(0, 40);
+    final args = {
+      'filters': [
+        {'t': ble ? 'MAC' : 'BEACON', 'id': ble ? hex : hex.substring(0, 6), 'd': desc},
+      ],
+    };
+    final b = App.I.link;
+    // a node on USB takes a filter for one node at a time: "all" is each detector in turn
+    final ids = node == 'all' && b is LocalMesh
+        ? [
+            for (final n in m.nodes.values)
+              if (n.kind == 'detector' && n.online) n.id,
+          ]
+        : [node];
+    if (ids.isEmpty) return m.toast('no detector online to add it to');
+    var ok = 0;
+    for (final id in ids) {
+      if (await b.nodeCmd(id, 'filters_add', args) != null) ok++;
+    }
+    if (ok > 0) m.toast('$desc: ${ble ? 'MAC' : 'Wi-Fi maker'} ${ble ? hex : hex.substring(0, 6)} added on ${node == 'all' ? 'all nodes' : m.nodeName(node)}');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = App.I.m;
+    final d = widget.d;
+    final can = d.kind == 'ble' || d.isWifi;
+    return ListenableBuilder(
+      listenable: m,
+      builder: (_, _) {
+        final al = m.aliasOf(d.mac);
+        final ns = m.nodes.values.toList()..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+        if (node != 'all' && !m.nodes.containsKey(node)) node = 'all';
+        return Group(
+          children: [
+            Tile(
+              icon: Ph.pencilSimple,
+              color: al.isEmpty ? C.muted : C.accent,
+              title: al.isEmpty ? 'Name it' : al,
+              titleColor: al.isEmpty ? C.soft : null,
+              subtitle: Text(al.isEmpty ? 'a name every screen shows for it' : 'its name: tap to change', style: T.meta),
+              onTap: _name,
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    !can
+                        ? 'THE DETECTORS CAN ONLY ALERT ON BLE AND WI-FI'
+                        : d.kind == 'ble'
+                        ? 'ALERT ON THIS DEVICE (BLE MAC)'
+                        : "ALERT ON THIS MAKER'S APS (WI-FI OUI)",
+                    style: T.silk,
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      PickChip<String>(
+                        label: 'On',
+                        icon: Ph.graph,
+                        value: node,
+                        lit: node != 'all',
+                        items: [('all', 'All nodes'), for (final n in ns) (n.id, n.label)],
+                        dots: (v) => v == 'all' ? null : C.hue(m.nodes[v]?.hue),
+                        onChanged: (v) => setState(() => node = v),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Btn('Add as detection', icon: Ph.plusCircle, expand: true, onTap: can ? _add : null),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }

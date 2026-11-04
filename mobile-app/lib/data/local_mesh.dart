@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'backend.dart';
+import 'firmware.dart';
 import 'lookup.dart';
 import 'model.dart';
 import 'store.dart';
@@ -67,13 +68,155 @@ class _Node {
   Map<String, dynamic> cfg = {}, ota = {}, tlm = {};
 }
 
+/// What a job does with a reply (or a timeout): send the next line, finish, or fail.
+class _Step {
+  const _Step.send(this.line) : result = null, error = null;
+  const _Step.done(this.result) : line = null, error = null;
+  const _Step.fail(this.error) : line = null, result = null;
+  final String? line;
+  final Map<String, dynamic>? result;
+  final String? error;
+}
+
+class _PlanError implements Exception {
+  _PlanError(this.msg);
+  final String msg;
+}
+
 class _Job {
   _Job(this.lines, this.want, this.label, {this.wants});
   final List<String> lines;
   final String want; // OK, CMD, RST, RFL
   final List<String>? wants; // per line, when they differ (a filter transfer)
   final String label;
-  final done = Completer<Map<String, dynamic>?>();
+  final done = Completer<({Map<String, dynamic>? r, String? err})>();
+  int at = 0; // the line in flight
+  String sent = '';
+
+  /// Seconds the line in flight may wait for its answer.
+  int get timeoutS => 4;
+  String first() => lines[0];
+
+  /// The answer to the line in flight: null when the line is not ours.
+  _Step? reply(String l) {
+    final verb = sent.split(' ').first;
+    if (l.startsWith('ERR')) {
+      // an error about some other verb is not ours (commands.py)
+      final other = RegExp(r'^ERR (\w+):').firstMatch(l)?.group(1);
+      if (other != null && other != verb) return null;
+      return _Step.fail(l.substring(3).trim());
+    }
+    final ok = switch (wants?[at] ?? want) {
+      'OK' => l.startsWith('OK') || l.startsWith('CMD '),
+      'CMD' => l.startsWith('CMD '),
+      'RST' => l.startsWith('RST '),
+      'RFL' => l.startsWith('RFL '),
+      'WIPE' => l.startsWith('WIPE ') || l.startsWith('OK'), // a local wipe announces itself, then erases
+      _ => false,
+    };
+    if (!ok) return null;
+    if (at + 1 < lines.length) return _Step.send(lines[++at]);
+    return _Step.done({'ok': true, 'reply': l});
+  }
+
+  _Step timeout() => const _Step.fail('no answer from the node');
+}
+
+/// Firmware staging on the home (commands.py _stage_firmware): `fwbegin <size> <sha256>`,
+/// then `fwdata <offset> <hex>` 512 bytes at a time, each answered `OK fwdata <end>` (or
+/// `ERR fwdata: expected offset N`, where it picks up again), then `fwend`, which writes the
+/// image to the spare slot and answers `OK fwend` once it is checked (up to 90 s).
+class _FwStageJob extends _Job {
+  _FwStageJob(this.img, this.sha, this.progress) : super(const [], 'OK', 'stage firmware');
+  final List<int> img;
+  final String sha;
+  final void Function(int done, int size)? progress;
+  static const chunk = 512;
+  int phase = 0; // 0 fwbegin, 1 fwdata, 2 fwend
+  int off = 0, misses = 0;
+
+  @override
+  int get timeoutS => switch (phase) {
+    0 => 15,
+    1 => 5,
+    _ => 90,
+  };
+
+  @override
+  String first() => 'fwbegin ${img.length} $sha';
+
+  int get _end => math.min(off + chunk, img.length);
+  String _data() => 'fwdata $off ${hexOf(img.sublist(off, _end))}';
+
+  _Step _next() {
+    progress?.call(off, img.length);
+    if (off >= img.length) {
+      phase = 2;
+      return const _Step.send('fwend');
+    }
+    return _Step.send(_data());
+  }
+
+  @override
+  _Step? reply(String l) {
+    if (!l.startsWith('OK fw') && !l.startsWith('ERR fw')) return null;
+    switch (phase) {
+      case 0:
+        if (l.startsWith('OK fwbegin')) {
+          phase = 1;
+          return _next();
+        }
+        if (l.startsWith('ERR fwbegin')) return _Step.fail(l.substring(4));
+        return null;
+      case 1:
+        final ok = RegExp(r'^OK fwdata (\d+)$').firstMatch(l);
+        if (ok != null) {
+          if (int.parse(ok.group(1)!) != _end) return null; // a stale reply to a resent line
+          off = _end;
+          misses = 0;
+          return _next();
+        }
+        final exp = RegExp(r'expected offset (\d+)').firstMatch(l);
+        if (exp != null) {
+          // the node has a different byte count than we think: carry on from there
+          final n = int.parse(exp.group(1)!);
+          if (n > img.length) return _Step.fail(l.substring(4));
+          off = n;
+          if (++misses > 20) return _Step.fail('the home keeps asking for byte $off');
+          return _next();
+        }
+        if (l.startsWith('ERR fwdata')) {
+          if (!l.contains('bad hex')) return _Step.fail(l.substring(4));
+          if (++misses > 20) return _Step.fail('the home stopped taking data at byte $off');
+          return _Step.send(_data());
+        }
+        return null;
+      default:
+        if (l.startsWith('OK fwend')) return _Step.done({'ok': true, 'reply': l, 'size': img.length, 'sha256': sha});
+        if (l.startsWith('ERR fwend')) return _Step.fail(l.substring(4));
+        return null;
+    }
+  }
+
+  @override
+  _Step timeout() {
+    if (phase == 0) return const _Step.fail('no answer to fwbegin');
+    if (phase == 2) return const _Step.fail('no answer to fwend');
+    // a lost line or reply: send the same chunk again
+    if (++misses > 20) return _Step.fail('the home stopped answering at byte $off');
+    return _Step.send(_data());
+  }
+}
+
+String hexOf(List<int> b) {
+  const d = '0123456789abcdef';
+  final s = StringBuffer();
+  for (final x in b) {
+    s
+      ..write(d[(x >> 4) & 15])
+      ..write(d[x & 15]);
+  }
+  return s.toString();
 }
 
 class LocalMesh implements Backend {
@@ -99,7 +242,10 @@ class LocalMesh implements Backend {
   final _q = <_Job>[];
   _Job? _job;
   DateTime _jobSent = DateTime(0);
-  int _jobLine = 0;
+  final _ota = StreamController<Map<String, dynamic>>.broadcast();
+
+  /// Every `OTA {..}` line about a node, as it comes (the home sending it an update).
+  Stream<Map<String, dynamic>> get otaLines => _ota.stream;
   DateTime _lastPoll = DateTime(0);
 
   @override
@@ -160,7 +306,13 @@ class LocalMesh implements Backend {
 
   void _line(String l) {
     console.add(l);
-    if (l.startsWith('OK') || l.startsWith('ERR') || l.startsWith('CMD ') || l.startsWith('ACK ') || l.startsWith('RST ') || l.startsWith('RFL ')) {
+    if (l.startsWith('OK') ||
+        l.startsWith('ERR') ||
+        l.startsWith('CMD ') ||
+        l.startsWith('ACK ') ||
+        l.startsWith('RST ') ||
+        l.startsWith('RFL ') ||
+        l.startsWith('WIPE ')) {
       _reply(l);
     }
     try {
@@ -284,7 +436,9 @@ class LocalMesh implements Backend {
   void _otaLine(Map<String, dynamic> o) {
     final id = _s(o['node']).toUpperCase();
     if (id.isEmpty) return;
-    _n(id).ota = {...o, 'pct': o['pct']};
+    final ota = {...o, 'node': id, 'ts': _now()};
+    _n(id).ota = ota;
+    _ota.add(ota);
     _pushFleet();
   }
 
@@ -563,6 +717,8 @@ class LocalMesh implements Backend {
             'tlm': n.tlm,
             'lat': store.nodes[n.id]?['lat'],
             'lon': store.nodes[n.id]?['lon'],
+            'notes': store.nodes[n.id]?['notes'] ?? '',
+            'lost': store.nodes[n.id]?['lost'] == true,
           },
       ],
     }, notify: false);
@@ -627,72 +783,118 @@ class LocalMesh implements Backend {
         return _Job(lines, 'OK', '${fs.length} filters', wants: [for (var i = 0; i < lines.length - 1; i++) 'OK', local ? 'OK' : 'CMD']);
       case 'raw':
         return _Job([_s(a['line'])], 'OK', _s(a['line']));
+      case 'wipe':
+        // erases the node's keys, settings, filters, logs and firmware: the caller echoes the target
+        final want = id == 'all' ? 'WIPE ALL' : 'WIPE $id';
+        if (_s(a['confirm']).trim().toUpperCase() != want) throw _PlanError('type "$want" to confirm');
+        if (id == 'all') {
+          // every remote first (one flood), then the home itself
+          return _Job(['rwipe all WIPE', if (homeId.isNotEmpty) 'wipe NOW'], 'CMD', 'WIPE ALL', wants: ['CMD', if (homeId.isNotEmpty) 'WIPE']);
+        }
+        return _Job([one('wipe NOW', 'rwipe $tgt WIPE')], local ? 'WIPE' : 'CMD', 'WIPE $id');
+      case 'deny':
+        final ids = [
+          for (final i in (a['ids'] as List? ?? const []))
+            if (RegExp(r'^[0-9A-Fa-f]{6}$').hasMatch('$i')) '$i'.toUpperCase(),
+        ];
+        return _Job(['rdeny all ${ids.isEmpty ? '-' : ids.join(',')}'], 'CMD', 'lost-node list (${ids.length})');
+      case 'fw_stage':
+        if (!local) throw _PlanError('firmware is staged on the home node, over USB');
+        final img = a['image'];
+        if (img is! List<int> || img.isEmpty) throw _PlanError('no firmware image to stage');
+        final sha = _s(a['sha256']).isNotEmpty ? _s(a['sha256']).toLowerCase() : sha256Hex(img);
+        final p = a['progress'];
+        return _FwStageJob(img, sha, p is void Function(int, int) ? p : null);
+      case 'fw_send':
+        if (local || id == 'all') throw _PlanError('pick one remote node (the home updates itself with fw_self)');
+        return _Job(['fwsend $tgt'], 'CMD', 'firmware to ${m.nodeName(id)}');
+      case 'fw_self':
+        if (!local) throw _PlanError('fw_self is for the home node');
+        return _Job(['fwself'], 'OK', 'install firmware on the home');
+      case 'fw_abort':
+        return _Job(['fwabort'], 'OK', 'firmware abort');
     }
     return null;
   }
 
   @override
-  Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) async {
+  Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) async => (await nodeRun(id, op, args)).r;
+
+  /// [nodeCmd] with the reason it failed: (reply, null) or (null, why).
+  Future<({Map<String, dynamic>? r, String? err})> nodeRun(String id, String op, [Map<String, dynamic>? args]) async {
     if (!link.open) {
       m.toast('the node is not connected');
-      return null;
+      return (r: null, err: 'the node is not connected');
     }
     if (op == 'fw_install') {
-      m.toast('firmware installs from the phone are not built yet');
-      return null;
+      const e = 'the firmware library is on the dashboard: over USB, pick a .bin in Firmware';
+      m.toast(e);
+      return (r: null, err: e);
     }
-    final j = _plan(id, op, args ?? const {});
+    final _Job? j;
+    try {
+      j = _plan(id, op, args ?? const {});
+    } on _PlanError catch (e) {
+      m.toast(e.msg);
+      return (r: null, err: e.msg);
+    }
     if (j == null) {
       m.toast("the node can't do $op");
-      return null;
+      return (r: null, err: "the node can't do $op");
     }
-    _q.add(j);
+    // an abort goes ahead of anything waiting
+    if (op == 'fw_abort') {
+      _q.insert(0, j);
+    } else {
+      _q.add(j);
+    }
     _pump();
     return j.done.future;
   }
 
+  /// Stops a firmware transfer: the staging upload in flight (if any) and the home's send.
+  Future<Map<String, dynamic>?> fwAbort() {
+    _q.removeWhere((j) {
+      if (j is! _FwStageJob) return false;
+      j.done.complete((r: null, err: 'aborted'));
+      return true;
+    });
+    if (_job is _FwStageJob) _settle(null, 'aborted');
+    return nodeCmd(homeId, 'fw_abort');
+  }
+
+  /// True while a firmware image is going to the home.
+  bool get staging => _job is _FwStageJob || _q.any((j) => j is _FwStageJob);
+
   void _pump() {
     final j = _job;
     if (j != null) {
-      if (DateTime.now().difference(_jobSent).inSeconds < 4) return;
-      _settle(null, 'no answer from the node');
+      if (DateTime.now().difference(_jobSent).inSeconds < j.timeoutS) return;
+      _apply(j.timeout());
       return;
     }
     if (_q.isEmpty) return;
-    _job = _q.removeAt(0);
-    _jobLine = 0;
-    _sendLine();
+    final n = _job = _q.removeAt(0);
+    _send(n.first());
   }
 
-  void _sendLine() {
+  void _send(String line) {
     final j = _job!;
+    j.sent = line;
     _jobSent = DateTime.now();
-    link.send(j.lines[_jobLine]);
+    link.send(line);
   }
 
   void _reply(String l) {
     final j = _job;
     if (j == null) return;
-    final verb = j.lines[_jobLine].split(' ').first;
-    if (l.startsWith('ERR')) {
-      // an error about some other verb is not ours (commands.py)
-      final other = RegExp(r'^ERR (\w+):').firstMatch(l)?.group(1);
-      if (other != null && other != verb) return;
-      return _settle(null, l.substring(3).trim());
-    }
-    final ok = switch (j.wants?[_jobLine] ?? j.want) {
-      'OK' => l.startsWith('OK') || l.startsWith('CMD '),
-      'CMD' => l.startsWith('CMD '),
-      'RST' => l.startsWith('RST '),
-      'RFL' => l.startsWith('RFL '),
-      _ => false,
-    };
-    if (!ok) return;
-    if (_jobLine + 1 < j.lines.length) {
-      _jobLine++;
-      return _sendLine();
-    }
-    _settle({'ok': true, 'reply': l}, null);
+    final st = j.reply(l);
+    if (st != null) _apply(st);
+  }
+
+  void _apply(_Step st) {
+    if (st.line != null) return _send(st.line!);
+    _settle(st.result, st.error);
   }
 
   void _settle(Map<String, dynamic>? r, String? err) {
@@ -701,9 +903,46 @@ class LocalMesh implements Backend {
     _job = null;
     if (err != null && j.label != 'status') m.toast('${j.label}: $err');
     if (r != null && j.label != 'status') m.toast('${j.label} sent');
-    j.done.complete(r);
+    j.done.complete((r: r, err: err));
     _pump();
   }
+
+  // ------------------------------------------------------------ fleet records (the node page)
+
+  /// Report a node lost (or found): every node gets the new lost-node list (`rdeny all`).
+  Future<Map<String, dynamic>?> setLost(String id, bool lost, {String note = ''}) {
+    final n = store.nodes.putIfAbsent(id, () => {});
+    if (lost) {
+      n['lost'] = true;
+      n['lost_note'] = note;
+    } else {
+      n.remove('lost');
+      n.remove('lost_note');
+    }
+    store.dirty();
+    _pushFleet();
+    return nodeCmd('all', 'deny', {'ids': lostIds});
+  }
+
+  List<String> get lostIds => [
+    for (final e in store.nodes.entries)
+      if (e.value['lost'] == true) e.key,
+  ]..sort();
+
+  /// Forgets an offline node: off the fleet list and the map (its detections stay).
+  bool forget(String id) {
+    final n = _nodes[id];
+    if (n != null && n.online) return false;
+    _nodes.remove(id);
+    store.nodes.remove(id);
+    store.filters.remove(id);
+    store.dirty();
+    _pushFleet();
+    return true;
+  }
+
+  /// Moves a node on the map without a toast (a phone carrying it, every 2 s).
+  void place(String id, double lat, double lon) => _place(id, lat, lon);
 
   // ------------------------------------------------------------ the views' reads
 
@@ -954,7 +1193,7 @@ class LocalMesh implements Backend {
   @override
   Future<void> nodeSet(String id, Map<String, dynamic> body) async {
     final n = store.nodes.putIfAbsent(id, () => {});
-    for (final k in const ['alias', 'color', 'lat', 'lon']) {
+    for (final k in const ['alias', 'color', 'lat', 'lon', 'notes']) {
       if (!body.containsKey(k)) continue;
       if (body[k] == null) {
         n.remove(k);

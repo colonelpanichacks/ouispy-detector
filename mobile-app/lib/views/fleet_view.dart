@@ -2,14 +2,18 @@
 // page drives it through the dashboard (/api/nodes/<id>/cmd, the same ops as the Tab5).
 import 'package:flutter/material.dart';
 
+import '../data/firmware.dart';
 import '../data/model.dart';
+import '../data/node_ops.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import 'board_view.dart';
 import 'console_view.dart';
 import 'feed_view.dart';
+import 'firmware_view.dart';
 import 'fleet_control_view.dart';
+import 'mesh_status_view.dart';
 import 'metrics_view.dart';
 import 'node_filters_view.dart';
 
@@ -51,6 +55,13 @@ class FleetView extends StatelessWidget {
                   ('Metrics', Ph.chartBar, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MetricsView()))),
                   ('Board', Ph.cpu, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BoardView()))),
                   ('Console', Ph.terminalWindow, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConsoleView()))),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: ActionStrip([
+                  ('Mesh status', Ph.graph, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MeshStatusView()))),
+                  ('Firmware', Ph.lightning, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FirmwareView()))),
                 ]),
               ),
               SectionHead('Nodes', trailing: Text('${m.nodesOnline} of ${nodes.length} online', style: T.meta)),
@@ -151,7 +162,8 @@ class _NodeCard extends StatelessWidget {
               if (n.filters != null) Tag('${n.filters} filters', icon: Ph.funnel, color: n.filtersFresh == false ? C.amber : C.muted),
               if (n.peers != null) Tag('${n.peers} peers', icon: Ph.graph),
               if (n.up != null) Tag('up ${dur(n.up!)}', icon: Ph.clock),
-              if (ota.isNotEmpty && ota != 'done') Tag('Updating ${n.ota['pct'] ?? ''}%', icon: Ph.arrowsClockwise, color: C.accent),
+              if (ota.isNotEmpty && ota != 'done' && ota != 'failed') Tag('Updating ${n.ota['pct'] ?? ''}%', icon: Ph.arrowsClockwise, color: C.accent),
+              if (n.raw['lost'] == true) const Tag('Lost', icon: Ph.warning, color: C.red),
             ],
           ),
         ],
@@ -384,6 +396,32 @@ class _NodeDetailState extends State<NodeDetail> {
                   ),
                   Tile(icon: Ph.funnel, color: C.violet, title: 'Install a filter preset', onTap: () => _preset(n)),
                   Tile(
+                    icon: Ph.lightning,
+                    color: C.accent,
+                    title: 'Firmware',
+                    subtitle: Text('Runs ${fwNames[nodeKindOf(n.fw)] ?? 'detector'}. Update it or turn it into another', style: T.meta),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => FirmwareView(node: n.id))),
+                  ),
+                  ListenableBuilder(
+                    listenable: Carry.I,
+                    builder: (context, _) {
+                      final mine = Carry.I.carrying(n.id);
+                      return Tile(
+                        icon: Ph.personSimpleWalk,
+                        color: mine ? C.me : C.muted,
+                        title: mine ? 'Stop carrying' : 'Carry with this phone',
+                        subtitle: Text(
+                          mine
+                              ? Carry.I.info
+                              : (Carry.I.node != null ? 'Carrying ${m.nodeName(Carry.I.node!)} now' : "This phone's GPS positions the node while it is open"),
+                          style: T.meta.copyWith(color: mine ? C.me : null),
+                        ),
+                        trailing: mine ? const Dot(C.me, halo: true) : null,
+                        onTap: () => mine ? Carry.I.stop() : Carry.I.start(n.id),
+                      );
+                    },
+                  ),
+                  Tile(
                     icon: Ph.power,
                     color: C.red,
                     title: 'Reboot',
@@ -413,11 +451,56 @@ class _NodeDetailState extends State<NodeDetail> {
                   if (cfg['mode'] != null) KV('Mode', '${cfg['mode']}${cfg['locked'] == 1 ? ', burned in' : ''}'),
                   if (cfg['key'] != null) KV('Fleet key', cfg['key'] == 1 ? 'Set (fp ${cfg['kfp'] ?? '?'})' : 'None', color: cfg['key'] == 1 ? C.green : C.red),
                   if (n.hasPos) KV('Placed at', '${n.lat!.toStringAsFixed(5)}, ${n.lon!.toStringAsFixed(5)}', monoValue: true),
-                  if (n.ota.isNotEmpty)
-                    KV(
-                      'Last update',
-                      '${n.ota['state'] ?? '-'} ${n.ota['pct'] ?? ''}%${n.ota['err'] != null && '${n.ota['err']}'.isNotEmpty ? ' (${n.ota['err']})' : ''}',
-                      color: n.ota['state'] == 'done' ? C.green : C.amber,
+                  if (n.ota.isNotEmpty) _OtaRow(n.ota),
+                ],
+              ),
+              Group(
+                title: 'Notes',
+                children: [
+                  Tile(
+                    icon: Ph.notePencil,
+                    color: C.soft,
+                    title: '${n.raw['notes'] ?? ''}'.isEmpty ? 'Add a note' : '${n.raw['notes']}',
+                    subtitle: Text('${n.raw['notes'] ?? ''}'.isEmpty ? 'Where it is, who has it, what it is for' : 'Tap to edit', style: T.meta),
+                    onTap: () async {
+                      final v = await askText(context, 'Notes for ${n.label}', '${n.raw['notes'] ?? ''}', maxLines: 5);
+                      if (v != null) dash.nodeSet(n.id, {'notes': v});
+                    },
+                  ),
+                ],
+              ),
+              Group(
+                title: 'Security',
+                edge: n.raw['lost'] == true ? C.red : null,
+                children: [
+                  Tile(
+                    icon: n.raw['lost'] == true ? Ph.checkCircle : Ph.warning,
+                    color: n.raw['lost'] == true ? C.green : C.amber,
+                    title: n.raw['lost'] == true ? 'Found (clear lost)' : 'Report lost',
+                    subtitle: Text(
+                      n.raw['lost'] == true
+                          ? 'Reported lost: the fleet drops it and reports it if it shows up'
+                          : 'Every node drops it and reports it if it shows up again',
+                      style: T.meta.copyWith(color: n.raw['lost'] == true ? C.red : null),
+                    ),
+                    onTap: () => _lost(n),
+                  ),
+                  Tile(
+                    icon: Ph.eraser,
+                    color: C.red,
+                    title: 'Wipe',
+                    titleColor: C.red,
+                    subtitle: Text('Erases its key, settings, filters, logs and firmware', style: T.meta),
+                    onTap: () => _wipe(n),
+                  ),
+                  if (!n.flagOnline)
+                    Tile(
+                      icon: Ph.trash,
+                      color: C.red,
+                      title: 'Forget',
+                      titleColor: C.red,
+                      subtitle: Text('Off the fleet list and the map (it comes back if it is heard)', style: T.meta),
+                      onTap: () => _forget(n),
                     ),
                 ],
               ),
@@ -447,6 +530,44 @@ class _NodeDetailState extends State<NodeDetail> {
         },
       ),
     );
+  }
+
+  Future<void> _lost(FleetNode n) async {
+    final lost = n.raw['lost'] != true;
+    var note = '';
+    if (lost) {
+      final v = await askText(context, 'Report ${n.label} lost?', '', hint: 'Optional note');
+      if (v == null) return;
+      note = v;
+    } else if (!await confirm(context, 'Clear ${n.label} as lost?', 'The fleet takes it back.', yes: 'Found', color: C.green)) {
+      return;
+    }
+    final e = await reportLost(n.id, lost, note: note);
+    if (e != null) App.I.m.toast(e);
+  }
+
+  Future<void> _wipe(FleetNode n) async {
+    final want = 'WIPE ${n.id}';
+    if (await askTyped(
+      context,
+      'Wipe ${n.label}?',
+      'Its fleet key, settings, filters, logs and firmware are erased${n.isHome ? '' : ' over the mesh'}. It will not work again until it is reflashed over USB.',
+      want,
+    )) {
+      App.I.link.nodeCmd(n.id, 'wipe', {'confirm': want});
+    }
+  }
+
+  Future<void> _forget(FleetNode n) async {
+    if (!await confirm(context, 'Forget ${n.label}?', 'It leaves the fleet list and the map. Its detections stay; it comes back if it is heard again.', yes: 'Forget')) {
+      return;
+    }
+    final e = await forgetNode(n.id);
+    if (e != null) {
+      App.I.m.toast(e);
+    } else if (mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   Widget _toggle(IconData i, String t, String sub, int? v, ValueChanged<bool> f) => Padding(
@@ -538,3 +659,101 @@ String _presetName(String p) => switch (p) {
   'verkada' => 'Verkada',
   _ => p,
 };
+
+/// A node's last (or current) firmware update, with its progress while it runs.
+class _OtaRow extends StatelessWidget {
+  const _OtaRow(this.o);
+  final Map<String, dynamic> o;
+  @override
+  Widget build(BuildContext context) {
+    final st = '${o['state'] ?? '-'}';
+    final pct = (o['pct'] as num?)?.toInt() ?? 0;
+    final live = st == 'offered' || st == 'sending';
+    final err = '${o['err'] ?? ''}';
+    final c = switch (st) {
+      'done' => C.green,
+      'failed' => C.red,
+      _ => live ? C.accent : C.amber,
+    };
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              SizedBox(width: 124, child: Text('LAST UPDATE', style: T.silk)),
+              Expanded(
+                child: Text(
+                  [
+                    live ? (st == 'offered' ? 'starting' : 'updating') : st,
+                    '$pct%',
+                    if (o['kbps'] is num && (o['kbps'] as num) > 0) '${o['kbps']} kbps',
+                    if (o['direct'] == 1) 'direct',
+                    if (err.isNotEmpty) err,
+                  ].join('  ·  '),
+                  style: T.body.copyWith(color: c),
+                ),
+              ),
+            ],
+          ),
+          if (live || st == 'failed') ...[
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: LinearProgressIndicator(value: pct.clamp(0, 100) / 100, minHeight: 4, color: c),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A dangerous op's confirm: the button only works once [want] is typed exactly.
+Future<bool> askTyped(BuildContext context, String title, String body, String want) async {
+  final ctl = TextEditingController();
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => StatefulBuilder(
+      builder: (c, set) {
+        final match = ctl.text.trim().toUpperCase() == want;
+        return AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(body, style: T.body),
+              const SizedBox(height: 14),
+              Text('TYPE $want TO CONFIRM', style: T.silk.copyWith(color: C.red)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: ctl,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                style: const TextStyle(fontFamily: mono, color: C.text),
+                decoration: InputDecoration(hintText: want),
+                onChanged: (_) => set(() {}),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Cancel', style: TextStyle(color: C.muted)),
+            ),
+            TextButton(
+              onPressed: match ? () => Navigator.pop(c, true) : null,
+              child: Text(
+                'Wipe',
+                style: TextStyle(color: match ? C.red : C.faint, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        );
+      },
+    ),
+  );
+  return ok ?? false;
+}

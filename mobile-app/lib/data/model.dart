@@ -13,6 +13,7 @@ const droneLiveS = 60.0;
 const maxDets = 2000;
 const nodeSilentS = 90.0;
 const watchGapS = 60.0; // a watched device alerts again after this long unheard // Tab5 NODE_TIMEOUT (75 s) plus a status round
+const nodeEventGapS = 30.0; // a node flapping on the mesh: one down / back event per 30 s (the Tab5's rule)
 
 double _d(Object? v, [double def = 0]) => v is num ? v.toDouble() : def;
 double? _dn(Object? v) => v is num ? v.toDouble() : null;
@@ -35,21 +36,21 @@ class Seen {
 
 class Det {
   Det.fromJson(Map<String, dynamic> o)
-      : id = _in(o['id']) ?? 0,
-        ts = _d(o['ts']),
-        node = _s(o['node']),
-        mac = _s(o['mac']).toUpperCase(),
-        descr = _s(o['descr']),
-        alias = _s(o['alias']),
-        type = _s(o['type']),
-        dom = _s(o['dom']),
-        closest = _s(o['closest']),
-        name = _s(o['name']),
-        group = _s(o['group']),
-        source = _s(o['source']),
-        rssi = _in(o['rssi']),
-        isNew = o['is_new'] == true || o['is_new'] == 1,
-        seen = Seen.list(o['seen_by']);
+    : id = _in(o['id']) ?? 0,
+      ts = _d(o['ts']),
+      node = _s(o['node']),
+      mac = _s(o['mac']).toUpperCase(),
+      descr = _s(o['descr']),
+      alias = _s(o['alias']),
+      type = _s(o['type']),
+      dom = _s(o['dom']),
+      closest = _s(o['closest']),
+      name = _s(o['name']),
+      group = _s(o['group']),
+      source = _s(o['source']),
+      rssi = _in(o['rssi']),
+      isNew = o['is_new'] == true || o['is_new'] == 1,
+      seen = Seen.list(o['seen_by']);
   final int id;
   final double ts;
   final String node, mac, descr, alias, type, dom, closest, name, group, source;
@@ -106,11 +107,17 @@ class FleetNode {
   int? get buzzer => _in(cfg['buzzer']);
   int? get led => _in(cfg['led']);
   List<Seen> get nbr => Seen.list(cfg['nbr']);
+
   /// What it runs, from the build stamp's last letter (as the dashboard and the Tab5 do).
   String get kind {
     final f = fw;
     if (f.isEmpty) return 'detector';
-    return switch (f[f.length - 1]) { 'W' => 'wardriver', 'Y' => 'wardriver gps', 'S' => 'sky-spy', _ => 'detector' };
+    return switch (f[f.length - 1]) {
+      'W' => 'wardriver',
+      'Y' => 'wardriver gps',
+      'S' => 'sky-spy',
+      _ => 'detector',
+    };
   }
 }
 
@@ -146,6 +153,7 @@ class Drone {
   int get reports => _in(raw['reports'] ?? raw['n']) ?? 0;
   bool get hasPos => lat != null && lon != null && !(lat == 0 && lon == 0);
   bool get hasPilot => plat != null && plon != null && !(plat == 0 && plon == 0);
+
   /// [[ts, lat, lon], ...] or [[lat, lon], ...]: points only.
   List<List<double>> _pts(Object? o) {
     if (o is! List) return [];
@@ -160,6 +168,7 @@ class Drone {
 
   List<List<double>> get track => _pts(raw['track'] ?? raw['rtrack']);
   List<List<double>> get ptrack => _pts(raw['ptrack']);
+
   /// FAA registry make + model for its serial, when the dashboard looked it up.
   String get maker {
     final items = (((raw['faa'] as Map?)?['data'] as Map?)?['items'] as List?);
@@ -171,17 +180,23 @@ class Drone {
 
 class Flight {
   Flight(Map<String, dynamic> o)
-      : start = _d(o['start']),
-        end = _d(o['end']),
-        reports = _in(o['reports']) ?? 0,
-        maxH = _dn(o['max_hagl']),
-        agl = o['agl'] == true,
-        maxSpd = _dn(o['max_spd']),
-        dist = _in(o['dist_m']),
-        pilotMax = _in(o['pilot_max_m']),
-        pilot = (o['pilot'] is List) ? (o['pilot'] as List).map((e) => _d(e)).toList() : null,
-        track = [for (final p in (o['track'] as List? ?? const [])) if (p is List) p.map((e) => _d(e)).toList()],
-        ptrack = [for (final p in (o['ptrack'] as List? ?? const [])) if (p is List) p.map((e) => _d(e)).toList()];
+    : start = _d(o['start']),
+      end = _d(o['end']),
+      reports = _in(o['reports']) ?? 0,
+      maxH = _dn(o['max_hagl']),
+      agl = o['agl'] == true,
+      maxSpd = _dn(o['max_spd']),
+      dist = _in(o['dist_m']),
+      pilotMax = _in(o['pilot_max_m']),
+      pilot = (o['pilot'] is List) ? (o['pilot'] as List).map((e) => _d(e)).toList() : null,
+      track = [
+        for (final p in (o['track'] as List? ?? const []))
+          if (p is List) p.map((e) => _d(e)).toList(),
+      ],
+      ptrack = [
+        for (final p in (o['ptrack'] as List? ?? const []))
+          if (p is List) p.map((e) => _d(e)).toList(),
+      ];
   final double start, end;
   final int reports;
   final double? maxH, maxSpd;
@@ -201,7 +216,10 @@ class Mark {
   int? get hue => _in(raw['hue']);
   double? get lat => _dn(raw['lat']);
   double? get lon => _dn(raw['lon']);
-  List<List<double>> get pts => [for (final p in (raw['pts'] as List? ?? const [])) if (p is List && p.length >= 2) [_d(p[0]), _d(p[1])]];
+  List<List<double>> get pts => [
+    for (final p in (raw['pts'] as List? ?? const []))
+      if (p is List && p.length >= 2) [_d(p[0]), _d(p[1])],
+  ];
 }
 
 class Alert {
@@ -210,6 +228,16 @@ class Alert {
 
   /// The watch-list rule it matched (watch.dart), or null for the plain new-device rule.
   final String? watch;
+}
+
+enum MeshEventKind { drone, nodeDown, nodeUp, lostNode }
+
+/// Something about the fleet the phone tells you about (alerts.dart: a sound, a notification).
+class MeshEvent {
+  MeshEvent(this.kind, this.id, this.title, this.body);
+  final MeshEventKind kind;
+  final String id; // a drone's MAC or a node's ID
+  final String title, body;
 }
 
 /// The drones window: hours back (1/4/8/24), all time (-1), or a span (0).
@@ -222,10 +250,10 @@ class DroneWindow {
   String get query => hours < 0
       ? 'since=0'
       : hours > 0
-          ? 'hours=$hours'
-          : until > 0
-              ? 'since=${since.round()}&until=${until.round()}'
-              : 'since=${since.round()}';
+      ? 'hours=$hours'
+      : until > 0
+      ? 'since=${since.round()}&until=${until.round()}'
+      : 'since=${since.round()}';
   bool contains(double t, double now) {
     if (hours < 0) return true;
     if (hours > 0) return t >= now - hours * 3600;
@@ -264,12 +292,23 @@ class Model extends ChangeNotifier {
   int alertsUnacked = 0;
   bool muteAll = false;
   final Set<String> muted = {};
+
   /// The watch list: the label of the rule a detection matches, or null.
   String? Function(Det d)? watcher;
   final _alertCtl = StreamController<Alert>.broadcast();
   Stream<Alert> get alertStream => _alertCtl.stream;
   final _toastCtl = StreamController<String>.broadcast();
   Stream<String> get toasts => _toastCtl.stream;
+  final _eventCtl = StreamController<MeshEvent>.broadcast();
+
+  /// Drones turning up, nodes dropping off or coming back, lost nodes seen.
+  Stream<MeshEvent> get meshEvents => _eventCtl.stream;
+  final List<(double, String)> _recentToasts = [];
+  final Map<String, double> _nodeEvtAt = {};
+  final Set<String> _dronesSeen = {}; // live this session: the first sighting is the one announced
+
+  /// The dashboard's feeds (serial, MQTT, demo...): {kind, connected, detail, ...} each.
+  Map<String, Map<String, dynamic>> sources = {};
 
   DroneWindow droneWindow = const DroneWindow.hours(24);
 
@@ -292,7 +331,25 @@ class Model extends ChangeNotifier {
     });
   }
 
-  void toast(String s) => _toastCtl.add(s);
+  static double get _wall => DateTime.now().millisecondsSinceEpoch / 1000;
+
+  void toast(String s) {
+    _recentToasts.add((_wall, s));
+    if (_recentToasts.length > 20) _recentToasts.removeAt(0);
+    _toastCtl.add(s);
+  }
+
+  /// Whether a toast mentioning [needle] went up in the last [withinS] seconds: the same news
+  /// arrives more than one way (the dashboard's node_event and its fleet; the USB node's own toasts).
+  bool toastedLately(String needle, {double withinS = 10}) {
+    final t = _wall;
+    return _recentToasts.any((e) => t - e.$1 <= withinS && e.$2.contains(needle));
+  }
+
+  /// A toast a moment from now, unless another source has said it by then.
+  void toastUnlessSaid(String text, String needle) => Timer(const Duration(milliseconds: 400), () {
+    if (!_toastCtl.isClosed && !toastedLately(needle)) toast(text);
+  });
 
   String nodeName(String id) {
     final n = nodes[id];
@@ -339,6 +396,12 @@ class Model extends ChangeNotifier {
         ..addAll((s['device_names'] as Map).map((k, v) => MapEntry(_s(k).toUpperCase(), _s(v))));
     }
     if (s['group_of'] is Map) _groups(s['group_of']);
+    if (s['sources'] is Map) {
+      sources = {
+        for (final e in (s['sources'] as Map).entries)
+          if (e.value is Map) '${e.key}': (e.value as Map).cast<String, dynamic>(),
+      };
+    }
     if (s['marks'] is List) marks = [for (final m in s['marks']) Mark((m as Map).cast<String, dynamic>())];
     if (s['drones'] is List) {
       for (final d in s['drones']) {
@@ -364,15 +427,56 @@ class Model extends ChangeNotifier {
     _clock(_d(f['ts']));
     if (f['nodes'] is List) {
       final seen = <String>{};
+      final flipped = <FleetNode>[];
       for (final n in f['nodes']) {
         final node = FleetNode((n as Map).cast<String, dynamic>());
         if (node.id.isEmpty) continue;
         seen.add(node.id);
+        final prev = nodes[node.id];
+        if (prev != null && prev.online != node.online) flipped.add(node);
         nodes[node.id] = node;
       }
       nodes.removeWhere((k, _) => !seen.contains(k));
+      for (final n in flipped) {
+        _nodeFlip(n);
+      }
     }
     if (notify) changed();
+  }
+
+  /// A node's online state flipped (either backend): a toast and a down / back event, once
+  /// per [nodeEventGapS] for a node whose link flaps.
+  void _nodeFlip(FleetNode n) {
+    final t = _wall;
+    if (t - (_nodeEvtAt[n.id] ?? -1e9) < nodeEventGapS) return;
+    _nodeEvtAt[n.id] = t;
+    final name = nodeName(n.id);
+    toastUnlessSaid(n.online ? '$name back on the mesh' : '$name dropped off the mesh', name);
+    _eventCtl.add(
+      MeshEvent(
+        n.online ? MeshEventKind.nodeUp : MeshEventKind.nodeDown,
+        n.id,
+        n.online ? 'Node back: $name' : 'Node down: $name',
+        n.online ? '$name is back on the mesh' : '$name dropped off the mesh',
+      ),
+    );
+  }
+
+  /// The dashboard's lost_node: a node reported lost has been seen.
+  void lostNode(Map<String, dynamic> e) {
+    final id = _s(e['node']);
+    final name = nodeName(id);
+    final how = [_s(e['how']), _s(e['note'])].where((x) => x.isNotEmpty).join(', ');
+    toast('Lost node $name is back${how.isEmpty ? '' : ' ($how)'}');
+    _eventCtl.add(MeshEvent(MeshEventKind.lostNode, id, 'LOST NODE $name SEEN', '$id ${how.isEmpty ? 'seen' : how}. The fleet drops it.'));
+  }
+
+  void ingestSources(Map<String, dynamic> o) {
+    sources = {
+      for (final e in o.entries)
+        if (e.value is Map) e.key: (e.value as Map).cast<String, dynamic>(),
+    };
+    changed();
   }
 
   void _aliases(Object o) {
@@ -466,7 +570,12 @@ class Model extends ChangeNotifier {
     if (mac.isEmpty) return;
     final ok = f['ok'] == true;
     if (!ok && !targets.containsKey(mac)) return;
-    final t = targets.putIfAbsent(mac, () => Target(mac)..first = _d(f['ts'])..last = _d(f['ts']));
+    final t = targets.putIfAbsent(
+      mac,
+      () => Target(mac)
+        ..first = _d(f['ts'])
+        ..last = _d(f['ts']),
+    );
     t.triOk = ok;
     t.triRough = f['rough'] == true;
     t.triLat = _d(f['lat']);
@@ -492,6 +601,14 @@ class Model extends ChangeNotifier {
       }
     }
     _clock(_d(o['last']));
+    // A drone in the air for the first time this session: news. Bulk loads (the state, the
+    // drones window) only note what is already flying, as the dashboard does at boot.
+    final d = drones[mac]!;
+    if (o['meta'] != true && now - d.last < droneLiveS && _dronesSeen.add(mac) && notify) {
+      final via = d.closest.isEmpty ? '' : ' via ${nodeName(d.closest)}';
+      toastUnlessSaid('Drone detected: ${d.label}$via', 'Drone');
+      _eventCtl.add(MeshEvent(MeshEventKind.drone, mac, 'DRONE  ${d.label}', [if (d.ua.isNotEmpty) d.ua, if (via.isNotEmpty) via.trim()].join('  ')));
+    }
     if (notify) changed();
   }
 
@@ -534,6 +651,7 @@ class Model extends ChangeNotifier {
   void dispose() {
     _alertCtl.close();
     _toastCtl.close();
+    _eventCtl.close();
     super.dispose();
   }
 }
