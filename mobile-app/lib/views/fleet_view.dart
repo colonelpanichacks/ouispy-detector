@@ -6,7 +6,10 @@ import '../data/model.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'console_view.dart';
 import 'feed_view.dart';
+import 'fleet_control_view.dart';
+import 'node_filters_view.dart';
 
 class FleetView extends StatelessWidget {
   const FleetView({super.key});
@@ -74,6 +77,13 @@ class FleetView extends StatelessWidget {
                   ),
                 ),
               ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: ActionStrip([
+                  ('Control', Ph.slidersHorizontal, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FleetControlView()))),
+                  ('Console', Ph.terminalWindow, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConsoleView()))),
+                ]),
+              ),
               SectionHead('Nodes', trailing: Text('${m.nodesOnline} of ${nodes.length} online', style: T.meta)),
               if (nodes.isEmpty) linkEmpty(context, 'No nodes yet', 'Nodes appear once the home node hears them.', icon: Ph.graph),
               for (final (i, n) in nodes.indexed) _NodeCard(n, i),
@@ -306,6 +316,13 @@ class _NodeDetailState extends State<NodeDetail> {
                     },
                   ),
                   Tile(icon: Ph.arrowsClockwise, color: C.green, title: 'Read status', onTap: () => dash.nodeCmd(n.id, 'status')),
+                  Tile(
+                    icon: Ph.listChecks,
+                    color: C.violet,
+                    title: 'Filters on the node',
+                    subtitle: Text('Read, add, remove, replace', style: T.meta),
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => NodeFiltersView(id: n.id))),
+                  ),
                   Tile(icon: Ph.funnel, color: C.violet, title: 'Install a filter preset', onTap: () => _preset(n)),
                   Tile(
                     icon: Ph.power,

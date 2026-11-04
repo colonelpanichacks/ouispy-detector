@@ -11,6 +11,7 @@ import 'data/local_mesh.dart';
 import 'data/lookup.dart';
 import 'data/model.dart';
 import 'data/settings.dart';
+import 'data/updater.dart';
 import 'data/usb_link.dart';
 import 'data/watch.dart';
 import 'theme.dart';
@@ -73,6 +74,7 @@ Future<void> main() async {
   App.I = App._(m, s, dash);
   await Lookup.I.load();
   await Watch.I.load();
+  await Updater.I.load();
   m.watcher = (d) => Watch.I.match(d, m.targets[d.mac]);
   AlertOut(m, s).start();
   // a node plugged in or pulled out switches the source (auto / usb)
@@ -83,6 +85,7 @@ Future<void> main() async {
     await App.I.pick();
   }
   runApp(const OuiSpyApp());
+  Future.delayed(const Duration(seconds: 20), () => Updater.I.maybeAuto(dash));
 }
 
 class OuiSpyApp extends StatelessWidget {

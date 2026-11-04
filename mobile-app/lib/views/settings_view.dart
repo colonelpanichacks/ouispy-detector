@@ -6,12 +6,10 @@ import '../data/dashboard.dart';
 import '../data/local_mesh.dart';
 import '../data/model.dart';
 import '../data/tiles.dart';
+import '../data/updater.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
-
-const appVersion = '0.1.0';
-const appBuild = 1;
 
 class SettingsView extends StatefulWidget {
   const SettingsView({super.key});
@@ -28,7 +26,6 @@ class _SettingsViewState extends State<SettingsView> {
   List<Discovered>? found;
   bool scanning = false;
   (int, int)? cache;
-  String update = '';
 
   @override
   void initState() {
@@ -65,16 +62,18 @@ class _SettingsViewState extends State<SettingsView> {
   // Over-the-air app updates come from the dashboard too (nothing from a store or the
   // internet): it would serve the newest build at /api/mobile/latest.
   Future<void> _checkUpdate() async {
-    setState(() => update = 'checking');
-    final j = await App.I.dash.getJson('/api/mobile/latest');
-    if (!mounted) return;
-    setState(() {
-      if (j is Map && j['build'] is num) {
-        update = (j['build'] as num) > appBuild ? 'version ${j['version']} is on the dashboard' : 'up to date';
-      } else {
-        update = 'the dashboard has no app builds to offer yet';
-      }
-    });
+    final r = await Updater.I.check(App.I.dash);
+    if (r != null &&
+        mounted &&
+        await confirm(
+          context,
+          'Install ${r.version}?',
+          'From ${r.from}. Android shows its installer; the app restarts on the new version.',
+          yes: 'Install',
+          color: C.accent,
+        )) {
+      await Updater.I.install(r);
+    }
   }
 
   @override
@@ -279,12 +278,31 @@ class _SettingsViewState extends State<SettingsView> {
               title: 'App',
               children: [
                 const KV('Version', '$appVersion ($appBuild)', monoValue: true),
+                ListenableBuilder(
+                  listenable: Updater.I,
+                  builder: (_, _) => Tile(
+                    icon: Ph.arrowsClockwise,
+                    color: C.accent,
+                    title: Updater.I.found != null ? 'Install ${Updater.I.found!.version}' : 'Check for update',
+                    subtitle: Updater.I.state.isEmpty ? null : Text(Updater.I.state, style: T.meta.copyWith(color: Updater.I.found != null ? C.green : C.amber)),
+                    onTap: Updater.I.found != null ? () => Updater.I.install(Updater.I.found!) : _checkUpdate,
+                  ),
+                ),
+                _sw(Ph.clockClockwise, 'Look for updates daily', 'From your dashboard, and the releases repo below if set', Updater.I.auto, (v) {
+                  Updater.I.auto = v;
+                  Updater.I.save();
+                }),
                 Tile(
-                  icon: Ph.arrowsClockwise,
-                  color: C.accent,
-                  title: 'Check for update',
-                  subtitle: update.isEmpty ? null : Text(update, style: T.meta.copyWith(color: C.amber)),
-                  onTap: _checkUpdate,
+                  icon: Ph.githubLogo,
+                  title: 'Releases repo',
+                  subtitle: Text(Updater.I.repo.isEmpty ? 'None: updates come from your dashboard' : Updater.I.repo, style: T.code),
+                  onTap: () async {
+                    final v = await askText(context, 'Public releases repo', Updater.I.repo, hint: 'owner/name, blank for none');
+                    if (v == null) return;
+                    Updater.I.repo = v;
+                    await Updater.I.save();
+                    if (mounted) setState(() {});
+                  },
                 ),
                 Padding(
                   padding: const EdgeInsets.all(16),

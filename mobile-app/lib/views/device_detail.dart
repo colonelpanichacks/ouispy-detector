@@ -9,6 +9,7 @@ import '../theme.dart';
 import 'common.dart';
 import '../data/watch.dart';
 import 'map_view.dart';
+import 'proximity_view.dart';
 import 'watch_view.dart';
 
 class DeviceDetail extends StatefulWidget {
@@ -262,6 +263,20 @@ class _DeviceDetailState extends State<DeviceDetail> {
                         ),
                       ]);
                     },
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Btn(
+                    'Find it',
+                    icon: Ph.crosshairSimple,
+                    kind: BtnKind.tonal,
+                    expand: true,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => ProximityView(mac: widget.mac, title: title),
+                      ),
+                    ),
                   ),
                 ),
                 if (t != null && t.seen.isNotEmpty)

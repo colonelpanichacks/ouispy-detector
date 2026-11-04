@@ -333,7 +333,7 @@ class Dashboard implements FeedSource, Backend {
   Future<void> nodeSet(String id, Map<String, dynamic> body) => post('/api/nodes/$id', body, okToast: 'saved on the dashboard');
   @override
   Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) =>
-      post('/api/nodes/$id/cmd', {'op': op, 'args': ?args}, okToast: '$op sent to ${m.nodeName(id)}');
+      post(id == 'all' ? '/api/fleet/cmd' : '/api/nodes/$id/cmd', {'op': op, 'args': ?args}, okToast: '$op sent to ${id == 'all' ? 'the fleet' : m.nodeName(id)}');
   @override
   final console = Console();
 

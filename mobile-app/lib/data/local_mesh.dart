@@ -599,7 +599,12 @@ class LocalMesh implements Backend {
         final w = v.isEmpty ? '-' : (v.length > 32 ? v.substring(0, 32) : v);
         return _Job([one('nodealias $w', 'ralias $tgt $w')], local ? 'OK' : 'CMD', 'name');
       case 'wardrive':
-        final words = <String>[if (a['on'] != null) (a['on'] == true ? 'on' : 'off'), if (a['ch'] != null) 'ch ${a['ch']}'];
+        final words = <String>[
+          if (a['on'] != null) (a['on'] == true ? 'on' : 'off'),
+          if (a['raw'] != null) (a['raw'] == true ? 'raw on' : 'raw off'),
+          if (a['ch'] != null) 'ch ${a['ch']}',
+        ];
+        if (words.isEmpty) return null;
         return _Job([for (final w in words) one('wd $w', 'rwd $tgt $w')], local ? 'OK' : 'CMD', 'wardrive');
       case 'filters_get':
         return _Job([one('filters', 'rfilters $tgt')], local ? 'RFL' : 'CMD', 'filters');
