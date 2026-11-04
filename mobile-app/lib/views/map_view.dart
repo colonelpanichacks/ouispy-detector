@@ -170,7 +170,6 @@ class _MapViewState extends State<MapView> {
   bool _cancel = false;
 
   @override
-  @override
   void dispose() {
     showDrone.removeListener(_show);
     super.dispose();
@@ -184,6 +183,7 @@ class _MapViewState extends State<MapView> {
     if (p != null) WidgetsBinding.instance.addPostFrameCallback((_) => ctl.move(p, 17));
   }
 
+  @override
   void initState() {
     super.initState();
     showDrone.addListener(_show);

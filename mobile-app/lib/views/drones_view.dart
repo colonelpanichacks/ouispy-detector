@@ -12,6 +12,8 @@ import '../data/rid_lookup.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'fpv_view.dart';
+import '../data/fpv.dart';
 import 'feed_view.dart';
 import 'map_view.dart';
 
@@ -47,10 +49,23 @@ class DronesView extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     return ListenableBuilder(
-      listenable: Listenable.merge([m, RidLookup.I]),
+      listenable: Listenable.merge([m, RidLookup.I, Fpv.I, droneKind]),
       builder: (context, _) {
         final w = m.droneWindow;
-        final list = m.windowDrones;
+        // one feed: Remote ID drones and the FPV transmitters the Recon's receiver finds
+        final kind = droneKind.value;
+        final since = w.hours > 0 ? m.now - w.hours * 3600 : (w.hours == 0 ? w.since : 0.0);
+        final fpv = kind == 'rid'
+            ? <FpvDet>[]
+            : [
+                for (final d in Fpv.I.dets)
+                  if (d.ts >= since && (w.hours != 0 || d.ts <= w.until)) d,
+              ];
+        final fpvLive = [
+          for (final d in fpv)
+            if (m.now - d.ts < droneLiveS) d,
+        ];
+        final list = kind == 'fpv' ? <Drone>[] : m.windowDrones;
         final live = list.where((d) => m.now - d.last < droneLiveS).toList();
         final past = list.where((d) => m.now - d.last >= droneLiveS).toList();
         for (final d in list) {
@@ -80,20 +95,87 @@ class DronesView extends StatelessWidget {
                   ),
                 ],
               ),
-              if (live.isNotEmpty) ...[
-                SectionHead('In the air now', trailing: Tag('${live.length} live', color: C.hot)),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                child: Seg<String>(items: const [('all', 'Everything'), ('rid', 'Remote ID'), ('fpv', 'FPV video')], value: kind, onChanged: (v) => droneKind.value = v),
+              ),
+              if (kind != 'rid' && Fpv.I.info != null) const _FpvReceiver(),
+              if (live.isNotEmpty || fpvLive.isNotEmpty) ...[
+                SectionHead('In the air now', trailing: Tag('${live.length + fpvLive.length} live', color: C.hot)),
                 for (final d in live) _DroneCard(d, live: true),
+                if (fpvLive.isNotEmpty)
+                  Panel(
+                    padding: EdgeInsets.zero,
+                    edge: C.orange,
+                    child: Column(children: [for (final d in fpvLive) FpvDetRow(d)]),
+                  ),
               ],
-              if (list.isEmpty)
-                linkEmpty(context, 'No drones', 'No Remote ID drone was heard in this window.', icon: Ph.drone)
+              if (list.isEmpty && fpv.isEmpty)
+                linkEmpty(
+                  context,
+                  'Nothing in the air',
+                  kind == 'fpv' ? 'No FPV transmitter was found in this window.' : 'No drone was heard in this window.',
+                  icon: Ph.drone,
+                )
               else ...[
-                SectionHead('Heard in this window', trailing: Text('${past.length}', style: T.code)),
+                SectionHead('Heard in this window', trailing: Text('${past.length + fpv.length - fpvLive.length}', style: T.code)),
                 for (final d in past) _DroneCard(d, live: false),
+                if (fpv.length > fpvLive.length)
+                  Panel(
+                    padding: EdgeInsets.zero,
+                    child: Column(
+                      children: [
+                        for (final (k, d) in [
+                          for (final d in fpv)
+                            if (m.now - d.ts >= droneLiveS) d,
+                        ].indexed) ...[if (k > 0) const Divider(indent: 16, endIndent: 16, color: C.silkLine), FpvDetRow(d)],
+                      ],
+                    ),
+                  ),
               ],
             ],
           ),
         );
       },
+    );
+  }
+}
+
+/// Which kinds the Drones feed shows: all, Remote ID or FPV.
+final droneKind = ValueNotifier<String>('all');
+
+/// The receiver itself: a live thumbnail, where it is tuned, and the way to its screen.
+class _FpvReceiver extends StatelessWidget {
+  const _FpvReceiver();
+  @override
+  Widget build(BuildContext context) {
+    final i = Fpv.I.info!;
+    return Panel(
+      edge: i.video ? C.green : null,
+      padding: const EdgeInsets.all(10),
+      onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FpvView())),
+      child: Row(
+        children: [
+          const FpvThumb(),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('FPV RECEIVER', style: T.silk),
+                const SizedBox(height: 4),
+                Text('${i.channelName}  ${i.mhz} MHz', style: T.row),
+                const SizedBox(height: 2),
+                Text(
+                  i.video ? 'Video, ${(i.level * 100).round()}% signal' : (i.scanning ? 'Scanning' : 'No signal'),
+                  style: T.meta.copyWith(color: i.video ? C.green : C.muted),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Ph.caretRight, size: 16, color: C.silkMark),
+        ],
+      ),
     );
   }
 }

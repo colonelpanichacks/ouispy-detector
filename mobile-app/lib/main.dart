@@ -6,7 +6,9 @@ import 'package:flutter/services.dart';
 
 import 'data/alerts.dart';
 import 'data/backend.dart';
+import 'data/blue_modes.dart';
 import 'data/dashboard.dart';
+import 'data/fpv.dart';
 import 'data/local_mesh.dart';
 import 'data/lookup.dart';
 import 'data/model.dart';
@@ -14,6 +16,7 @@ import 'data/settings.dart';
 import 'data/rid_lookup.dart';
 import 'data/updater.dart';
 import 'data/usb_link.dart';
+import 'data/wardrive.dart';
 import 'data/watch.dart';
 import 'theme.dart';
 import 'views/alerts_view.dart';
@@ -56,7 +59,12 @@ class App {
       await link.stop();
       m.clearData();
       link = want;
+      Fpv.I.attach(want);
+      Board.I.attach(want);
+      Wardrive.I.attach(want);
       await want.start();
+      // a board on USB: ask it what it is (boot lines are long gone when the port opens)
+      if (want is LocalMesh) Future.delayed(const Duration(milliseconds: 1500), Board.I.probe);
       m.changed();
     } finally {
       _picking = false;
@@ -82,6 +90,9 @@ Future<void> main() async {
   // a node plugged in or pulled out switches the source (auto / usb)
   UsbLink.events?.listen((_) => Future.delayed(const Duration(milliseconds: 600), App.I.pick));
   if (s.source == 'dashboard' || (await UsbLink.boards()).isEmpty) {
+    Fpv.I.attach(dash);
+    Board.I.attach(dash);
+    Wardrive.I.attach(dash);
     await dash.start();
   } else {
     await App.I.pick();

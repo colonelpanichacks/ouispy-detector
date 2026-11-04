@@ -6,9 +6,11 @@ import '../data/model.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'board_view.dart';
 import 'console_view.dart';
 import 'feed_view.dart';
 import 'fleet_control_view.dart';
+import 'metrics_view.dart';
 import 'node_filters_view.dart';
 
 class FleetView extends StatelessWidget {
@@ -81,6 +83,8 @@ class FleetView extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
                 child: ActionStrip([
                   ('Control', Ph.slidersHorizontal, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FleetControlView()))),
+                  ('Metrics', Ph.chartBar, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MetricsView()))),
+                  ('Board', Ph.cpu, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BoardView()))),
                   ('Console', Ph.terminalWindow, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConsoleView()))),
                 ]),
               ),

@@ -9,6 +9,7 @@ import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import 'feed_view.dart';
+import 'wardrive_view.dart';
 import 'watch_view.dart';
 
 class DevicesView extends StatefulWidget {
@@ -20,6 +21,7 @@ class DevicesView extends StatefulWidget {
 class _DevicesViewState extends State<DevicesView> {
   bool history = false;
   bool watch = false;
+  bool wardrive = false;
   String dom = '';
   String q = '';
   List<Map<String, dynamic>> rows = [];
@@ -67,10 +69,11 @@ class _DevicesViewState extends State<DevicesView> {
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
           child: Seg<int>(
-            items: const [(0, 'Heard now'), (1, 'History'), (2, 'Watch')],
-            value: watch ? 2 : (history ? 1 : 0),
+            items: const [(0, 'Now'), (1, 'History'), (2, 'Watch'), (3, 'Wardrive')],
+            value: wardrive ? 3 : (watch ? 2 : (history ? 1 : 0)),
             onChanged: (v) {
               setState(() {
+                wardrive = v == 3;
                 watch = v == 2;
                 history = v == 1;
               });
@@ -78,8 +81,9 @@ class _DevicesViewState extends State<DevicesView> {
             },
           ),
         ),
+        if (wardrive) const Expanded(child: WardriveView()),
         if (watch) const Expanded(child: WatchView()),
-        if (!watch) ..._lists(m),
+        if (!watch && !wardrive) ..._lists(m),
       ],
     );
   }
