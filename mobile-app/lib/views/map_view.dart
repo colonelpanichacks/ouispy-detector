@@ -27,45 +27,55 @@ TileLayer dashTiles() {
 }
 
 LatLng? fleetCenter() {
-  final pts = [for (final n in App.I.m.nodes.values) if (n.hasPos) LatLng(n.lat!, n.lon!)];
+  final pts = [
+    for (final n in App.I.m.nodes.values)
+      if (n.hasPos) LatLng(n.lat!, n.lon!),
+  ];
   if (pts.isEmpty) return null;
   return LatLng(pts.map((p) => p.latitude).reduce((a, b) => a + b) / pts.length, pts.map((p) => p.longitude).reduce((a, b) => a + b) / pts.length);
 }
 
 MarkerLayer nodeMarkers({void Function(FleetNode)? onTap}) {
   final m = App.I.m;
-  return MarkerLayer(markers: [
-    for (final (i, n) in m.nodes.values.indexed)
-      if (n.hasPos)
-        Marker(
-          point: LatLng(n.lat!, n.lon!),
-          width: 110,
-          height: 46,
-          child: GestureDetector(
-            onTap: onTap == null ? null : () => onTap(n),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  color: C.bg,
-                  shape: n.isHome ? BoxShape.rectangle : BoxShape.circle,
-                  border: Border.all(color: n.online ? C.hue(n.hue, i) : (n.silent ? C.amber : C.red), width: 3),
-                  boxShadow: [BoxShadow(color: (n.online ? C.hue(n.hue, i) : (n.silent ? C.amber : C.red)).withValues(alpha: 0.8), blurRadius: 8)],
-                ),
+  return MarkerLayer(
+    markers: [
+      for (final (i, n) in m.nodes.values.indexed)
+        if (n.hasPos)
+          Marker(
+            point: LatLng(n.lat!, n.lon!),
+            width: 110,
+            height: 46,
+            child: GestureDetector(
+              onTap: onTap == null ? null : () => onTap(n),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 16,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: C.bg,
+                      shape: n.isHome ? BoxShape.rectangle : BoxShape.circle,
+                      border: Border.all(color: n.online ? C.hue(n.hue, i) : (n.silent ? C.amber : C.red), width: 3),
+                      boxShadow: [BoxShadow(color: (n.online ? C.hue(n.hue, i) : (n.silent ? C.amber : C.red)).withValues(alpha: 0.5), blurRadius: 6)],
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(color: C.bg.withValues(alpha: 0.75), borderRadius: BorderRadius.circular(5)),
+                    child: Text(
+                      n.label,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontFamily: sans, color: n.online ? C.text : (n.silent ? C.amber : C.red), fontSize: 10.5, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 2),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(color: C.bg.withValues(alpha: 0.75), borderRadius: BorderRadius.circular(5)),
-                child: Text(n.label,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: n.online ? C.hue(n.hue, i) : (n.silent ? C.amber : C.red), fontSize: 10.5, fontWeight: FontWeight.w800)),
-              ),
-            ]),
+            ),
           ),
-        ),
-  ]);
+    ],
+  );
 }
 
 /// A small map for detail pages.
@@ -76,28 +86,28 @@ class MiniMap extends StatelessWidget {
   final List<Widget> layers;
   @override
   Widget build(BuildContext context) => FlutterMap(
-        options: MapOptions(initialCenter: center, initialZoom: zoom, backgroundColor: const Color(0xFF0A0D12), maxZoom: 21),
-        children: [dashTiles(), ...layers],
-      );
+    options: MapOptions(initialCenter: center, initialZoom: zoom, backgroundColor: const Color(0xFF0A0D12), maxZoom: 21),
+    children: [dashTiles(), ...layers],
+  );
 }
 
 List<Polyline> droneLines(Drone d, {bool hot = true}) => [
-      if (d.ptrack.length > 1)
-        Polyline(points: [for (final p in d.ptrack) LatLng(p[0], p[1])], color: C.orange.withValues(alpha: 0.85), strokeWidth: 2.5, pattern: StrokePattern.dashed(segments: const [6, 5])),
-      if (d.track.length > 1)
-        Polyline(points: [for (final p in d.track) LatLng(p[0], p[1])], color: (hot ? C.hot : C.violet), strokeWidth: 3.5, borderColor: C.bg, borderStrokeWidth: 1),
-    ];
+  if (d.ptrack.length > 1)
+    Polyline(
+      points: [for (final p in d.ptrack) LatLng(p[0], p[1])],
+      color: C.orange.withValues(alpha: 0.85),
+      strokeWidth: 2.5,
+      pattern: StrokePattern.dashed(segments: const [6, 5]),
+    ),
+  if (d.track.length > 1)
+    Polyline(points: [for (final p in d.track) LatLng(p[0], p[1])], color: (hot ? C.hot : C.muted), strokeWidth: 3, borderColor: C.bg, borderStrokeWidth: 1),
+];
 
 List<Marker> droneMarkers(Drone d, {VoidCallback? onTap}) {
   final live = App.I.m.now - d.last < droneLiveS;
-  final c = live ? C.hot : C.violet;
+  final c = live ? C.hot : C.soft;
   return [
-    if (d.hasPilot)
-      Marker(
-          point: LatLng(d.plat!, d.plon!),
-          width: 26,
-          height: 26,
-          child: Icon(Icons.person_pin_circle, color: C.orange, size: 24, shadows: glowOf(C.orange))),
+    if (d.hasPilot) Marker(point: LatLng(d.plat!, d.plon!), width: 26, height: 26, child: const PilotPin()),
     if (d.hasPos)
       Marker(
         point: LatLng(d.lat!, d.lon!),
@@ -105,14 +115,29 @@ List<Marker> droneMarkers(Drone d, {VoidCallback? onTap}) {
         height: 50,
         child: GestureDetector(
           onTap: onTap,
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Transform.rotate(angle: (d.hdg ?? 0) * math.pi / 180, child: Icon(Icons.navigation, color: c, size: 24, shadows: glowOf(c, 10))),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(color: C.bg.withValues(alpha: 0.75), borderRadius: BorderRadius.circular(5)),
-              child: Text(d.label, overflow: TextOverflow.ellipsis, style: TextStyle(color: c, fontSize: 10.5, fontWeight: FontWeight.w800)),
-            ),
-          ]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Transform.rotate(
+                angle: ((d.hdg ?? 0) - 45) * math.pi / 180,
+                child: Icon(
+                  PhF.navigationArrow,
+                  color: c,
+                  size: 22,
+                  shadows: [Shadow(color: C.bg.withValues(alpha: 0.9), blurRadius: 4)],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(color: C.bg.withValues(alpha: 0.75), borderRadius: BorderRadius.circular(5)),
+                child: Text(
+                  d.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontFamily: sans, color: c, fontSize: 10.5, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
   ];
@@ -143,8 +168,10 @@ class _MapViewState extends State<MapView> {
   void _fit() {
     final m = App.I.m;
     final pts = <LatLng>[
-      for (final n in m.nodes.values) if (n.hasPos) LatLng(n.lat!, n.lon!),
-      for (final t in m.targets.values) if (t.triOk) LatLng(t.triLat, t.triLon),
+      for (final n in m.nodes.values)
+        if (n.hasPos) LatLng(n.lat!, n.lon!),
+      for (final t in m.targets.values)
+        if (t.triOk) LatLng(t.triLat, t.triLon),
     ];
     if (pts.isEmpty) return;
     if (pts.length == 1) {
@@ -158,9 +185,13 @@ class _MapViewState extends State<MapView> {
     final b = ctl.camera.visibleBounds;
     final z = ctl.camera.zoom.floor();
     final zMax = math.min(z + 3, App.I.s.tileLayer == 'esri-sat' ? 19 : 16);
-    final ok = await confirm(context, 'SAVE MAP OFFLINE',
-        'Stores the ${layers[App.I.s.tileLayer] ?? App.I.s.tileLayer} tiles of this view, zoom $z to $zMax (up to 4000 tiles), on the phone.',
-        yes: 'SAVE', color: C.green);
+    final ok = await confirm(
+      context,
+      'Save this area offline?',
+      'Stores the ${layers[App.I.s.tileLayer] ?? App.I.s.tileLayer} tiles of this view, zoom $z to $zMax (up to 4000 tiles), on the phone.',
+      yes: 'Save',
+      color: C.accent,
+    );
     if (!ok) return;
     _cancel = false;
     setState(() => prefetch = '0%');
@@ -185,26 +216,30 @@ class _MapViewState extends State<MapView> {
     final pick = await showModalBottomSheet<String>(
       context: context,
       builder: (c) => SafeArea(
-        child: ListView(shrinkWrap: true, children: [
-          const SectionHead('MAP LAYER', color: C.green),
-          for (final e in (layers.isEmpty ? {'esri-sat': 'Satellite', 'carto-dark': 'Dark'} : layers).entries)
-            ListTile(
-              title: Text(e.value, style: TextStyle(color: e.key == App.I.s.tileLayer ? C.green : C.text, fontWeight: FontWeight.w700)),
-              subtitle: Text(e.key, style: const TextStyle(color: C.muted, fontFamily: mono)),
-              onTap: () => Navigator.pop(c, e.key),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const SectionHead('Map layer'),
+            for (final e in (layers.isEmpty ? {'esri-sat': 'Satellite', 'carto-dark': 'Dark'} : layers).entries)
+              ListTile(
+                leading: Icon(e.key == App.I.s.tileLayer ? PhF.checkCircle : Ph.stack, color: e.key == App.I.s.tileLayer ? C.accent : C.muted),
+                title: Text(e.value),
+                subtitle: Text(e.key, style: T.code),
+                onTap: () => Navigator.pop(c, e.key),
+              ),
+            SwitchListTile(
+              title: const Text('Fetch new tiles from the dashboard'),
+              subtitle: const Text('Off: only what is saved on the phone'),
+              value: App.I.s.tilesOnline,
+              onChanged: (v) {
+                App.I.s.tilesOnline = v;
+                App.I.s.save();
+                Navigator.pop(c);
+                setState(() {});
+              },
             ),
-          SwitchListTile(
-            title: const Text('Fetch new tiles from the dashboard', style: TextStyle(color: C.text)),
-            subtitle: const Text('Off: only what is saved on the phone', style: TextStyle(color: C.muted)),
-            value: App.I.s.tilesOnline,
-            onChanged: (v) {
-              App.I.s.tilesOnline = v;
-              App.I.s.save();
-              Navigator.pop(c);
-              setState(() {});
-            },
-          ),
-        ]),
+          ],
+        ),
       ),
     );
     if (pick == null) return;
@@ -214,27 +249,34 @@ class _MapViewState extends State<MapView> {
   }
 
   Future<void> _dropPin(LatLng p) async {
-    final name = await askText(context, 'DROP A PIN', '', hint: 'name');
+    final name = await askText(context, 'Drop a pin', '', hint: 'Name');
     if (name == null) return;
     await App.I.dash.addMark({'kind': 'pin', 'name': name, 'lat': p.latitude, 'lon': p.longitude, 'hue': 190, 'icon': 'pin'});
   }
 
   void _nodeSheet(FleetNode n) => showModalBottomSheet(
-        context: context,
-        builder: (_) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Glow(n.label, color: n.online ? C.green : C.red, size: 18),
-              KV('ID', n.id, monoValue: true),
-              KV('Role', n.isHome ? 'home' : n.role),
-              KV('State', n.online ? 'online' : '${n.silent ? 'silent' : 'offline'} for ${dur(n.age)}', color: n.online ? C.green : (n.silent ? C.amber : C.red)),
-              if (n.rssi != null) KV('Link', '${n.rssi} dBm', color: C.rssi(n.rssi)),
-              KV('Runs', n.kind),
-            ]),
-          ),
+    context: context,
+    builder: (_) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(4, 0, 4, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+              child: Text(n.label, style: T.title),
+            ),
+            KV('ID', n.id, monoValue: true),
+            KV('Role', n.isHome ? 'home' : n.role),
+            KV('State', n.online ? 'online' : '${n.silent ? 'silent' : 'offline'} for ${dur(n.age)}', color: n.online ? C.green : (n.silent ? C.amber : C.red)),
+            if (n.rssi != null) KV('Link', '${n.rssi} dBm', color: C.rssi(n.rssi)),
+            KV('Runs', n.kind),
+          ],
         ),
-      );
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -247,7 +289,10 @@ class _MapViewState extends State<MapView> {
           centeredFor = m.target;
           WidgetsBinding.instance.addPostFrameCallback((_) => _fit());
         }
-        final nodes = {for (final n in m.nodes.values) if (n.hasPos) n.id: n};
+        final nodes = {
+          for (final n in m.nodes.values)
+            if (n.hasPos) n.id: n,
+        };
         final links = <Polyline>[];
         if (showLinks) {
           final done = <String>{};
@@ -257,148 +302,246 @@ class _MapViewState extends State<MapView> {
               if (o == null) continue;
               final k = ([n.id, o.id]..sort()).join();
               if (!done.add(k)) continue;
-              links.add(Polyline(
+              links.add(
+                Polyline(
                   points: [LatLng(n.lat!, n.lon!), LatLng(o.lat!, o.lon!)],
                   color: C.rssi(s.rssi).withValues(alpha: 0.55),
                   strokeWidth: 1.6,
-                  pattern: const StrokePattern.dotted(spacingFactor: 2.2)));
+                  pattern: const StrokePattern.dotted(spacingFactor: 2.2),
+                ),
+              );
             }
           }
         }
-        final tri = [for (final t in m.targets.values) if (t.triOk && m.now - t.triTs < 600) t];
+        final tri = [
+          for (final t in m.targets.values)
+            if (t.triOk && m.now - t.triTs < 600) t,
+        ];
         final drones = showDrones ? m.windowDrones : <Drone>[];
-        return Stack(children: [
-          FlutterMap(
-            mapController: ctl,
-            options: MapOptions(
-              initialCenter: center ?? const LatLng(20, 0),
-              initialZoom: center == null ? 2 : 16,
-              maxZoom: 22,
-              backgroundColor: const Color(0xFF0A0D12),
-              onLongPress: (_, p) => _dropPin(p),
+        return Stack(
+          children: [
+            FlutterMap(
+              mapController: ctl,
+              options: MapOptions(
+                initialCenter: center ?? const LatLng(20, 0),
+                initialZoom: center == null ? 2 : 16,
+                maxZoom: 22,
+                backgroundColor: const Color(0xFF0A0D12),
+                onLongPress: (_, p) => _dropPin(p),
+              ),
+              children: [
+                dashTiles(),
+                if (showMarks)
+                  PolygonLayer(
+                    polygons: [
+                      for (final mk in m.marks)
+                        if (mk.kind == 'area' && mk.pts.length >= 3)
+                          Polygon(
+                            points: [for (final p in mk.pts) LatLng(p[0], p[1])],
+                            color: C.hue(mk.hue).withValues(alpha: 0.14),
+                            borderColor: C.hue(mk.hue),
+                            borderStrokeWidth: 2,
+                            label: mk.name,
+                            labelStyle: TextStyle(fontFamily: sans, color: C.hue(mk.hue), fontWeight: FontWeight.w600, fontSize: 11),
+                          ),
+                    ],
+                  ),
+                PolylineLayer(polylines: links),
+                if (showTargets)
+                  CircleLayer(
+                    circles: [
+                      for (final t in tri)
+                        CircleMarker(
+                          point: LatLng(t.triLat, t.triLon),
+                          radius: math.max(3, t.triErr),
+                          useRadiusInMeter: true,
+                          color: (t.triRough ? C.amber : C.green).withValues(alpha: 0.12),
+                          borderColor: (t.triRough ? C.amber : C.green).withValues(alpha: 0.8),
+                          borderStrokeWidth: 1.5,
+                        ),
+                    ],
+                  ),
+                PolylineLayer(polylines: [for (final d in drones) ...droneLines(d, hot: m.now - d.last < droneLiveS)]),
+                if (showNodes) nodeMarkers(onTap: _nodeSheet),
+                if (showTargets)
+                  MarkerLayer(
+                    markers: [
+                      for (final t in tri)
+                        Marker(
+                          point: LatLng(t.triLat, t.triLon),
+                          width: 120,
+                          height: 36,
+                          child: GestureDetector(
+                            onTap: () => openDevice(context, t.mac),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Dot(C.dom(t.dom), size: 10, halo: true),
+                                Text(
+                                  m.labelOf(t.mac, t.descr),
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontFamily: sans, color: C.text, fontSize: 10, fontWeight: FontWeight.w600, shadows: glowOf(C.bg, 3)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                if (showMarks)
+                  MarkerLayer(
+                    markers: [
+                      for (final mk in m.marks)
+                        if (mk.kind == 'pin' && mk.lat != null)
+                          Marker(
+                            point: LatLng(mk.lat!, mk.lon!),
+                            width: 120,
+                            height: 44,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(PhF.mapPin, color: C.hue(mk.hue), size: 26, shadows: glowOf(C.bg, 4)),
+                                Text(
+                                  mk.name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontFamily: sans, color: C.text, fontSize: 10, fontWeight: FontWeight.w600, shadows: glowOf(C.bg, 3)),
+                                ),
+                              ],
+                            ),
+                          ),
+                    ],
+                  ),
+                MarkerLayer(
+                  markers: [
+                    for (final d in drones)
+                      ...droneMarkers(
+                        d,
+                        onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => DroneDetail(mac: d.mac))),
+                      ),
+                  ],
+                ),
+              ],
             ),
-            children: [
-              dashTiles(),
-              if (showMarks)
-                PolygonLayer(polygons: [
-                  for (final mk in m.marks)
-                    if (mk.kind == 'area' && mk.pts.length >= 3)
-                      Polygon(
-                          points: [for (final p in mk.pts) LatLng(p[0], p[1])],
-                          color: C.hue(mk.hue).withValues(alpha: 0.14),
-                          borderColor: C.hue(mk.hue),
-                          borderStrokeWidth: 2,
-                          label: mk.name,
-                          labelStyle: TextStyle(color: C.hue(mk.hue), fontWeight: FontWeight.w800, fontSize: 11)),
-                ]),
-              PolylineLayer(polylines: links),
-              if (showTargets)
-                CircleLayer(circles: [
-                  for (final t in tri)
-                    CircleMarker(
-                        point: LatLng(t.triLat, t.triLon),
-                        radius: math.max(3, t.triErr),
-                        useRadiusInMeter: true,
-                        color: (t.triRough ? C.amber : C.green).withValues(alpha: 0.12),
-                        borderColor: (t.triRough ? C.amber : C.green).withValues(alpha: 0.8),
-                        borderStrokeWidth: 1.5),
-                ]),
-              PolylineLayer(polylines: [for (final d in drones) ...droneLines(d, hot: m.now - d.last < droneLiveS)]),
-              if (showNodes) nodeMarkers(onTap: _nodeSheet),
-              if (showTargets)
-                MarkerLayer(markers: [
-                  for (final t in tri)
-                    Marker(
-                      point: LatLng(t.triLat, t.triLon),
-                      width: 120,
-                      height: 36,
-                      child: GestureDetector(
-                        onTap: () => openDevice(context, t.mac),
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Dot(t.dom == 'ble' ? C.hot : C.cyan, size: 10),
-                          Text(m.labelOf(t.mac, t.descr),
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(color: t.dom == 'ble' ? C.hot : C.cyan, fontSize: 10, fontWeight: FontWeight.w700, shadows: glowOf(C.bg, 3))),
-                        ]),
-                      ),
-                    ),
-                ]),
-              if (showMarks)
-                MarkerLayer(markers: [
-                  for (final mk in m.marks)
-                    if (mk.kind == 'pin' && mk.lat != null)
-                      Marker(
-                        point: LatLng(mk.lat!, mk.lon!),
-                        width: 120,
-                        height: 44,
-                        child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.location_on, color: C.hue(mk.hue), size: 26, shadows: glowOf(C.hue(mk.hue))),
-                          Text(mk.name, overflow: TextOverflow.ellipsis, style: TextStyle(color: C.hue(mk.hue), fontSize: 10, fontWeight: FontWeight.w700)),
-                        ]),
-                      ),
-                ]),
-              MarkerLayer(markers: [
-                for (final d in drones)
-                  ...droneMarkers(d, onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => DroneDetail(mac: d.mac)))),
-              ]),
-            ],
-          ),
-          Positioned(
-            top: 8,
-            left: 8,
-            right: 8,
-            child: PillRow(padding: EdgeInsets.zero, children: [
-              _chip('LAYER', C.green, true, _layerPick),
-              _chip('NODES', C.orange, showNodes, () => setState(() => showNodes = !showNodes)),
-              _chip('LINKS', C.lime, showLinks, () => setState(() => showLinks = !showLinks)),
-              _chip('TARGETS ${tri.length}', C.cyan, showTargets, () => setState(() => showTargets = !showTargets)),
-              _chip('DRONES ${m.windowDrones.length}', C.hot, showDrones, () => setState(() => showDrones = !showDrones)),
-              _chip('MARKS', C.purple, showMarks, () => setState(() => showMarks = !showMarks)),
-            ]),
-          ),
-          Positioned(
-            right: 10,
-            bottom: 14,
-            child: Column(children: [
-              _fab(Icons.center_focus_strong, C.accent, _fit),
-              const SizedBox(height: 10),
-              _fab(prefetch == null ? Icons.download_for_offline_outlined : Icons.close, C.green, prefetch == null ? _download : () => _cancel = true),
-            ]),
-          ),
-          if (prefetch != null)
-            Positioned(left: 12, bottom: 18, child: Pill('SAVING TILES $prefetch', color: C.green)),
-          if (!App.I.s.tilesOnline)
-            const Positioned(left: 12, bottom: 50, child: Pill('OFFLINE TILES ONLY', color: C.amber, small: true)),
-        ]);
+            Positioned(
+              top: 8,
+              left: 8,
+              right: 8,
+              child: ChipRow(
+                padding: EdgeInsets.zero,
+                children: [
+                  _chip('Layer', Ph.stack, true, _layerPick),
+                  _chip('Nodes', Ph.graph, showNodes, () => setState(() => showNodes = !showNodes)),
+                  _chip('Links', Ph.linkSimple, showLinks, () => setState(() => showLinks = !showLinks)),
+                  _chip('Targets', Ph.crosshair, showTargets, () => setState(() => showTargets = !showTargets), n: tri.length),
+                  _chip('Drones', Ph.drone, showDrones, () => setState(() => showDrones = !showDrones), n: m.windowDrones.length),
+                  _chip('Marks', Ph.mapPin, showMarks, () => setState(() => showMarks = !showMarks)),
+                ],
+              ),
+            ),
+            Positioned(
+              right: 10,
+              bottom: 14,
+              child: Column(
+                children: [
+                  _fab(Ph.crosshair, _fit),
+                  const SizedBox(height: 10),
+                  _fab(prefetch == null ? Ph.downloadSimple : Ph.x, prefetch == null ? _download : () => _cancel = true),
+                ],
+              ),
+            ),
+            if (prefetch != null)
+              Positioned(
+                left: 12,
+                bottom: 18,
+                child: _float(
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                      const SizedBox(width: 8),
+                      Text('Saving tiles  $prefetch', style: T.meta.copyWith(color: C.text)),
+                    ],
+                  ),
+                ),
+              ),
+            if (!App.I.s.tilesOnline)
+              Positioned(
+                left: 12,
+                bottom: 54,
+                child: _float(
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Ph.cloudSlash, size: 15, color: C.amber),
+                      const SizedBox(width: 6),
+                      Text('Saved tiles only', style: T.meta.copyWith(color: C.amber)),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        );
       },
     );
   }
 
-  Widget _chip(String l, Color c, bool on, VoidCallback f) => GestureDetector(
-        onTap: f,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: C.bg.withValues(alpha: on ? 0.85 : 0.6),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: on ? c : c.withValues(alpha: 0.35)),
-            boxShadow: on ? [BoxShadow(color: c.withValues(alpha: 0.35), blurRadius: 8)] : null,
-          ),
-          child: Text(l, style: TextStyle(color: on ? c : c.withValues(alpha: 0.6), fontSize: 11.5, fontWeight: FontWeight.w800, letterSpacing: 0.8)),
-        ),
-      );
+  Widget _float(Widget child) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    decoration: BoxDecoration(
+      color: C.bg.withValues(alpha: 0.88),
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: C.line2),
+    ),
+    child: child,
+  );
 
-  Widget _fab(IconData i, Color c, VoidCallback f) => GestureDetector(
-        onTap: f,
-        child: Container(
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-              color: C.bg.withValues(alpha: 0.85),
-              shape: BoxShape.circle,
-              border: Border.all(color: c),
-              boxShadow: [BoxShadow(color: c.withValues(alpha: 0.4), blurRadius: 10)]),
-          child: Icon(i, color: c),
+  Widget _chip(String l, IconData i, bool on, VoidCallback f, {int? n}) => Material(
+    color: on ? C.bg.withValues(alpha: 0.9) : C.bg.withValues(alpha: 0.65),
+    shape: StadiumBorder(side: BorderSide(color: on ? C.accent.withValues(alpha: 0.55) : C.line2)),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: f,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(i, size: 15, color: on ? C.accent : C.muted),
+            const SizedBox(width: 6),
+            Text(
+              l,
+              style: TextStyle(fontFamily: sans, color: on ? C.text : C.muted, fontSize: 12.5, fontWeight: FontWeight.w600),
+            ),
+            if (n != null) ...[const SizedBox(width: 5), Text('$n', style: T.code.copyWith(fontSize: 11.5, color: on ? C.accent : C.faint))],
+          ],
         ),
-      );
+      ),
+    ),
+  );
+
+  Widget _fab(IconData i, VoidCallback f) => Material(
+    color: C.bg.withValues(alpha: 0.9),
+    shape: const CircleBorder(side: BorderSide(color: C.line2)),
+    clipBehavior: Clip.antiAlias,
+    child: InkWell(
+      onTap: f,
+      child: SizedBox(width: 46, height: 46, child: Icon(i, color: C.text, size: 21)),
+    ),
+  );
+}
+
+/// The pilot's position.
+class PilotPin extends StatelessWidget {
+  const PilotPin({super.key});
+  @override
+  Widget build(BuildContext context) => Container(
+    width: 24,
+    height: 24,
+    decoration: BoxDecoration(
+      color: C.bg,
+      shape: BoxShape.circle,
+      border: Border.all(color: C.orange, width: 2),
+    ),
+    child: const Icon(PhF.user, size: 13, color: C.orange),
+  );
 }

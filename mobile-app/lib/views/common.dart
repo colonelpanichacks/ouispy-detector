@@ -36,17 +36,15 @@ String dur(num s) {
   return '${v ~/ 86400}d ${(v % 86400) ~/ 3600}h';
 }
 
-void openDevice(BuildContext context, String mac) =>
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => DeviceDetail(mac: mac.toUpperCase())));
+void openDevice(BuildContext context, String mac) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => DeviceDetail(mac: mac.toUpperCase())));
 
-Color typeColor(Det d) {
-  final t = d.type.toUpperCase();
-  if (t == 'RID' || d.descr.startsWith('DRONE')) return C.hot;
-  if (d.dom == 'ble') return C.purple;
-  return C.cyan;
-}
+bool isDrone(Det d) => d.type.toUpperCase() == 'RID' || d.descr.startsWith('DRONE');
 
-/// One detection, as the Tab5's LIVE rows: time, what, who heard it, signal.
+Color typeColor(Det d) => isDrone(d) ? C.hot : C.dom(d.dom);
+
+IconData domIcon(String dom, {bool drone = false}) => drone ? Ph.drone : (dom == 'ble' ? Ph.bluetooth : Ph.wifiHigh);
+
+/// One detection: what it is, its MAC and who heard it, when and how loud.
 class DetRow extends StatelessWidget {
   const DetRow(this.d, {super.key, this.alert = false});
   final Det d;
@@ -60,83 +58,84 @@ class DetRow extends StatelessWidget {
     return InkWell(
       onTap: () => openDevice(context, d.mac),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-        decoration: BoxDecoration(
-          border: const Border(bottom: BorderSide(color: C.line)),
-          color: alert ? C.hot.withValues(alpha: 0.05) : null,
+        color: alert ? C.hot.withValues(alpha: 0.06) : null,
+        padding: const EdgeInsets.fromLTRB(16, 11, 16, 11),
+        child: Row(
+          children: [
+            IconTile(domIcon(d.dom, drone: isDrone(d)), tc),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.row),
+                      ),
+                      if (d.isNew) ...[const SizedBox(width: 6), const Tag('New', color: C.green)],
+                      if (group.isNotEmpty) ...[const SizedBox(width: 6), Tag(group, color: C.orange)],
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Text(d.mac, style: T.code),
+                      const SizedBox(width: 8),
+                      Dot(C.hue(m.nodes[d.node]?.hue), size: 6),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(m.nodeName(d.node), maxLines: 1, overflow: TextOverflow.ellipsis, style: T.meta),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(clock(d.ts), style: T.code.copyWith(fontSize: 11.5)),
+                const SizedBox(height: 5),
+                Row(
+                  children: [
+                    Text(
+                      '${d.rssi ?? '-'}',
+                      style: T.code.copyWith(color: C.rssi(d.rssi), fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(width: 4),
+                    RssiBar(d.rssi),
+                  ],
+                ),
+              ],
+            ),
+          ],
         ),
-        child: Row(children: [
-          Container(width: 3, height: 38, decoration: BoxDecoration(color: tc, boxShadow: [BoxShadow(color: tc.withValues(alpha: 0.7), blurRadius: 6)])),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Row(children: [
-                Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.text, fontSize: 14.5, fontWeight: FontWeight.w600))),
-                if (d.isNew) ...[const SizedBox(width: 6), const Pill('NEW', color: C.green, small: true)],
-                if (group.isNotEmpty) ...[const SizedBox(width: 6), Pill(group.toUpperCase(), color: C.orange, small: true)],
-              ]),
-              const SizedBox(height: 3),
-              Row(children: [
-                Text(d.mac, style: const TextStyle(color: C.soft, fontSize: 11.5, fontFamily: mono)),
-                const SizedBox(width: 8),
-                Text((d.type.isEmpty ? d.dom : d.type).toUpperCase(), style: TextStyle(color: tc, fontSize: 11, fontWeight: FontWeight.w700)),
-                const SizedBox(width: 8),
-                Flexible(
-                    child: Text(m.nodeName(d.node),
-                        overflow: TextOverflow.ellipsis, style: TextStyle(color: C.hue(m.nodes[d.node]?.hue), fontSize: 11.5, fontWeight: FontWeight.w600))),
-              ]),
-            ]),
-          ),
-          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Text(clock(d.ts), style: const TextStyle(color: C.muted, fontSize: 11.5, fontFamily: mono)),
-            const SizedBox(height: 4),
-            Row(children: [
-              Text('${d.rssi ?? '?'}', style: TextStyle(color: C.rssi(d.rssi), fontSize: 12, fontWeight: FontWeight.w700, fontFamily: mono)),
-              const SizedBox(width: 5),
-              RssiBar(d.rssi),
-            ]),
-          ]),
-        ]),
       ),
     );
   }
 }
 
-/// A KPI tile, as the Tab5 Overview's.
-class Kpi extends StatelessWidget {
-  const Kpi(this.label, this.value, this.color, {super.key, this.sub});
-  final String label, value;
-  final Color color;
-  final String? sub;
-  @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-        decoration: BoxDecoration(
-          color: C.panel,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withValues(alpha: 0.5)),
-          boxShadow: [BoxShadow(color: color.withValues(alpha: 0.15), blurRadius: 10)],
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(label, style: const TextStyle(color: C.faint, fontSize: 9.5, fontWeight: FontWeight.w800, letterSpacing: 1)),
-          const SizedBox(height: 2),
-          Glow(value, color: color, size: 22, weight: FontWeight.w800),
-          if (sub != null) Text(sub!, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.muted, fontSize: 10)),
-        ]),
-      );
-}
-
-/// Pills in a scrolling row.
-class PillRow extends StatelessWidget {
-  const PillRow({super.key, required this.children, this.padding = const EdgeInsets.fromLTRB(12, 8, 12, 6)});
+/// Chips in a scrolling row.
+class ChipRow extends StatelessWidget {
+  const ChipRow({super.key, required this.children, this.padding = const EdgeInsets.fromLTRB(16, 8, 16, 8)});
   final List<Widget> children;
   final EdgeInsets padding;
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: padding,
-        child: Row(children: [for (final c in children) Padding(padding: const EdgeInsets.only(right: 7), child: c)]),
-      );
+    scrollDirection: Axis.horizontal,
+    padding: padding,
+    child: Row(
+      children: [
+        for (final (i, c) in children.indexed)
+          Padding(
+            padding: EdgeInsets.only(left: i == 0 ? 0 : 8),
+            child: c,
+          ),
+      ],
+    ),
+  );
 }
 
 Future<String?> askText(BuildContext context, String title, String initial, {String hint = '', int maxLines = 1}) {
@@ -144,25 +143,49 @@ Future<String?> askText(BuildContext context, String title, String initial, {Str
   return showDialog<String>(
     context: context,
     builder: (c) => AlertDialog(
-      title: Glow(title, color: C.accent, size: 16),
-      content: TextField(controller: ctl, autofocus: true, maxLines: maxLines, decoration: InputDecoration(hintText: hint)),
+      title: Text(title),
+      content: TextField(
+        controller: ctl,
+        autofocus: true,
+        maxLines: maxLines,
+        style: T.row,
+        decoration: InputDecoration(hintText: hint),
+      ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(c), child: const Text('CANCEL', style: TextStyle(color: C.red))),
-        TextButton(onPressed: () => Navigator.pop(c, ctl.text.trim()), child: const Text('SAVE', style: TextStyle(color: C.green))),
+        TextButton(
+          onPressed: () => Navigator.pop(c),
+          child: const Text('Cancel', style: TextStyle(color: C.muted)),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(c, ctl.text.trim()),
+          child: const Text(
+            'Save',
+            style: TextStyle(color: C.accent, fontWeight: FontWeight.w600),
+          ),
+        ),
       ],
     ),
   );
 }
 
-Future<bool> confirm(BuildContext context, String title, String body, {String yes = 'YES', Color color = C.red}) async =>
+Future<bool> confirm(BuildContext context, String title, String body, {String yes = 'Yes', Color color = C.red}) async =>
     await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: Glow(title, color: color, size: 16),
-        content: Text(body, style: const TextStyle(color: C.text)),
+        title: Text(title),
+        content: Text(body, style: T.body),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL', style: TextStyle(color: C.soft))),
-          TextButton(onPressed: () => Navigator.pop(c, true), child: Text(yes, style: TextStyle(color: color))),
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('Cancel', style: TextStyle(color: C.muted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(c, true),
+            child: Text(
+              yes,
+              style: TextStyle(color: color, fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     ) ??

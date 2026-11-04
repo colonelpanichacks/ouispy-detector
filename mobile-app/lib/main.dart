@@ -28,7 +28,7 @@ class App {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: C.bg, systemNavigationBarColor: C.bg));
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(statusBarColor: Colors.transparent, systemNavigationBarColor: C.bg));
   final s = Settings();
   await s.load();
   final m = Model()..muted.addAll(s.muted);
@@ -43,27 +43,21 @@ Future<void> main() async {
 class OuiSpyApp extends StatelessWidget {
   const OuiSpyApp({super.key});
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'OUI-SPY Mesh',
-        debugShowCheckedModeBanner: false,
-        theme: buildTheme(),
-        home: const Shell(),
-      );
+  Widget build(BuildContext context) => MaterialApp(title: 'OUI-SPY Recon', debugShowCheckedModeBanner: false, theme: buildTheme(), home: const Shell());
 }
 
 class _Tab {
-  const _Tab(this.label, this.icon, this.color);
+  const _Tab(this.label, this.icon, this.on);
   final String label;
-  final IconData icon;
-  final Color color;
+  final IconData icon, on;
 }
 
 const _tabs = [
-  _Tab('FEED', Icons.bolt, C.accent),
-  _Tab('DEVICES', Icons.radar, C.cyan),
-  _Tab('MAP', Icons.map_outlined, C.green),
-  _Tab('DRONES', Icons.flight, C.hot),
-  _Tab('FLEET', Icons.hub_outlined, C.orange),
+  _Tab('Feed', Ph.pulse, PhF.pulse),
+  _Tab('Devices', Ph.broadcast, PhF.broadcast),
+  _Tab('Map', Ph.mapTrifold, PhF.mapTrifold),
+  _Tab('Drones', Ph.drone, PhF.drone),
+  _Tab('Fleet', Ph.graph, PhF.graph),
 ];
 
 class Shell extends StatefulWidget {
@@ -102,18 +96,36 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
     return ListenableBuilder(
       listenable: m,
       builder: (context, _) => Scaffold(
-        body: SafeArea(
-          bottom: false,
-          child: Column(children: [
-            _TopBar(pulse: pulse),
-            if (m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
-            Expanded(child: IndexedStack(index: tab, children: _pages)),
-          ]),
+        body: Stack(
+          children: [
+            // the art sits behind the status bar and the top bar, its rings fading out below
+            Positioned(
+              top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _bandCentre(context),
+              left: 0,
+              right: 0,
+              child: const HeaderArt(),
+            ),
+            SafeArea(
+              bottom: false,
+              child: Column(
+                children: [
+                  _TopBar(pulse: pulse),
+                  if (m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
+                  Expanded(
+                    child: IndexedStack(index: tab, children: _pages),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
-        bottomNavigationBar: _BottomNav(tab: tab, onTap: (i) {
-          setState(() => tab = i);
-          if (i == 3 || i == 2) App.I.dash.fetchDroneWindow();
-        }),
+        bottomNavigationBar: _BottomNav(
+          tab: tab,
+          onTap: (i) {
+            setState(() => tab = i);
+            if (i == 3 || i == 2) App.I.dash.fetchDroneWindow();
+          },
+        ),
       ),
     );
   }
@@ -126,69 +138,179 @@ class _TopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     final (String state, Color c) = switch (m.link) {
-      Link.off => (m.lastError.startsWith('looking') ? 'SEARCHING' : 'NO LINK', C.red),
-      Link.refused => ('REFUSED', C.red),
-      Link.connecting => ('CONNECTING', C.amber),
-      Link.up => m.mode == 'demo'
-          ? ('DEMO', C.amber)
-          : m.mode == 'replay'
-              ? ('REPLAY', C.purple)
-              : m.home['alive'] == false
-                  ? ('HOME DOWN', C.amber)
-                  : ('LIVE', C.green),
+      Link.off => (m.lastError.startsWith('looking') ? 'Searching' : 'Offline', C.red),
+      Link.refused => ('Refused', C.red),
+      Link.connecting => ('Connecting', C.amber),
+      Link.up =>
+        m.mode == 'demo'
+            ? ('Demo', C.amber)
+            : m.mode == 'replay'
+            ? ('Replay', C.violet)
+            : m.home['alive'] == false
+            ? ('Home down', C.amber)
+            : ('Live', C.green),
     };
     final down = c == C.red;
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
-      decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: C.line2))),
-      child: Row(children: [
-        const Column(crossAxisAlignment: CrossAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
-          Glow('OUI-SPY', color: C.accent, size: 18, spacing: 1.5),
-          Glow('M E S H', color: C.pink, size: 10.5, spacing: 2.5),
-        ]),
-        const Spacer(),
-        GestureDetector(
-          onTap: () => _open(context, const SettingsView()),
-          child: AnimatedBuilder(
+    // cut out of the art like the title: a black outline round the letters
+    const cut = [
+      Shadow(color: C.bg, blurRadius: 0, offset: Offset(1.2, 0)),
+      Shadow(color: C.bg, blurRadius: 0, offset: Offset(-1.2, 0)),
+      Shadow(color: C.bg, blurRadius: 0, offset: Offset(0, 1.2)),
+      Shadow(color: C.bg, blurRadius: 0, offset: Offset(0, -1.2)),
+      Shadow(color: C.bg, blurRadius: 3),
+    ];
+    final status = GestureDetector(
+      onTap: () => _open(context, const SettingsView()),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          AnimatedBuilder(
             animation: pulse,
-            builder: (_, _) {
-              final a = down ? 0.55 + 0.45 * math.sin(pulse.value * 2 * math.pi) : 1.0;
-              return Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: c.withValues(alpha: 0.13),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: c.withValues(alpha: a)),
-                  boxShadow: [BoxShadow(color: c.withValues(alpha: 0.35 * a), blurRadius: 10)],
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Dot(c.withValues(alpha: a), size: 8),
-                  const SizedBox(width: 7),
-                  Glow(state, color: c, size: 12, spacing: 1.2),
-                ]),
-              );
-            },
-          ),
-        ),
-        _iconBadge(context, Icons.notifications_active_outlined, m.alertsUnacked, C.hot, () => _open(context, const AlertsView())),
-        IconButton(icon: const Icon(Icons.tune, color: C.soft), onPressed: () => _open(context, const SettingsView())),
-      ]),
-    );
-  }
-
-  Widget _iconBadge(BuildContext context, IconData icon, int n, Color c, VoidCallback onTap) => Stack(clipBehavior: Clip.none, children: [
-        IconButton(icon: Icon(icon, color: n > 0 ? c : C.soft), onPressed: onTap),
-        if (n > 0)
-          Positioned(
-            right: 4,
-            top: 4,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-              decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(9), boxShadow: [BoxShadow(color: c, blurRadius: 6)]),
-              child: Text(n > 99 ? '99+' : '$n', style: const TextStyle(color: C.bg, fontSize: 10, fontWeight: FontWeight.w800)),
+            builder: (_, _) => Container(
+              padding: const EdgeInsets.all(1.5),
+              decoration: const BoxDecoration(color: C.bg, shape: BoxShape.circle),
+              child: Dot(c.withValues(alpha: down ? 0.45 + 0.55 * math.sin(pulse.value * 2 * math.pi).abs() : 1), size: 7, halo: !down),
             ),
           ),
-      ]);
+          const SizedBox(width: 6),
+          Text(
+            state.toUpperCase(),
+            style: TextStyle(fontFamily: mono, color: c, fontSize: 11.5, fontWeight: FontWeight.w600, letterSpacing: 1.6, shadows: cut),
+          ),
+        ],
+      ),
+    );
+    // the band's ends, outside the cicadas' wings (16 % of the width each side)
+    final end = MediaQuery.sizeOf(context).width * 0.16;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          height: _titleH(context) - _statusH,
+          child: Center(child: TitleArt(width: _titleW(context))),
+        ),
+        SizedBox(
+          height: _statusH,
+          child: Center(child: status),
+        ),
+        SizedBox(
+          height: _barH(context),
+          child: Row(
+            children: [
+              SizedBox(
+                width: end,
+                child: Center(
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      _RoundBtn(m.alertsUnacked > 0 ? PhF.bellRinging : Ph.bell, m.alertsUnacked > 0 ? C.hot : C.text, () => _open(context, const AlertsView())),
+                      if (m.alertsUnacked > 0) Positioned(right: -2, top: -2, child: _Badge(m.alertsUnacked, C.hot)),
+                    ],
+                  ),
+                ),
+              ),
+              const Spacer(),
+              SizedBox(
+                width: end,
+                child: Center(child: _RoundBtn(Ph.gearSix, C.text, () => _open(context, const SettingsView()))),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+const _statusH = 20.0;
+
+/// An icon button on a dark disc, so it reads over the art.
+class _RoundBtn extends StatelessWidget {
+  const _RoundBtn(this.icon, this.color, this.onTap);
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: EdgeInsets.zero,
+    child: Material(
+      color: C.bg.withValues(alpha: 0.85),
+      shape: const CircleBorder(side: BorderSide(color: C.line2)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(width: 40, height: 40, child: Icon(icon, size: 20, color: color)),
+      ),
+    ),
+  );
+}
+
+/// The board's back strip as silkscreen behind the top bar: the two cicadas facing the
+/// full moon, rings radiating out from it (tool/make_header_art.py). Light grey at the
+/// moon, darker grey out where the title and buttons sit, so it never fights them.
+/// The board's own OUI SPY RECON banner (tool/make_title_art.py), cut out of the art
+/// behind it by a black outline: OUI SPY in the text colour, RECON in the accent.
+class TitleArt extends StatelessWidget {
+  const TitleArt({super.key, this.width = 168});
+  final double width;
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'OUI-SPY Recon',
+    child: ShaderMask(
+      blendMode: BlendMode.modulate,
+      shaderCallback: (r) => const LinearGradient(colors: [C.text, C.text, C.accent, C.accent], stops: [0, 0.545, 0.545, 1]).createShader(r),
+      child: Image.asset('assets/art/title.png', width: width, filterQuality: FilterQuality.high),
+    ),
+  );
+}
+
+class HeaderArt extends StatelessWidget {
+  const HeaderArt({super.key});
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: ShaderMask(
+      blendMode: BlendMode.srcIn,
+      shaderCallback: (r) => const LinearGradient(colors: [Color(0xFF262B32), Color(0xFF9AA1AA), Color(0xFF262B32)], stops: [0.04, 0.5, 0.96]).createShader(r),
+      child: Opacity(
+        opacity: 0.6,
+        child: Image.asset(
+          'assets/art/header.png',
+          width: MediaQuery.sizeOf(context).width,
+          fit: BoxFit.fitWidth,
+          alignment: Alignment.topCenter,
+          filterQuality: FilterQuality.medium,
+        ),
+      ),
+    ),
+  );
+}
+
+// header.png is 60 mm wide: 10 mm of rings fading up past the title, then the band (cicadas and moon, 8.2 mm), then the tail
+double _bandCentre(BuildContext context) => MediaQuery.sizeOf(context).width * (10.0 + 4.1) / 60;
+// the title (board banner, 1620 x 199) is centred above the band
+double _titleW(BuildContext context) => (MediaQuery.sizeOf(context).width * 0.8).clamp(240.0, 420.0);
+double _titleH(BuildContext context) => _titleW(context) * 199 / 1620 + 12 + _statusH;
+double _barH(BuildContext context) => (MediaQuery.sizeOf(context).width * 8.2 / 60).clamp(56.0, 76.0);
+
+class _Badge extends StatelessWidget {
+  const _Badge(this.n, this.c);
+  final int n;
+  final Color c;
+  @override
+  Widget build(BuildContext context) => Container(
+    constraints: const BoxConstraints(minWidth: 17),
+    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+    decoration: BoxDecoration(
+      color: c,
+      borderRadius: BorderRadius.circular(9),
+      border: Border.all(color: C.bg, width: 1.5),
+    ),
+    child: Text(
+      n > 99 ? '99+' : '$n',
+      textAlign: TextAlign.center,
+      style: const TextStyle(fontFamily: sans, color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
+    ),
+  );
 }
 
 void _open(BuildContext context, Widget page) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
@@ -200,33 +322,64 @@ class _AlertBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     final d = m.alerts.first.det;
-    return AnimatedBuilder(
-      animation: pulse,
-      builder: (_, _) {
-        final a = 0.75 + 0.25 * math.sin(pulse.value * 2 * math.pi);
-        return GestureDetector(
-          onTap: () => _open(context, const AlertsView()),
-          child: Container(
-            margin: const EdgeInsets.fromLTRB(10, 6, 10, 2),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: AnimatedBuilder(
+        animation: pulse,
+        builder: (_, child) {
+          final a = 0.5 + 0.5 * math.sin(pulse.value * 2 * math.pi).abs();
+          return Container(
             decoration: BoxDecoration(
-              color: C.hot.withValues(alpha: 0.14 * a),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: C.hot.withValues(alpha: a)),
-              boxShadow: [BoxShadow(color: C.hot.withValues(alpha: 0.35 * a), blurRadius: 14)],
+              color: C.hot.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: C.hot.withValues(alpha: 0.35 + 0.35 * a)),
+              boxShadow: [BoxShadow(color: C.hot.withValues(alpha: 0.18 * a), blurRadius: 16)],
             ),
-            child: Row(children: [
-              Glow('ALERT x${m.alertsUnacked}', color: C.hot, size: 13, spacing: 1.2),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text('${m.labelOf(d.mac, d.descr)}  ${m.nodeName(d.node)}  ${d.rssi ?? ''} dBm',
-                    overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.text, fontSize: 13)),
+            child: child,
+          );
+        },
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(14),
+            onTap: () => _open(context, const AlertsView()),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+              child: Row(
+                children: [
+                  const Icon(PhF.warning, color: C.hot, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          m.alertsUnacked == 1 ? 'New device' : '${m.alertsUnacked} new devices',
+                          style: const TextStyle(fontFamily: sans, color: C.hot, fontSize: 13.5, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          '${m.labelOf(d.mac, d.descr)}  ·  ${m.nodeName(d.node)}  ·  ${d.rssi ?? '-'} dBm',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: T.meta.copyWith(color: C.soft),
+                        ),
+                      ],
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: m.ackAlerts,
+                    child: const Text(
+                      'Dismiss',
+                      style: TextStyle(fontFamily: sans, color: C.text, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
               ),
-              GestureDetector(onTap: m.ackAlerts, child: const Pill('ACK', color: C.green, small: true)),
-            ]),
+            ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
@@ -239,48 +392,62 @@ class _BottomNav extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     return Container(
-      decoration: const BoxDecoration(color: C.bg, border: Border(top: BorderSide(color: C.line2))),
+      decoration: const BoxDecoration(
+        color: C.bg,
+        border: Border(top: BorderSide(color: C.silkLine)),
+      ),
       child: SafeArea(
         top: false,
         child: SizedBox(
-          height: 60,
-          child: Row(children: [
-            for (var i = 0; i < _tabs.length; i++)
-              Expanded(
-                child: InkWell(
-                  onTap: () => onTap(i),
-                  child: Stack(alignment: Alignment.center, children: [
-                    if (tab == i)
-                      Positioned(
+          height: 62,
+          child: Row(
+            children: [
+              for (var i = 0; i < _tabs.length; i++)
+                Expanded(
+                  child: InkResponse(
+                    onTap: () => onTap(i),
+                    radius: 36,
+                    child: Stack(
+                      children: [
+                        // the chosen tab is lit by a rule along the top edge
+                        Positioned(
                           top: 0,
-                          left: 14,
-                          right: 14,
-                          child: Container(height: 3, decoration: BoxDecoration(color: _tabs[i].color, boxShadow: [BoxShadow(color: _tabs[i].color, blurRadius: 8)]))),
-                    Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(_tabs[i].icon, size: 22, color: tab == i ? _tabs[i].color : C.muted, shadows: tab == i ? glowOf(_tabs[i].color) : null),
-                      const SizedBox(height: 3),
-                      Text(_tabs[i].label,
-                          style: TextStyle(
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1,
-                              color: tab == i ? _tabs[i].color : C.muted,
-                              shadows: tab == i ? glowOf(_tabs[i].color, 6) : null)),
-                    ]),
-                    if (i == 3 && m.liveDrones > 0)
-                      Positioned(
-                        top: 5,
-                        right: 14,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                          decoration: BoxDecoration(color: C.hot, borderRadius: BorderRadius.circular(9), boxShadow: const [BoxShadow(color: C.hot, blurRadius: 6)]),
-                          child: Text('${m.liveDrones}', style: const TextStyle(color: C.bg, fontSize: 10, fontWeight: FontWeight.w800)),
+                          left: 18,
+                          right: 18,
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            height: 2,
+                            decoration: BoxDecoration(
+                              color: tab == i ? C.accent : Colors.transparent,
+                              boxShadow: tab == i ? [BoxShadow(color: C.accent.withValues(alpha: 0.6), blurRadius: 6)] : null,
+                            ),
+                          ),
                         ),
-                      ),
-                  ]),
+                        Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  Icon(tab == i ? _tabs[i].on : _tabs[i].icon, size: 21, color: tab == i ? C.accent : C.silk),
+                                  if (i == 3 && m.liveDrones > 0) Positioned(right: -10, top: -6, child: _Badge(m.liveDrones, C.hot)),
+                                ],
+                              ),
+                              const SizedBox(height: 5),
+                              Text(
+                                _tabs[i].label.toUpperCase(),
+                                style: TextStyle(fontFamily: mono, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 1.2, color: tab == i ? C.text : C.silk),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-          ]),
+            ],
+          ),
         ),
       ),
     );

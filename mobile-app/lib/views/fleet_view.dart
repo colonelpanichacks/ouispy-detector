@@ -6,6 +6,7 @@ import '../data/model.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'feed_view.dart';
 
 class FleetView extends StatelessWidget {
   const FleetView({super.key});
@@ -18,48 +19,73 @@ class FleetView extends StatelessWidget {
         final nodes = m.nodes.values.toList()
           ..sort((a, b) => a.isHome != b.isHome ? (a.isHome ? -1 : 1) : (a.online != b.online ? (a.online ? -1 : 1) : a.label.compareTo(b.label)));
         final h = m.home;
-        return RefreshIndicator(
-          color: C.orange,
-          onRefresh: App.I.dash.fetchState,
-          child: ListView(padding: const EdgeInsets.only(bottom: 20), children: [
-            if (h.isNotEmpty) ...[
-              SectionHead('HOME ${h['id'] ?? ''}', color: h['alive'] == false ? C.amber : C.green),
-              Panel(
-                glow: true,
-                color: h['alive'] == false ? C.amber : C.green,
-                child: Wrap(spacing: 16, runSpacing: 10, children: [
-                  _num('STATE', h['alive'] == false ? 'DOWN' : 'UP', h['alive'] == false ? C.amber : C.green),
-                  _num('VIA', '${h['source'] ?? '-'}'.toUpperCase(), C.cyan),
-                  _num('CHANNEL', '${h['ch'] ?? '-'}', C.accent),
-                  _num('RATE', '${h['rate'] ?? '-'}'.toUpperCase(), C.accent),
-                  _num('ENCRYPTED', h['enc'] == 1 ? 'YES' : 'NO', h['enc'] == 1 ? C.green : C.red),
-                  _num('RX', '${h['rx'] ?? 0}', C.sky),
-                  _num('TX', '${h['tx'] ?? 0}', C.sky),
-                  _num('DUP', '${h['dup'] ?? 0}', C.purple),
-                  _num('TX FAIL', '${h['txf'] ?? 0}', (h['txf'] ?? 0) == 0 ? C.green : C.red),
-                  _num('BAD', '${h['bad'] ?? 0}', (h['bad'] ?? 0) == 0 ? C.green : C.red),
-                  _num('PEERS', '${h['n'] ?? '-'}', C.orange),
-                  _num('UPTIME', h['up'] is num ? dur(h['up']) : '-', C.accent),
-                ]),
+        final up = h['alive'] != false;
+        Widget cell(String k, String v, {Color c = C.text}) => SizedBox(
+          width: 96,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(k, style: T.meta.copyWith(fontSize: 11.5)),
+              const SizedBox(height: 2),
+              Text(
+                v,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: T.code.copyWith(color: c, fontSize: 14, fontWeight: FontWeight.w600),
               ),
             ],
-            SectionHead('NODES  ${m.nodesOnline}/${nodes.length} ONLINE', color: C.orange),
-            if (nodes.isEmpty) const Empty('No nodes yet.'),
-            for (final (i, n) in nodes.indexed) _NodeCard(n, i),
-          ]),
+          ),
+        );
+        return RefreshIndicator(
+          color: C.accent,
+          onRefresh: App.I.dash.fetchState,
+          child: ListView(
+            padding: const EdgeInsets.only(bottom: 20),
+            children: [
+              if (h.isNotEmpty) ...[
+                SectionHead(
+                  'Home link',
+                  trailing: Row(
+                    children: [
+                      Dot(up ? C.green : C.amber, size: 7, halo: up),
+                      const SizedBox(width: 6),
+                      Text(up ? 'Up via ${'${h['source'] ?? '-'}'}' : 'Down', style: T.meta.copyWith(color: up ? C.green : C.amber)),
+                    ],
+                  ),
+                ),
+                Panel(
+                  margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 14,
+                    children: [
+                      cell('Node', '${h['id'] ?? '-'}'),
+                      cell('Channel', '${h['ch'] ?? '-'}'),
+                      cell('Rate', '${h['rate'] ?? '-'}'.toUpperCase()),
+                      cell('Encrypted', h['enc'] == 1 ? 'Yes' : 'No', c: h['enc'] == 1 ? C.green : C.red),
+                      cell('Peers', '${h['n'] ?? '-'}'),
+                      cell('Uptime', h['up'] is num ? dur(h['up']) : '-'),
+                      cell('RX', '${h['rx'] ?? 0}'),
+                      cell('TX', '${h['tx'] ?? 0}'),
+                      cell('Dupes', '${h['dup'] ?? 0}'),
+                      cell('TX fail', '${h['txf'] ?? 0}', c: (h['txf'] ?? 0) == 0 ? C.text : C.red),
+                      cell('Bad', '${h['bad'] ?? 0}', c: (h['bad'] ?? 0) == 0 ? C.text : C.red),
+                    ],
+                  ),
+                ),
+              ],
+              SectionHead('Nodes', trailing: Text('${m.nodesOnline} of ${nodes.length} online', style: T.meta)),
+              if (nodes.isEmpty) linkEmpty(context, 'No nodes yet', 'Nodes appear once the home node hears them.', icon: Ph.graph),
+              for (final (i, n) in nodes.indexed) _NodeCard(n, i),
+            ],
+          ),
         );
       },
     );
   }
 }
 
-Widget _num(String k, String v, Color c) => SizedBox(
-      width: 88,
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(k, style: const TextStyle(color: C.faint, fontSize: 9.5, fontWeight: FontWeight.w800, letterSpacing: 1)),
-        Glow(v, color: c, size: 14),
-      ]),
-    );
+String _cap(String s) => s.isEmpty ? s : s[0].toUpperCase() + s.substring(1);
 
 class _NodeCard extends StatelessWidget {
   const _NodeCard(this.n, this.i);
@@ -70,37 +96,87 @@ class _NodeCard extends StatelessWidget {
     final c = C.hue(n.hue, i);
     final st = n.online ? C.green : (n.silent ? C.amber : C.red);
     final ota = '${n.ota['state'] ?? ''}';
+    final icon = switch (n.kind) {
+      'sky-spy' => Ph.drone,
+      'wardriver' => Ph.mapPin,
+      _ => n.isHome ? Ph.house : Ph.cpu,
+    };
     return Panel(
-      glow: n.online,
-      color: n.online ? c : st,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => NodeDetail(id: n.id))),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Dot(st),
-          const SizedBox(width: 8),
-          Expanded(child: Glow(n.label, color: c, size: 16)),
-          if (n.isHome) const Pill('HOME', color: C.green, small: true),
-          if (!n.isHome) Pill(n.role.toUpperCase(), color: C.sky, small: true),
-          const SizedBox(width: 6),
-          Pill(n.kind.toUpperCase(), color: n.kind == 'detector' ? C.accent : (n.kind == 'sky-spy' ? C.hot : C.cyan), small: true),
-        ]),
-        const SizedBox(height: 6),
-        Row(children: [
-          Text(n.id, style: const TextStyle(color: C.soft, fontFamily: mono, fontSize: 12)),
-          const SizedBox(width: 10),
-          Text(n.online ? 'online' : (n.silent ? 'silent ${dur(n.age)}' : 'offline ${dur(n.age)}'), style: TextStyle(color: st, fontSize: 12, fontWeight: FontWeight.w700)),
-          const Spacer(),
-          if (n.rssi != null) ...[Text('${n.rssi} dBm ', style: TextStyle(color: C.rssi(n.rssi), fontSize: 12, fontFamily: mono)), RssiBar(n.rssi)],
-        ]),
-        const SizedBox(height: 6),
-        Wrap(spacing: 12, children: [
-          if (n.fw.isNotEmpty) Text('fw ${n.fw}', style: const TextStyle(color: C.muted, fontSize: 11)),
-          if (n.filters != null) Text('${n.filters} filters', style: TextStyle(color: n.filtersFresh == false ? C.amber : C.muted, fontSize: 11)),
-          if (n.peers != null) Text('${n.peers} peers', style: const TextStyle(color: C.muted, fontSize: 11)),
-          if (n.up != null) Text('up ${dur(n.up!)}', style: const TextStyle(color: C.muted, fontSize: 11)),
-          if (ota.isNotEmpty && ota != 'done') Text('OTA $ota ${n.ota['pct'] ?? ''}%', style: const TextStyle(color: C.hot, fontSize: 11, fontWeight: FontWeight.w700)),
-        ]),
-      ]),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              IconTile(icon, c),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(n.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.row),
+                        ),
+                        const SizedBox(width: 8),
+                        Tag(n.isHome ? 'Home' : _cap(n.role), color: n.isHome ? C.accent : C.muted),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        Text(n.id, style: T.code),
+                        const SizedBox(width: 8),
+                        Text(_cap(n.kind), style: T.meta),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Row(
+                    children: [
+                      Dot(st, size: 7, halo: n.online),
+                      const SizedBox(width: 6),
+                      Text(
+                        n.online ? 'Online' : (n.silent ? 'Silent' : 'Offline'),
+                        style: T.meta.copyWith(color: st, fontWeight: FontWeight.w600),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  if (n.online && n.rssi != null)
+                    Row(
+                      children: [
+                        Text('${n.rssi}', style: T.code.copyWith(fontSize: 11.5, color: C.rssi(n.rssi))),
+                        const SizedBox(width: 4),
+                        RssiBar(n.rssi),
+                      ],
+                    )
+                  else if (!n.online)
+                    Text(dur(n.age), style: T.code.copyWith(fontSize: 11.5)),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (n.fw.isNotEmpty) Tag(n.fw, icon: Ph.cpu),
+              if (n.filters != null) Tag('${n.filters} filters', icon: Ph.funnel, color: n.filtersFresh == false ? C.amber : C.muted),
+              if (n.peers != null) Tag('${n.peers} peers', icon: Ph.graph),
+              if (n.up != null) Tag('up ${dur(n.up!)}', icon: Ph.clock),
+              if (ota.isNotEmpty && ota != 'done') Tag('Updating ${n.ota['pct'] ?? ''}%', icon: Ph.arrowsClockwise, color: C.accent),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -123,139 +199,266 @@ class _NodeDetailState extends State<NodeDetail> {
     final m = App.I.m;
     final dash = App.I.dash;
     return Scaffold(
-      appBar: AppBar(title: Glow(widget.id, color: C.orange, size: 15, font: mono)),
+      appBar: AppBar(title: const Text('Node')),
       body: ListenableBuilder(
         listenable: m,
         builder: (context, _) {
           final n = m.nodes[widget.id];
-          if (n == null) return const Empty('This node is not in the fleet any more.');
+          if (n == null) return const Empty('Not in the fleet', body: 'This node is not in the fleet any more.', icon: Ph.graph);
           final c = C.hue(n.hue);
+          final st = n.online ? C.green : (n.silent ? C.amber : C.red);
           final cfg = n.cfg;
-          return ListView(padding: const EdgeInsets.only(bottom: 30), children: [
-            Panel(
-              glow: true,
-              color: n.online ? c : (n.silent ? C.amber : C.red),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Glow(n.label, color: c, size: 21),
-                Text(n.online ? 'online, ${n.isHome ? 'home' : n.role}, ${n.kind}' : '${n.silent ? 'SILENT' : 'OFFLINE'} for ${dur(n.age)}',
-                    style: TextStyle(color: n.online ? C.green : (n.silent ? C.amber : C.red), fontWeight: FontWeight.w700)),
-                const SizedBox(height: 10),
-                Wrap(spacing: 7, runSpacing: 7, children: [
-                  Pill('RENAME', color: C.accent, onTap: () async {
-                    final v = await askText(context, 'NAME THIS NODE', n.alias);
-                    if (v != null) dash.nodeSet(n.id, {'alias': v});
-                  }),
-                  Pill('COLOUR', color: c, onTap: () => _colour(n)),
-                ]),
-              ]),
-            ),
-            const SectionHead('CONTROL', color: C.hot),
-            Panel(
-              child: Column(children: [
-                _toggle('Buzzer', 'beeps on a detection', n.buzzer, (v) => dash.nodeCmd(n.id, 'audio', {'buzzer': v ? 1 : 0, 'led': n.led == 0 ? 0 : 1})),
-                _toggle('Alert LED', 'flashes on a detection', n.led, (v) => dash.nodeCmd(n.id, 'audio', {'buzzer': n.buzzer == 1 ? 1 : 0, 'led': v ? 1 : 0})),
-                const SizedBox(height: 8),
-                Wrap(spacing: 7, runSpacing: 8, children: [
-                  Pill('IDENTIFY', color: C.cyan, onTap: () => dash.nodeCmd(n.id, 'identify', {'secs': 10})),
-                  Pill('BEEP 3x', color: C.amber, onTap: () => dash.nodeCmd(n.id, 'locate', {'mode': 1})),
-                  Pill(locating ? 'LOCATE: ON' : 'LOCATE', color: C.orange, on: locating, onTap: () {
-                    setState(() => locating = !locating);
-                    dash.nodeCmd(n.id, 'locate', {'mode': locating ? 2 : 0});
-                  }),
-                  Pill('READ STATUS', color: C.green, onTap: () => dash.nodeCmd(n.id, 'status')),
-                  Pill('PRESET', color: C.purple, onTap: () => _preset(n)),
-                  Pill('REBOOT', color: C.red, onTap: () async {
-                    if (await confirm(context, 'REBOOT ${n.label}?', 'The node restarts and drops off the mesh for a few seconds.', yes: 'REBOOT')) {
-                      dash.nodeCmd(n.id, 'reboot');
-                    }
-                  }),
-                ]),
-              ]),
-            ),
-            const SectionHead('STATUS'),
-            Panel(
-              child: Column(children: [
-                KV('Node ID', n.id, monoValue: true),
-                if (n.fw.isNotEmpty) KV('Firmware', n.fw),
-                if (n.ch != null) KV('Mesh channel', '${n.ch}'),
-                if (n.filters != null) KV('Filters', '${n.filters}${n.filtersFresh == false ? '  (stale: not the list the dashboard has)' : ''}', color: n.filtersFresh == false ? C.amber : C.text),
-                if (cfg['fcrc'] != null) KV('Filter CRC', '${cfg['fcrc']}', monoValue: true),
-                if (n.rssi != null) KV('Link to home', '${n.rssi} dBm', color: C.rssi(n.rssi)),
-                if (n.lrssi != null) KV('Best neighbour', '${n.lrssi} dBm', color: C.rssi(n.lrssi)),
-                if (n.peers != null) KV('Peers', '${n.peers}'),
-                if (n.up != null) KV('Uptime', dur(n.up!)),
-                if (n.heap != null) KV('Free heap', '${(n.heap! / 1024).round()} KB'),
-                if (cfg['mode'] != null) KV('Mode', '${cfg['mode']}${cfg['locked'] == 1 ? ', burned in' : ''}'),
-                if (cfg['key'] != null) KV('Fleet key', cfg['key'] == 1 ? 'set (fp ${cfg['kfp'] ?? '?'})' : 'none', color: cfg['key'] == 1 ? C.green : C.red),
-                if (n.hasPos) KV('Placed at', '${n.lat!.toStringAsFixed(5)}, ${n.lon!.toStringAsFixed(5)}', monoValue: true),
-                if (n.ota.isNotEmpty) KV('Last OTA', '${n.ota['state'] ?? '-'} ${n.ota['pct'] ?? ''}%${n.ota['err'] != null && '${n.ota['err']}'.isNotEmpty ? ' (${n.ota['err']})' : ''}', color: n.ota['state'] == 'done' ? C.green : C.amber),
-              ]),
-            ),
-            if (n.nbr.isNotEmpty) ...[
-              const SectionHead('MESH NEIGHBOURS', color: C.lime),
-              Panel(
-                child: Column(children: [
-                  for (final s in n.nbr)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(children: [
-                        Expanded(child: Text(m.nodeName(s.node), style: TextStyle(color: C.hue(m.nodes[s.node]?.hue), fontWeight: FontWeight.w700))),
-                        if (s.age != 0) const Pill('DIRECT', color: C.green, small: true),
-                        const SizedBox(width: 8),
-                        Text('${s.rssi} dBm ', style: TextStyle(color: C.rssi(s.rssi), fontFamily: mono)),
-                        RssiBar(s.rssi),
-                      ]),
+          return ListView(
+            padding: const EdgeInsets.only(bottom: 30),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
+                child: Row(
+                  children: [
+                    IconTile(n.isHome ? Ph.house : Ph.cpu, c, size: 48),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(n.label, style: T.title),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Dot(st, size: 7, halo: n.online),
+                              const SizedBox(width: 6),
+                              Text(
+                                n.online ? 'Online · ${n.isHome ? 'home' : n.role} · ${n.kind}' : '${n.silent ? 'Silent' : 'Offline'} for ${dur(n.age)}',
+                                style: T.meta.copyWith(color: st),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
-                ]),
+                  ],
+                ),
               ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Btn(
+                        'Rename',
+                        icon: Ph.pencilSimple,
+                        expand: true,
+                        onTap: () async {
+                          final v = await askText(context, 'Name this node', n.alias);
+                          if (v != null) dash.nodeSet(n.id, {'alias': v});
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Btn('Colour', icon: Ph.palette, color: c, expand: true, onTap: () => _colour(n)),
+                    ),
+                  ],
+                ),
+              ),
+              Group(
+                title: 'On a detection',
+                children: [
+                  _toggle(
+                    Ph.speakerHigh,
+                    'Buzzer',
+                    'Beeps when it hears something',
+                    n.buzzer,
+                    (v) => dash.nodeCmd(n.id, 'audio', {'buzzer': v ? 1 : 0, 'led': n.led == 0 ? 0 : 1}),
+                  ),
+                  _toggle(
+                    Ph.lightbulb,
+                    'Alert LED',
+                    'Flashes when it hears something',
+                    n.led,
+                    (v) => dash.nodeCmd(n.id, 'audio', {'buzzer': n.buzzer == 1 ? 1 : 0, 'led': v ? 1 : 0}),
+                  ),
+                ],
+              ),
+              Group(
+                title: 'Actions',
+                children: [
+                  Tile(
+                    icon: Ph.lightbulb,
+                    color: C.cyan,
+                    title: 'Identify',
+                    subtitle: Text('Blinks its LED for 10 seconds', style: T.meta),
+                    onTap: () => dash.nodeCmd(n.id, 'identify', {'secs': 10}),
+                  ),
+                  Tile(icon: Ph.speakerHigh, color: C.amber, title: 'Beep three times', onTap: () => dash.nodeCmd(n.id, 'locate', {'mode': 1})),
+                  Tile(
+                    icon: Ph.gpsFix,
+                    color: C.orange,
+                    title: locating ? 'Stop locating' : 'Locate',
+                    subtitle: Text(
+                      locating ? 'Beeping until you stop it' : 'Beeps until you stop it, to find it',
+                      style: T.meta.copyWith(color: locating ? C.orange : null),
+                    ),
+                    trailing: locating ? const Dot(C.orange, halo: true) : null,
+                    onTap: () {
+                      setState(() => locating = !locating);
+                      dash.nodeCmd(n.id, 'locate', {'mode': locating ? 2 : 0});
+                    },
+                  ),
+                  Tile(icon: Ph.arrowsClockwise, color: C.green, title: 'Read status', onTap: () => dash.nodeCmd(n.id, 'status')),
+                  Tile(icon: Ph.funnel, color: C.violet, title: 'Install a filter preset', onTap: () => _preset(n)),
+                  Tile(
+                    icon: Ph.power,
+                    color: C.red,
+                    title: 'Reboot',
+                    titleColor: C.red,
+                    onTap: () async {
+                      if (await confirm(context, 'Reboot ${n.label}?', 'It restarts and drops off the mesh for a few seconds.', yes: 'Reboot')) {
+                        dash.nodeCmd(n.id, 'reboot');
+                      }
+                    },
+                  ),
+                ],
+              ),
+              Group(
+                title: 'Status',
+                children: [
+                  KV('Node ID', n.id, monoValue: true),
+                  if (n.fw.isNotEmpty) KV('Firmware', n.fw, monoValue: true),
+                  if (n.ch != null) KV('Mesh channel', '${n.ch}'),
+                  if (n.filters != null)
+                    KV('Filters', '${n.filters}${n.filtersFresh == false ? '\nNot the list the dashboard has' : ''}', color: n.filtersFresh == false ? C.amber : C.text),
+                  if (cfg['fcrc'] != null) KV('Filter CRC', '${cfg['fcrc']}', monoValue: true),
+                  if (n.rssi != null) KV('Link to home', '${n.rssi} dBm', color: C.rssi(n.rssi)),
+                  if (n.lrssi != null) KV('Best neighbour', '${n.lrssi} dBm', color: C.rssi(n.lrssi)),
+                  if (n.peers != null) KV('Peers', '${n.peers}'),
+                  if (n.up != null) KV('Uptime', dur(n.up!)),
+                  if (n.heap != null) KV('Free heap', '${(n.heap! / 1024).round()} KB'),
+                  if (cfg['mode'] != null) KV('Mode', '${cfg['mode']}${cfg['locked'] == 1 ? ', burned in' : ''}'),
+                  if (cfg['key'] != null) KV('Fleet key', cfg['key'] == 1 ? 'Set (fp ${cfg['kfp'] ?? '?'})' : 'None', color: cfg['key'] == 1 ? C.green : C.red),
+                  if (n.hasPos) KV('Placed at', '${n.lat!.toStringAsFixed(5)}, ${n.lon!.toStringAsFixed(5)}', monoValue: true),
+                  if (n.ota.isNotEmpty)
+                    KV(
+                      'Last update',
+                      '${n.ota['state'] ?? '-'} ${n.ota['pct'] ?? ''}%${n.ota['err'] != null && '${n.ota['err']}'.isNotEmpty ? ' (${n.ota['err']})' : ''}',
+                      color: n.ota['state'] == 'done' ? C.green : C.amber,
+                    ),
+                ],
+              ),
+              if (n.nbr.isNotEmpty)
+                Group(
+                  title: 'Mesh neighbours',
+                  children: [
+                    for (final s in n.nbr)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        child: Row(
+                          children: [
+                            Dot(C.hue(m.nodes[s.node]?.hue), size: 9),
+                            const SizedBox(width: 10),
+                            Expanded(child: Text(m.nodeName(s.node), style: T.row)),
+                            if (s.age != 0) ...[const Tag('Direct', color: C.green), const SizedBox(width: 8)],
+                            Text('${s.rssi} dBm', style: T.code.copyWith(color: C.rssi(s.rssi), fontSize: 12.5)),
+                            const SizedBox(width: 6),
+                            RssiBar(s.rssi),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
             ],
-          ]);
+          );
         },
       ),
     );
   }
 
-  Widget _toggle(String t, String sub, int? v, ValueChanged<bool> f) => SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: Text(t, style: const TextStyle(color: C.text, fontWeight: FontWeight.w600)),
-        subtitle: Text(v == null ? '$sub (state not reported yet)' : sub, style: const TextStyle(color: C.muted, fontSize: 12)),
-        value: v == 1,
-        onChanged: f,
-      );
-
-  void _colour(FleetNode n) => showModalBottomSheet(
-        context: context,
-        builder: (c) => SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Wrap(spacing: 14, runSpacing: 14, children: [
-              for (final h in nodeHues)
-                GestureDetector(
-                  onTap: () {
-                    App.I.dash.nodeSet(n.id, {'color': h});
-                    Navigator.pop(c);
-                  },
-                  child: Container(width: 40, height: 40, decoration: BoxDecoration(color: C.hue(h), shape: BoxShape.circle, boxShadow: [BoxShadow(color: C.hue(h), blurRadius: 10)])),
-                ),
-            ]),
+  Widget _toggle(IconData i, String t, String sub, int? v, ValueChanged<bool> f) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 6, 10, 6),
+    child: Row(
+      children: [
+        IconTile(i, v == 1 ? C.accent : C.muted),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(t, style: T.row),
+              const SizedBox(height: 2),
+              Text(v == null ? '$sub. State not reported yet.' : sub, style: T.meta),
+            ],
           ),
         ),
-      );
+        Switch(value: v == 1, onChanged: f),
+      ],
+    ),
+  );
+  void _colour(FleetNode n) => showModalBottomSheet(
+    context: context,
+    builder: (c) => SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Wrap(
+          spacing: 14,
+          runSpacing: 14,
+          children: [
+            for (final h in nodeHues)
+              GestureDetector(
+                onTap: () {
+                  App.I.dash.nodeSet(n.id, {'color': h});
+                  Navigator.pop(c);
+                },
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: C.hue(h),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: C.bg, width: 3),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
 
   Future<void> _preset(FleetNode n) async {
     final p = await showModalBottomSheet<String>(
       context: context,
       builder: (c) => SafeArea(
-        child: ListView(shrinkWrap: true, children: [
-          const SectionHead('INSTALL A FILTER PRESET', color: C.purple),
-          for (final p in presets)
-            ListTile(title: Text(p.toUpperCase(), style: const TextStyle(color: C.purple, fontWeight: FontWeight.w800)), onTap: () => Navigator.pop(c, p)),
-        ]),
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const SectionHead('Install a filter preset'),
+            for (final p in presets)
+              ListTile(
+                leading: const Icon(Ph.funnel, color: C.violet),
+                title: Text(_presetName(p)),
+                onTap: () => Navigator.pop(c, p),
+              ),
+          ],
+        ),
       ),
     );
     if (p == null || !mounted) return;
-    if (await confirm(context, 'INSTALL $p ON ${n.label}?', 'Installs the $p preset filters on the node.', yes: 'INSTALL', color: C.purple)) {
+    if (await confirm(
+      context,
+      'Install ${_presetName(p)} on ${n.label}?',
+      'Replaces the filters on the node with the ${_presetName(p)} preset.',
+      yes: 'Install',
+      color: C.violet,
+    )) {
       App.I.dash.nodeCmd(n.id, 'preset', {'name': p});
     }
   }
 }
+
+String _presetName(String p) => switch (p) {
+  'axon' => 'Axon',
+  'meta' => 'Meta',
+  'ipro' => 'iPro',
+  'verkada' => 'Verkada',
+  _ => p,
+};

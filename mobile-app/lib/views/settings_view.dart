@@ -79,128 +79,226 @@ class _SettingsViewState extends State<SettingsView> {
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
+    final (String link, Color lc) = switch (m.link) {
+      Link.up => ('Connected', C.green),
+      Link.connecting => ('Connecting', C.amber),
+      Link.refused => ('Refused', C.red),
+      Link.off => ('Not connected', C.red),
+    };
     return Scaffold(
-      appBar: AppBar(title: const Glow('SETTINGS', color: C.accent, size: 17, spacing: 2)),
+      appBar: AppBar(title: const Text('Settings')),
       body: ListenableBuilder(
         listenable: m,
-        builder: (context, _) => ListView(padding: const EdgeInsets.only(bottom: 40), children: [
-          const SectionHead('DASHBOARD'),
-          Panel(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              KV('Link', switch (m.link) { Link.up => 'connected', Link.connecting => 'connecting', Link.refused => 'refused', Link.off => 'off' },
-                  color: m.link == Link.up ? C.green : (m.link == Link.connecting ? C.amber : C.red)),
-              if (m.target.isNotEmpty) KV('Talking to', m.target, monoValue: true, color: C.cyan),
-              if (m.mode.isNotEmpty) KV('Mode', m.mode, color: m.mode == 'live' ? C.green : C.amber),
-              if (m.lastError.isNotEmpty) KV('Last error', m.lastError, color: C.red),
-              const SizedBox(height: 10),
-              TextField(controller: host, decoration: const InputDecoration(labelText: 'Host (blank = find it on this network)', hintText: '192.168.1.20, mac.tailnet.ts.net')),
-              const SizedBox(height: 10),
-              Row(children: [
-                SizedBox(width: 110, child: TextField(controller: port, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'Port'))),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: token,
-                    obscureText: !showToken,
-                    decoration: InputDecoration(
-                      labelText: 'Access token',
-                      hintText: 'home-dashboard/access_token',
-                      suffixIcon: IconButton(icon: Icon(showToken ? Icons.visibility_off : Icons.visibility, color: C.muted), onPressed: () => setState(() => showToken = !showToken)),
+        builder: (context, _) => ListView(
+          padding: const EdgeInsets.only(bottom: 40),
+          children: [
+            SectionHead(
+              'Dashboard',
+              trailing: Row(
+                children: [
+                  Dot(lc, size: 7, halo: m.link == Link.up),
+                  const SizedBox(width: 6),
+                  Text(link, style: T.meta.copyWith(color: lc)),
+                ],
+              ),
+            ),
+            Panel(
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (m.target.isNotEmpty) ...[
+                    Row(
+                      children: [
+                        const Icon(Ph.hardDrives, size: 16, color: C.muted),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(m.target.replaceFirst(RegExp(r'^https?://'), ''), style: T.code.copyWith(color: C.text, fontSize: 13)),
+                        ),
+                        if (m.mode.isNotEmpty && m.mode != 'live') Tag(m.mode, color: C.amber),
+                      ],
                     ),
+                    if (m.lastError.isNotEmpty && m.link != Link.up) ...[const SizedBox(height: 6), Text(m.lastError, style: T.meta.copyWith(color: C.red))],
+                    const SizedBox(height: 14),
+                  ],
+                  TextField(
+                    controller: host,
+                    style: T.row,
+                    decoration: const InputDecoration(labelText: 'Host', hintText: 'Blank finds it on this network'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 100,
+                        child: TextField(
+                          controller: port,
+                          style: T.row,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(labelText: 'Port'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: TextField(
+                          controller: token,
+                          style: T.row,
+                          obscureText: !showToken,
+                          decoration: InputDecoration(
+                            labelText: 'Access token',
+                            suffixIcon: IconButton(
+                              icon: Icon(showToken ? Ph.eyeSlash : Ph.eye, color: C.muted, size: 19),
+                              onPressed: () => setState(() => showToken = !showToken),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Home networks the dashboard trusts need no token. Tailscale or any other network needs the one in home-dashboard/access_token.',
+                    style: T.meta.copyWith(height: 1.4),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Btn('Connect', icon: Ph.plugs, kind: BtnKind.filled, expand: true, onTap: _apply),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Btn(scanning ? 'Searching' : 'Find on network', icon: Ph.magnifyingGlass, expand: true, onTap: scanning ? null : _scan),
+                      ),
+                    ],
+                  ),
+                  if (found != null) ...[
+                    const SizedBox(height: 10),
+                    if (found!.isEmpty) Text('Nothing on this network announces a dashboard.', style: T.meta.copyWith(color: C.amber)),
+                    for (final f in found!)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: const IconTile(Ph.hardDrives, C.accent),
+                        title: Text(f.name),
+                        subtitle: Text('${f.host}:${f.port}', style: T.code),
+                        trailing: const Icon(Ph.caretRight, size: 16, color: C.faint),
+                        onTap: () {
+                          host.text = f.host;
+                          port.text = '${f.port}';
+                          _apply();
+                        },
+                      ),
+                  ],
+                ],
+              ),
+            ),
+            Group(
+              title: 'Alerts on this phone',
+              children: [
+                _sw(Ph.bell, 'Notifications', 'One for each alert', s.notify, (v) => s.notify = v),
+                _sw(Ph.vibrate, 'Vibrate', 'Buzz on an alert', s.vibrate, (v) => s.vibrate = v),
+                _sw(Ph.speakerHigh, 'Sound', 'Notification sound', s.alertSound, (v) => s.alertSound = v),
+                _sw(Ph.speakerSlash, 'Silence everything', 'No banner, buzz or notification', m.muteAll, (v) => m.setMuteAll(v)),
+              ],
+            ),
+            if (m.muted.isNotEmpty)
+              Group(
+                title: 'Muted devices',
+                children: [
+                  for (final mac in m.muted)
+                    Tile(
+                      icon: Ph.bellSlash,
+                      title: m.labelOf(mac),
+                      subtitle: Text(mac, style: T.code),
+                      trailing: TextButton(
+                        onPressed: () {
+                          m.toggleMute(mac);
+                          s.muted = m.muted;
+                          s.save();
+                        },
+                        child: const Text(
+                          'Unmute',
+                          style: TextStyle(color: C.accent, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            Group(
+              title: 'Map',
+              children: [
+                KV('Layer', s.tileLayer, monoValue: true),
+                KV('Saved tiles', cache == null ? '...' : '${cache!.$1} tiles, ${(cache!.$2 / 1048576).toStringAsFixed(1)} MB'),
+                _sw(Ph.cloudArrowDown, 'Fetch new tiles', 'From the dashboard only. Off uses saved tiles only.', s.tilesOnline, (v) => s.tilesOnline = v),
+                Tile(
+                  icon: Ph.trash,
+                  color: C.red,
+                  title: 'Clear saved tiles',
+                  titleColor: C.red,
+                  onTap: () async {
+                    if (await confirm(context, 'Clear saved tiles?', 'The map will need the dashboard again to show anything.', yes: 'Clear')) {
+                      await TileCache.I.clear();
+                      _usage();
+                    }
+                  },
+                ),
+              ],
+            ),
+            Group(
+              title: 'App',
+              children: [
+                const KV('Version', '$appVersion ($appBuild)', monoValue: true),
+                Tile(
+                  icon: Ph.arrowsClockwise,
+                  color: C.accent,
+                  title: 'Check for update',
+                  subtitle: update.isEmpty ? null : Text(update, style: T.meta.copyWith(color: C.amber)),
+                  onTap: _checkUpdate,
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Ph.shieldCheck, size: 18, color: C.green),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text('Talks only to your own dashboard. No accounts, no analytics, no outside map servers.', style: T.meta.copyWith(height: 1.4))),
+                    ],
                   ),
                 ),
-              ]),
-              const SizedBox(height: 6),
-              const Text('Trusted home networks need no token; anything else (Tailscale, another Wi-Fi) does.',
-                  style: TextStyle(color: C.muted, fontSize: 11.5)),
-              const SizedBox(height: 12),
-              Wrap(spacing: 8, runSpacing: 8, children: [
-                Pill('CONNECT', color: C.green, onTap: _apply),
-                Pill(scanning ? 'SEARCHING' : 'FIND ON LAN', color: C.cyan, on: scanning, onTap: scanning ? null : _scan),
-              ]),
-              if (found != null) ...[
-                const SizedBox(height: 10),
-                if (found!.isEmpty) const Text('Nothing announced _ouispy._tcp here.', style: TextStyle(color: C.amber)),
-                for (final f in found!)
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.dns_outlined, color: C.cyan),
-                    title: Text(f.name, style: const TextStyle(color: C.text)),
-                    subtitle: Text('${f.host}:${f.port}', style: const TextStyle(color: C.soft, fontFamily: mono)),
-                    trailing: const Pill('USE', color: C.green, small: true),
-                    onTap: () {
-                      host.text = f.host;
-                      port.text = '${f.port}';
-                      _apply();
-                    },
-                  ),
               ],
-            ]),
-          ),
-          const SectionHead('ALERTS ON THIS PHONE', color: C.hot),
-          Panel(
-            child: Column(children: [
-              _sw('Notifications', 'one per alert', s.notify, (v) => s.notify = v),
-              _sw('Vibrate', 'buzz on an alert', s.vibrate, (v) => s.vibrate = v),
-              _sw('Sound', 'notification sound', s.alertSound, (v) => s.alertSound = v),
-              _sw('Silence everything', 'no banner, no buzz, no notification', m.muteAll, (v) => m.setMuteAll(v)),
-              if (m.muted.isNotEmpty) ...[
-                const Divider(),
-                for (final mac in m.muted)
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(m.labelOf(mac), style: const TextStyle(color: C.text)),
-                    subtitle: Text(mac, style: const TextStyle(color: C.soft, fontFamily: mono)),
-                    trailing: Pill('UNMUTE', color: C.green, small: true, onTap: () {
-                      m.toggleMute(mac);
-                      s.muted = m.muted;
-                      s.save();
-                    }),
-                  ),
-              ],
-            ]),
-          ),
-          const SectionHead('MAP', color: C.green),
-          Panel(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              KV('Layer', s.tileLayer, monoValue: true),
-              KV('Saved tiles', cache == null ? '...' : '${cache!.$1} tiles, ${(cache!.$2 / 1048576).toStringAsFixed(1)} MB', color: C.green),
-              _sw('Fetch new tiles', 'from the dashboard only; off = saved tiles only', s.tilesOnline, (v) => s.tilesOnline = v),
-              Wrap(spacing: 8, children: [
-                Pill('CLEAR SAVED TILES', color: C.red, onTap: () async {
-                  if (await confirm(context, 'CLEAR SAVED TILES?', 'The map needs the dashboard again to show anything.', yes: 'CLEAR')) {
-                    await TileCache.I.clear();
-                    _usage();
-                  }
-                }),
-              ]),
-            ]),
-          ),
-          const SectionHead('APP', color: C.purple),
-          Panel(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const KV('Version', '$appVersion ($appBuild)'),
-              const KV('Privacy', 'Talks only to your dashboard. No accounts, no analytics, no outside map servers.', color: C.green),
-              if (update.isNotEmpty) KV('Update', update, color: C.amber),
-              const SizedBox(height: 6),
-              Pill('CHECK FOR UPDATE', color: C.purple, onTap: _checkUpdate),
-            ]),
-          ),
-        ]),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _sw(String t, String sub, bool v, ValueChanged<bool> f) => SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        title: Text(t, style: const TextStyle(color: C.text, fontWeight: FontWeight.w600)),
-        subtitle: Text(sub, style: const TextStyle(color: C.muted, fontSize: 12)),
-        value: v,
-        onChanged: (x) {
-          setState(() => f(x));
-          s.save();
-          App.I.m.changed();
-        },
-      );
+  Widget _sw(IconData i, String t, String sub, bool v, ValueChanged<bool> f) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 6, 10, 6),
+    child: Row(
+      children: [
+        IconTile(i, v ? C.accent : C.muted),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(t, style: T.row),
+              const SizedBox(height: 2),
+              Text(sub, style: T.meta),
+            ],
+          ),
+        ),
+        Switch(
+          value: v,
+          onChanged: (x) {
+            setState(() => f(x));
+            s.save();
+            App.I.m.changed();
+          },
+        ),
+      ],
+    ),
+  );
 }
