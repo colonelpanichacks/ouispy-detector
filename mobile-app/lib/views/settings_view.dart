@@ -309,6 +309,18 @@ class _SettingsViewState extends State<SettingsView> {
                   Updater.I.save();
                 }),
                 Tile(
+                  icon: Ph.key,
+                  title: 'GitHub token',
+                  subtitle: Text(Updater.I.token.isEmpty ? 'None (a private releases repo needs a read-only one)' : 'Set', style: T.meta),
+                  onTap: () async {
+                    final v = await askText(context, 'Read-only GitHub token', '', hint: 'blank clears it');
+                    if (v == null) return;
+                    Updater.I.token = v;
+                    await Updater.I.save();
+                    if (mounted) setState(() {});
+                  },
+                ),
+                Tile(
                   icon: Ph.githubLogo,
                   title: 'Releases repo',
                   subtitle: Text(Updater.I.repo.isEmpty ? 'None: updates come from your dashboard' : Updater.I.repo, style: T.code),
