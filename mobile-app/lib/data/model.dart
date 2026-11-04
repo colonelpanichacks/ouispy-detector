@@ -11,7 +11,8 @@ const targetKeepS = 600.0; // drop a target this long after it was last heard
 const alertCooldownS = 600.0; // same MAC again within this = no new alert
 const droneLiveS = 60.0;
 const maxDets = 2000;
-const nodeSilentS = 90.0; // Tab5 NODE_TIMEOUT (75 s) plus a status round
+const nodeSilentS = 90.0;
+const watchGapS = 60.0; // a watched device alerts again after this long unheard // Tab5 NODE_TIMEOUT (75 s) plus a status round
 
 double _d(Object? v, [double def = 0]) => v is num ? v.toDouble() : def;
 double? _dn(Object? v) => v is num ? v.toDouble() : null;
@@ -204,8 +205,11 @@ class Mark {
 }
 
 class Alert {
-  Alert(this.det);
+  Alert(this.det, {this.watch});
   final Det det;
+
+  /// The watch-list rule it matched (watch.dart), or null for the plain new-device rule.
+  final String? watch;
 }
 
 /// The drones window: hours back (1/4/8/24), all time (-1), or a span (0).
@@ -260,6 +264,8 @@ class Model extends ChangeNotifier {
   int alertsUnacked = 0;
   bool muteAll = false;
   final Set<String> muted = {};
+  /// The watch list: the label of the rule a detection matches, or null.
+  String? Function(Det d)? watcher;
   final _alertCtl = StreamController<Alert>.broadcast();
   Stream<Alert> get alertStream => _alertCtl.stream;
   final _toastCtl = StreamController<String>.broadcast();
@@ -407,8 +413,11 @@ class Model extends ChangeNotifier {
     if (dets.length > maxDets) dets.removeLast();
     _target(d.mac, d.descr, d.type, d.dom, d.ts, d.seen, hit: true, name: d.name);
     _clock(d.ts);
-    if (live && cooled && !muted.contains(d.mac)) {
-      final a = Alert(d);
+    // a watched device alerts whenever it turns up, muted or not; anything else when it is new
+    final w = live ? watcher?.call(d) : null;
+    final watchDue = w != null && (prev == null || d.ts - prev.last > watchGapS);
+    if (live && ((cooled && !muted.contains(d.mac)) || watchDue)) {
+      final a = Alert(d, watch: w);
       alerts.insert(0, a);
       if (alerts.length > 200) alerts.removeLast();
       alertsUnacked++;

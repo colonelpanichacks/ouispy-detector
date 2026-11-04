@@ -38,7 +38,7 @@ class AlertOut {
     try {
       await _n.show(
         id: _id++ % 1000,
-        title: 'OUI-SPY ALERT  ${d.type.isEmpty ? d.dom.toUpperCase() : d.type}',
+        title: a.watch != null ? 'WATCHED  ${a.watch}' : 'OUI-SPY ALERT  ${d.type.isEmpty ? d.dom.toUpperCase() : d.type}',
         body: '$who  ${d.rssi ?? ''} dBm  heard by ${m.nodeName(d.node)}',
         notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails('alerts', 'Detections',

@@ -12,6 +12,7 @@ import 'data/lookup.dart';
 import 'data/model.dart';
 import 'data/settings.dart';
 import 'data/usb_link.dart';
+import 'data/watch.dart';
 import 'theme.dart';
 import 'views/alerts_view.dart';
 import 'views/devices_view.dart';
@@ -71,6 +72,8 @@ Future<void> main() async {
   final dash = Dashboard(m, s);
   App.I = App._(m, s, dash);
   await Lookup.I.load();
+  await Watch.I.load();
+  m.watcher = (d) => Watch.I.match(d, m.targets[d.mac]);
   AlertOut(m, s).start();
   // a node plugged in or pulled out switches the source (auto / usb)
   UsbLink.events?.listen((_) => Future.delayed(const Duration(milliseconds: 600), App.I.pick));
@@ -147,7 +150,9 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
               right: 0,
               height: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) + 6,
               child: Container(
-                decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: C.silkLine))),
+                decoration: const BoxDecoration(
+                  border: Border(bottom: BorderSide(color: C.silkLine)),
+                ),
                 child: ClipRect(
                   child: Stack(
                     children: [
@@ -167,7 +172,7 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
               child: Column(
                 children: [
                   _TopBar(pulse: pulse),
-              const SizedBox(height: 7),
+                  const SizedBox(height: 7),
                   if (m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
                   Expanded(
                     child: IndexedStack(index: tab, children: _pages),

@@ -9,6 +9,7 @@ import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import 'feed_view.dart';
+import 'watch_view.dart';
 
 class DevicesView extends StatefulWidget {
   const DevicesView({super.key});
@@ -18,6 +19,7 @@ class DevicesView extends StatefulWidget {
 
 class _DevicesViewState extends State<DevicesView> {
   bool history = false;
+  bool watch = false;
   String dom = '';
   String q = '';
   List<Map<String, dynamic>> rows = [];
@@ -64,73 +66,81 @@ class _DevicesViewState extends State<DevicesView> {
         ),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-          child: Seg<bool>(
-            items: const [(false, 'Heard now'), (true, 'History')],
-            value: history,
+          child: Seg<int>(
+            items: const [(0, 'Heard now'), (1, 'History'), (2, 'Watch')],
+            value: watch ? 2 : (history ? 1 : 0),
             onChanged: (v) {
-              setState(() => history = v);
-              if (v) _load();
+              setState(() {
+                watch = v == 2;
+                history = v == 1;
+              });
+              if (v == 1) _load();
             },
           ),
         ),
-        ChipRow(
-          children: [
-            for (final (k, l, ic) in [('', 'Everything', null), ('ble', 'Bluetooth', Ph.bluetooth), ('wifi', 'Wi-Fi', Ph.wifiHigh)])
-              Chip2(
-                l,
-                icon: ic,
-                on: dom == k,
-                onTap: () {
-                  setState(() => dom = k);
-                  if (history) _load();
-                },
-              ),
-          ],
-        ),
-        Expanded(
-          child: history
-              ? RefreshIndicator(
-                  color: C.accent,
-                  onRefresh: _load,
-                  child: loading && rows.isEmpty
-                      ? const Center(child: CircularProgressIndicator())
-                      : rows.isEmpty
-                      ? ListView(children: [linkEmpty(context, 'No matches', 'Nothing in the history matches that.', icon: Ph.magnifyingGlass)])
-                      : ListView.separated(
-                          itemCount: rows.length + 1,
-                          separatorBuilder: (_, i) => i == 0 ? const SizedBox() : const Divider(indent: 64),
-                          itemBuilder: (_, i) => i == 0
-                              ? Padding(
-                                  padding: const EdgeInsets.fromLTRB(20, 2, 16, 6),
-                                  child: Text('$total devices', style: T.meta),
-                                )
-                              : _HistRow(rows[i - 1]),
-                        ),
-                )
-              : ListenableBuilder(
-                  listenable: m,
-                  builder: (_, _) {
-                    final ql = q.toLowerCase();
-                    final list = m.liveTargets.where((t) {
-                      if (dom.isNotEmpty && t.dom != dom) return false;
-                      if (ql.isEmpty) return true;
-                      return '${t.mac} ${t.name} ${t.descr} ${m.aliasOf(t.mac)}'.toLowerCase().contains(ql);
-                    }).toList();
-                    if (list.isEmpty) {
-                      return linkEmpty(
-                        context,
-                        'Nothing nearby',
-                        'No device heard in the last 10 minutes. History has everything the mesh has ever heard.',
-                        icon: Ph.broadcast,
-                      );
-                    }
-                    return ListView.builder(padding: const EdgeInsets.only(bottom: 16), itemCount: list.length, itemBuilder: (_, i) => _TargetRow(list[i]));
-                  },
-                ),
-        ),
+        if (watch) const Expanded(child: WatchView()),
+        if (!watch) ..._lists(m),
       ],
     );
   }
+
+  List<Widget> _lists(Model m) => [
+    ChipRow(
+      children: [
+        for (final (k, l, ic) in [('', 'Everything', null), ('ble', 'Bluetooth', Ph.bluetooth), ('wifi', 'Wi-Fi', Ph.wifiHigh)])
+          Chip2(
+            l,
+            icon: ic,
+            on: dom == k,
+            onTap: () {
+              setState(() => dom = k);
+              if (history) _load();
+            },
+          ),
+      ],
+    ),
+    Expanded(
+      child: history
+          ? RefreshIndicator(
+              color: C.accent,
+              onRefresh: _load,
+              child: loading && rows.isEmpty
+                  ? const Center(child: CircularProgressIndicator())
+                  : rows.isEmpty
+                  ? ListView(children: [linkEmpty(context, 'No matches', 'Nothing in the history matches that.', icon: Ph.magnifyingGlass)])
+                  : ListView.separated(
+                      itemCount: rows.length + 1,
+                      separatorBuilder: (_, i) => i == 0 ? const SizedBox() : const Divider(indent: 64),
+                      itemBuilder: (_, i) => i == 0
+                          ? Padding(
+                              padding: const EdgeInsets.fromLTRB(20, 2, 16, 6),
+                              child: Text('$total devices', style: T.meta),
+                            )
+                          : _HistRow(rows[i - 1]),
+                    ),
+            )
+          : ListenableBuilder(
+              listenable: m,
+              builder: (_, _) {
+                final ql = q.toLowerCase();
+                final list = m.liveTargets.where((t) {
+                  if (dom.isNotEmpty && t.dom != dom) return false;
+                  if (ql.isEmpty) return true;
+                  return '${t.mac} ${t.name} ${t.descr} ${m.aliasOf(t.mac)}'.toLowerCase().contains(ql);
+                }).toList();
+                if (list.isEmpty) {
+                  return linkEmpty(
+                    context,
+                    'Nothing nearby',
+                    'No device heard in the last 10 minutes. History has everything the mesh has ever heard.',
+                    icon: Ph.broadcast,
+                  );
+                }
+                return ListView.builder(padding: const EdgeInsets.only(bottom: 16), itemCount: list.length, itemBuilder: (_, i) => _TargetRow(list[i]));
+              },
+            ),
+    ),
+  ];
 }
 
 class _TargetRow extends StatelessWidget {

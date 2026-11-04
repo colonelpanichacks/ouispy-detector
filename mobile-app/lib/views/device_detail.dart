@@ -7,7 +7,9 @@ import 'package:latlong2/latlong.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
+import '../data/watch.dart';
 import 'map_view.dart';
+import 'watch_view.dart';
 
 class DeviceDetail extends StatefulWidget {
   const DeviceDetail({super.key, required this.mac});
@@ -242,6 +244,25 @@ class _DeviceDetailState extends State<DeviceDetail> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Btn('Notes', icon: Ph.notePencil, onTap: _notes, kind: BtnKind.ghost, color: C.text, expand: true),
+                      ),
+                      const SizedBox(width: 8),
+                      // watch it: the phone (and the nodes, once installed) alert whenever it shows up
+                      ListenableBuilder(
+                        listenable: Watch.I,
+                        builder: (_, _) {
+                          final r = Rule('MAC', widget.mac.replaceAll(':', ''), title);
+                          final on = Watch.I.has(r);
+                          return Btn(
+                            '',
+                            icon: on ? PhF.eye : Ph.eye,
+                            kind: BtnKind.ghost,
+                            color: on ? C.accent : C.text,
+                            onTap: () async {
+                              if (on) return Watch.I.remove([r]);
+                              await addRule(context, t: 'MAC', id: widget.mac, d: title);
+                            },
+                          );
+                        },
                       ),
                       const SizedBox(width: 8),
                       Btn(

@@ -73,6 +73,7 @@ flutter:
     - assets/art/header.png
     - assets/art/title.png
     - assets/lookup.ldb
+    - assets/library.json
 
   fonts:
     - family: Inter

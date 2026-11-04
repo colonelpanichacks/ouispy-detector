@@ -17,6 +17,7 @@ import 'model.dart';
 import 'store.dart';
 import 'tri.dart';
 import 'usb_link.dart';
+import 'watch.dart';
 
 // fleet.py
 const _homeTimeout = 15.0, _nodeStale = 12.0, _legacyStale = 600.0, _dedupS = 6.0, _seenWindow = 60.0;
@@ -67,9 +68,10 @@ class _Node {
 }
 
 class _Job {
-  _Job(this.lines, this.want, this.label);
+  _Job(this.lines, this.want, this.label, {this.wants});
   final List<String> lines;
   final String want; // OK, CMD, RST, RFL
+  final List<String>? wants; // per line, when they differ (a filter transfer)
   final String label;
   final done = Completer<Map<String, dynamic>?>();
 }
@@ -595,6 +597,15 @@ class LocalMesh implements Backend {
         return _Job(['meshrechan $ch'], 'OK', 'channel $ch');
       case 'meshpush':
         return _Job(['meshpush'], 'CMD', 'filter push');
+      case 'filters_set' || 'filters_add' || 'filters_del':
+        // the filter transfer (commands.py): mfbegin|mfadd|mfdel <self|id>, mfdata <hex>..., mfend
+        final fs = [for (final f in (a['filters'] as List? ?? const [])) (f as Map).cast<String, dynamic>()];
+        final buf = encodeFilters(fs);
+        if (buf.isEmpty || buf.length > 4000) return null;
+        final verb = {'filters_set': 'mfbegin', 'filters_add': 'mfadd', 'filters_del': 'mfdel'}[op]!;
+        final hex = [for (var i = 0; i < buf.length; i += 96) buf.sublist(i, math.min(buf.length, i + 96)).map((x) => x.toRadixString(16).padLeft(2, '0')).join().toUpperCase()];
+        final lines = ['$verb ${local ? 'self' : tgt}', for (final h in hex) 'mfdata $h', 'mfend'];
+        return _Job(lines, 'OK', '${fs.length} filters', wants: [for (var i = 0; i < lines.length - 1; i++) 'OK', local ? 'OK' : 'CMD']);
       case 'raw':
         return _Job([_s(a['line'])], 'OK', _s(a['line']));
     }
@@ -650,7 +661,7 @@ class LocalMesh implements Backend {
       if (other != null && other != verb) return;
       return _settle(null, l.substring(3).trim());
     }
-    final ok = switch (j.want) {
+    final ok = switch (j.wants?[_jobLine] ?? j.want) {
       'OK' => l.startsWith('OK') || l.startsWith('CMD '),
       'CMD' => l.startsWith('CMD '),
       'RST' => l.startsWith('RST '),
