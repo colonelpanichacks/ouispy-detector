@@ -1,10 +1,14 @@
 // DRONES: every Remote ID drone heard in the window (1H/4H/8H/24H/ALL or a span), live
-// ones on top; a drone's page has its track, pilot, tag and past flights.
+// ones on top; a drone's page has its track, pilot, tag and past flights. Every drone shows
+// who made it at once (rid_lookup.dart: the serial's maker code, then the FAA registry).
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
+import 'package:latlong2/latlong.dart' hide Path;
 
 import '../data/model.dart';
+import '../data/rid_lookup.dart';
 import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
@@ -43,18 +47,22 @@ class DronesView extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     return ListenableBuilder(
-      listenable: m,
+      listenable: Listenable.merge([m, RidLookup.I]),
       builder: (context, _) {
         final w = m.droneWindow;
         final list = m.windowDrones;
         final live = list.where((d) => m.now - d.last < droneLiveS).toList();
         final past = list.where((d) => m.now - d.last >= droneLiveS).toList();
+        for (final d in list) {
+          RidLookup.I.ensure(d);
+        }
         return RefreshIndicator(
           color: C.accent,
           onRefresh: App.I.link.fetchDroneWindow,
           child: ListView(
             padding: const EdgeInsets.only(bottom: 20),
             children: [
+              _Kpis(all: list, live: live),
               ChipRow(
                 children: [
                   for (final h in [1, 4, 8, 24])
@@ -98,7 +106,8 @@ class _DroneCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = App.I.m;
     final h = d.hagl ?? d.alt;
-    final what = [if (d.maker.isNotEmpty) d.maker, if (d.ua.isNotEmpty) d.ua, if (d.vendor.isNotEmpty && d.maker.isEmpty) d.vendor].join(' · ');
+    final who = RidLookup.I.describe(d);
+    final what = [if (who.known) who.text, if (d.ua.isNotEmpty) d.ua].join(' · ');
     return Panel(
       edge: live ? C.hot : null,
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -115,7 +124,17 @@ class _DroneCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(d.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.row),
-                    if (what.isNotEmpty) ...[const SizedBox(height: 3), Text(what, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.meta)],
+                    if (what.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(what, maxLines: 1, overflow: TextOverflow.ellipsis, style: T.meta),
+                          ),
+                          if (who.known) ...[const SizedBox(width: 6), SourceMark(who.source)],
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -191,11 +210,15 @@ class _DroneDetailState extends State<DroneDetail> {
     return Scaffold(
       appBar: AppBar(title: const Text('Drone')),
       body: ListenableBuilder(
-        listenable: m,
+        listenable: Listenable.merge([m, RidLookup.I, followDrone]),
         builder: (context, _) {
           final d = m.drones[widget.mac];
           if (d == null) return const Empty('Not in this window', body: 'Widen the time window on the Drones tab to see it.', icon: Ph.drone);
+          RidLookup.I.ensure(d);
           final live = m.now - d.last < droneLiveS;
+          final who = RidLookup.I.describe(d);
+          final faa = RidLookup.I.state(d);
+          final following = followDrone.value == d.mac;
           final f = shown == null || flights == null || shown! >= flights!.length ? null : flights![shown!];
           final centre = d.hasPos ? LatLng(d.lat!, d.lon!) : (d.hasPilot ? LatLng(d.plat!, d.plon!) : fleetCenter());
           return ListView(
@@ -214,7 +237,23 @@ class _DroneDetailState extends State<DroneDetail> {
                           Text(d.label, style: T.title),
                           const SizedBox(height: 3),
                           Text(live ? 'In the air now' : 'Last heard ${clock(d.last, date: true)}', style: T.meta.copyWith(color: live ? C.hot : C.muted)),
-                          if (d.maker.isNotEmpty) Text(d.maker, style: T.meta),
+                          if (who.known) ...[
+                            const SizedBox(height: 3),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    who.text,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: T.meta.copyWith(color: C.soft),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                SourceMark(who.source),
+                              ],
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -261,6 +300,54 @@ class _DroneDetailState extends State<DroneDetail> {
                   ],
                 ),
               ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 2, 16, 6),
+                child: ActionStrip([
+                  (
+                    'Show on map',
+                    Ph.mapPin,
+                    C.accent,
+                    d.hasPos || d.hasPilot
+                        ? () {
+                            showDrone.value = null;
+                            showDrone.value = d.mac;
+                            Navigator.of(context).popUntil((r) => r.isFirst);
+                          }
+                        : null,
+                  ),
+                  (
+                    following ? 'Following' : 'Follow',
+                    following ? PhF.gpsFix : Ph.gpsFix,
+                    C.hot,
+                    following
+                        ? () => followDrone.value = null
+                        : (d.hasPos
+                              ? () {
+                                  followDrone.value = d.mac;
+                                  Navigator.of(context).popUntil((r) => r.isFirst);
+                                }
+                              : null),
+                  ),
+                  (
+                    faa == FaaState.pending ? 'Looking up' : 'FAA lookup',
+                    Ph.magnifyingGlass,
+                    C.green,
+                    d.serial.trim().isEmpty || faa == FaaState.pending
+                        ? null
+                        : () async {
+                            final e = await RidLookup.I.lookup(d, force: true);
+                            if (e == null) return;
+                            m.toast(
+                              !e.ok
+                                  ? 'FAA lookup failed: no answer'
+                                  : e.items.isEmpty
+                                  ? 'no FAA record for ${d.serial}'
+                                  : 'FAA: ${RidLookup.I.describe(d).text}',
+                            );
+                          },
+                  ),
+                ]),
+              ),
               if (centre != null)
                 Panel(
                   padding: EdgeInsets.zero,
@@ -292,6 +379,34 @@ class _DroneDetailState extends State<DroneDetail> {
                     ),
                   ),
                 ),
+              if (d.hasPos || d.track.isNotEmpty)
+                Panel(
+                  margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(d.hasPilot ? 'RADAR · AROUND THE PILOT' : 'RADAR · TRACK', style: T.silk),
+                      const SizedBox(height: 8),
+                      AspectRatio(
+                        aspectRatio: 1,
+                        child: CustomPaint(
+                          painter: DroneRadar(d, live: live),
+                          size: Size.infinite,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Group(
+                title: 'Who made it',
+                children: [
+                  KV('Maker', who.known ? '${who.text}  ·  ${who.source.toUpperCase()}' : '-', color: who.known ? sourceColor(who.source) : C.muted),
+                  if (who.idt.isNotEmpty) KV('ID type', who.idt),
+                  if (who.code.isNotEmpty) KV('Maker code', _codeText(d.serial), monoValue: true),
+                  KV('FAA record', _faaText(faa, who, d), color: faa == FaaState.found ? C.green : (faa == FaaState.failed ? C.red : C.muted)),
+                ],
+              ),
               Group(
                 title: live ? 'In the air' : 'Last report',
                 children: [
@@ -368,4 +483,256 @@ class _DroneDetailState extends State<DroneDetail> {
       ),
     );
   }
+}
+
+String _codeText(String serial) {
+  final p = RidSerial.parse(serial);
+  if (p == null) return '-';
+  final mk = p.maker;
+  final len = p.declaredLen == null
+      ? 'length char ${p.lengthChar} unreadable'
+      : (p.lengthOk ? '${p.declaredLen} chars' : 'says ${p.declaredLen} chars, has ${p.body.length}');
+  return '${p.code} = ${mk ?? 'not in the table'}  ·  $len';
+}
+
+String _faaText(FaaState s, RidInfo who, Drone d) => switch (s) {
+  FaaState.pending => 'looking up',
+  FaaState.found => [who.source == RidSource.faa ? who.text : 'on record', if (who.faaStatus.isNotEmpty) '(${who.faaStatus})'].join(' '),
+  FaaState.missing => 'no record for this serial',
+  FaaState.failed => 'no answer, tries again in an hour',
+  FaaState.none =>
+    d.serial.trim().isEmpty
+        ? 'no serial broadcast yet'
+        : !faaIdTypes.contains(ridIdType(d.raw['idt']))
+        ? 'not a serial the FAA indexes'
+        : (RidLookup.I.faaLookup ? 'not looked up yet' : 'automatic lookup is off'),
+};
+
+Color sourceColor(String source) => switch (source) {
+  RidSource.faa => C.green,
+  RidSource.serial => C.accent,
+  RidSource.vendor => C.amber,
+  _ => C.muted,
+};
+
+/// Where a maker came from, as a small printed tag: FAA / SERIAL CODE / RADIO VENDOR.
+class SourceMark extends StatelessWidget {
+  const SourceMark(this.source, {super.key});
+  final String source;
+  @override
+  Widget build(BuildContext context) {
+    if (source.isEmpty) return const SizedBox.shrink();
+    final c = sourceColor(source);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(2),
+        border: Border.all(color: c.withValues(alpha: 0.5)),
+      ),
+      child: Text(source.toUpperCase(), style: T.silk.copyWith(fontSize: 9, letterSpacing: 0.8, color: c)),
+    );
+  }
+}
+
+/// The drones window's readouts, as the web dashboard's: live, airborne, pilots located,
+/// highest AGL, in window.
+class _Kpis extends StatelessWidget {
+  const _Kpis({required this.all, required this.live});
+  final List<Drone> all, live;
+  @override
+  Widget build(BuildContext context) {
+    final airborne = live.where((d) => d.status == 'Airborne').length;
+    final pilots = live.where((d) => d.hasPilot).length;
+    double hi = -1;
+    for (final d in live) {
+      if (d.hagl != null) hi = math.max(hi, d.hagl!);
+    }
+    Widget cell(Widget w, {bool right = true, bool bottom = true}) => Container(
+      decoration: BoxDecoration(
+        border: Border(
+          right: right ? const BorderSide(color: C.silkLine) : BorderSide.none,
+          bottom: bottom ? const BorderSide(color: C.silkLine) : BorderSide.none,
+        ),
+      ),
+      child: w,
+    );
+    return Panel(
+      padding: EdgeInsets.zero,
+      margin: const EdgeInsets.fromLTRB(16, 18, 16, 4),
+      child: Column(
+        children: [
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(
+                  child: cell(Stat('Live', '${live.length}', icon: Ph.drone, color: live.isNotEmpty ? C.hot : C.text)),
+                ),
+                Expanded(child: cell(Stat('Airborne', '$airborne', color: airborne > 0 ? C.hot : C.text))),
+                Expanded(child: cell(Stat('Pilots located', '$pilots', color: pilots > 0 ? C.orange : C.text), right: false)),
+              ],
+            ),
+          ),
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Expanded(child: cell(Stat('Highest AGL', hi >= 0 ? '${hi.round()} m' : '-'), bottom: false)),
+                Expanded(child: cell(Stat('In window', '${all.length}'), right: false, bottom: false)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The Tab5's radar box: the drone's track around its pilot (or around itself with no
+/// pilot), north up, rings at a round number of metres, labelled.
+class DroneRadar extends CustomPainter {
+  DroneRadar(this.d, {required this.live});
+  final Drone d;
+  final bool live;
+
+  static double niceStep(double span) {
+    final raw = span / 3;
+    final p = math.pow(10, (math.log(raw) / math.ln10).floor()).toDouble();
+    for (final k in [1.0, 2.0, 5.0, 10.0]) {
+      if (k * p >= raw) return k * p;
+    }
+    return 10 * p;
+  }
+
+  @override
+  void paint(Canvas c, Size s) {
+    final side = math.min(s.width, s.height);
+    final ctr = Offset(s.width / 2, s.height / 2);
+    final rad = side / 2 - 10;
+    final col = live ? C.hot : C.muted;
+    final track = d.track;
+    final double ola, olo;
+    if (d.hasPilot) {
+      ola = d.plat!;
+      olo = d.plon!;
+    } else if (d.hasPos) {
+      ola = d.lat!;
+      olo = d.lon!;
+    } else if (track.isNotEmpty) {
+      ola = track.last[0];
+      olo = track.last[1];
+    } else {
+      return;
+    }
+    final kx = 111320.0 * math.cos(ola * math.pi / 180);
+    Offset m(double la, double lo) => Offset((lo - olo) * kx, (la - ola) * 111320.0);
+    var span = 30.0; // metres from the centre to the edge, at least
+    for (final p in [
+      ...track,
+      if (d.hasPos) [d.lat!, d.lon!],
+    ]) {
+      final o = m(p[0], p[1]);
+      span = math.max(span, math.max(o.dx.abs(), o.dy.abs()) * 1.15);
+    }
+    final step = niceStep(span);
+    span = math.max(span, step);
+    Offset px(double la, double lo) {
+      final o = m(la, lo);
+      return ctr + Offset(o.dx, -o.dy) * (rad / span);
+    }
+
+    // ground and rings
+    c.drawCircle(ctr, rad, Paint()..color = C.panel.withValues(alpha: 0.6));
+    final ring = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1
+      ..color = C.silkLine;
+    for (var r = step; r <= span + 0.01; r += step) {
+      final rr = r / span * rad;
+      c.drawCircle(ctr, rr, ring);
+      _text(c, '${r.round()} m', ctr + Offset(rr * 0.7071 + 3, -rr * 0.7071 - 12), C.silk);
+    }
+    c.drawCircle(ctr, rad, ring..color = C.silkMark);
+    c.drawLine(ctr - Offset(rad, 0), ctr + Offset(rad, 0), ring..color = C.silkLine.withValues(alpha: 0.6));
+    c.drawLine(ctr - Offset(0, rad), ctr + Offset(0, rad), ring);
+    _text(c, 'N', ctr + Offset(-4, -rad - 1), C.silk);
+
+    // track, oldest faint
+    for (var i = 1; i < track.length; i++) {
+      c.drawLine(
+        px(track[i - 1][0], track[i - 1][1]),
+        px(track[i][0], track[i][1]),
+        Paint()
+          ..strokeWidth = 2
+          ..strokeCap = StrokeCap.round
+          ..color = col.withValues(alpha: 0.3 + 0.7 * i / track.length),
+      );
+    }
+    // pilot at the centre, dashed line to the drone
+    if (d.hasPilot) {
+      c.drawCircle(ctr, 5, Paint()..color = C.orange);
+      c.drawCircle(
+        ctr,
+        8,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2
+          ..color = C.orange.withValues(alpha: 0.6),
+      );
+    }
+    if (d.hasPos) {
+      final p = px(d.lat!, d.lon!);
+      if (d.hasPilot) {
+        final v = p - ctr, n = v.distance;
+        final dash = Paint()
+          ..strokeWidth = 1.2
+          ..color = C.orange.withValues(alpha: 0.7);
+        for (double t = 10; t < n - 8; t += 9) {
+          c.drawLine(ctr + v * (t / n), ctr + v * (math.min(t + 5, n - 8) / n), dash);
+        }
+      }
+      // the drone: an arrowhead along its heading, a dot without one
+      final fill = Paint()..color = col;
+      if (d.hdg != null) {
+        final a = d.hdg! * math.pi / 180;
+        Offset r(double x, double y) => p + Offset(x * math.cos(a) - y * math.sin(a), x * math.sin(a) + y * math.cos(a));
+        c.drawPath(
+          Path()
+            ..moveTo(r(0, -9).dx, r(0, -9).dy)
+            ..lineTo(r(6, 6).dx, r(6, 6).dy)
+            ..lineTo(r(0, 3).dx, r(0, 3).dy)
+            ..lineTo(r(-6, 6).dx, r(-6, 6).dy)
+            ..close(),
+          fill,
+        );
+      } else {
+        c.drawCircle(p, 5, fill);
+      }
+      if (live) {
+        c.drawCircle(
+          p,
+          11,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 1
+            ..color = col.withValues(alpha: 0.5),
+        );
+      }
+    }
+    _text(c, 'EDGE ${span.round()} M', Offset(s.width - 4, 0), C.silk, right: true);
+  }
+
+  void _text(Canvas c, String t, Offset at, Color col, {bool right = false}) {
+    final tp = TextPainter(
+      text: TextSpan(
+        text: t,
+        style: T.silk.copyWith(fontSize: 9.5, color: col),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    tp.paint(c, right ? at - Offset(tp.width, 0) : at);
+  }
+
+  @override
+  bool shouldRepaint(DroneRadar o) => true;
 }

@@ -13,6 +13,7 @@ import '../theme.dart';
 import 'common.dart';
 import 'drones_view.dart';
 import 'map_edit.dart';
+import '../data/rid_lookup.dart';
 
 /// The base layer, and its labels on top when it has them (tiles.dart mapLayers).
 TileLayer _tiles(String id, {bool over = false}) {
@@ -169,8 +170,23 @@ class _MapViewState extends State<MapView> {
   bool _cancel = false;
 
   @override
+  @override
+  void dispose() {
+    showDrone.removeListener(_show);
+    super.dispose();
+  }
+
+  void _show() {
+    final d = App.I.m.drones[showDrone.value ?? ''];
+    if (d == null) return;
+    final p = d.hasPos ? LatLng(d.lat!, d.lon!) : (d.hasPilot ? LatLng(d.plat!, d.plon!) : null);
+    showDrone.value = null;
+    if (p != null) WidgetsBinding.instance.addPostFrameCallback((_) => ctl.move(p, 17));
+  }
+
   void initState() {
     super.initState();
+    showDrone.addListener(_show);
     App.I.dash.tileLayers().then((l) {
       TileCache.I.dashLayers = l.keys.toSet();
       if (mounted && l.isNotEmpty) setState(() => layers = l);
@@ -379,6 +395,8 @@ class _MapViewState extends State<MapView> {
       listenable: m,
       builder: (context, _) {
         final center = fleetCenter();
+        final fd = followDrone.value == null ? null : m.drones[followDrone.value!];
+        if (fd != null && fd.hasPos) WidgetsBinding.instance.addPostFrameCallback((_) => ctl.move(LatLng(fd.lat!, fd.lon!), ctl.camera.zoom));
         if (centeredFor != m.target && center != null) {
           centeredFor = m.target;
           WidgetsBinding.instance.addPostFrameCallback((_) => _fit());
@@ -423,6 +441,10 @@ class _MapViewState extends State<MapView> {
                 backgroundColor: const Color(0xFF0A0D12),
                 onLongPress: (_, p) => _dropPin(p),
                 onTap: (_, p) => _tap(p),
+                // dragging the map stops following a drone
+                onPositionChanged: (_, gesture) {
+                  if (gesture && followDrone.value != null) followDrone.value = null;
+                },
               ),
               children: [
                 dashTiles(),
@@ -592,6 +614,26 @@ class _MapViewState extends State<MapView> {
                 ],
               ),
             ),
+            if (followDrone.value != null)
+              Positioned(
+                left: 8,
+                top: 76,
+                child: _float(
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(PhF.drone, size: 15, color: C.hot),
+                      const SizedBox(width: 6),
+                      Text('Following ${m.drones[followDrone.value!]?.label ?? 'drone'}', style: T.meta.copyWith(color: C.text)),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: () => setState(() => followDrone.value = null),
+                        child: const Icon(Ph.x, size: 16, color: C.silk),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             if (_modeBar() != null) Positioned(left: 8, right: 64, bottom: 14, child: _modeBar()!),
             if (prefetch != null)
               Positioned(

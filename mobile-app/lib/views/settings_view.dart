@@ -6,6 +6,7 @@ import '../data/dashboard.dart';
 import '../data/local_mesh.dart';
 import '../data/model.dart';
 import '../data/tiles.dart';
+import '../data/rid_lookup.dart';
 import '../data/updater.dart';
 import '../main.dart';
 import '../theme.dart';
@@ -271,6 +272,21 @@ class _SettingsViewState extends State<SettingsView> {
                       _usage();
                     }
                   },
+                ),
+              ],
+            ),
+            Group(
+              title: 'Remote ID',
+              children: [
+                ListenableBuilder(
+                  listenable: RidLookup.I,
+                  builder: (_, _) => _sw(
+                    Ph.identificationCard,
+                    'Look up drone serials in the FAA registry',
+                    'Make and model the moment a serial is heard',
+                    RidLookup.I.faaLookup,
+                    (v) => RidLookup.I.setFaaLookup(v),
+                  ),
                 ),
               ],
             ),

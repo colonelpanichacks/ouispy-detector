@@ -11,6 +11,7 @@ import 'data/local_mesh.dart';
 import 'data/lookup.dart';
 import 'data/model.dart';
 import 'data/settings.dart';
+import 'data/rid_lookup.dart';
 import 'data/updater.dart';
 import 'data/usb_link.dart';
 import 'data/watch.dart';
@@ -75,6 +76,7 @@ Future<void> main() async {
   await Lookup.I.load();
   await Watch.I.load();
   await Updater.I.load();
+  await RidLookup.I.load();
   m.watcher = (d) => Watch.I.match(d, m.targets[d.mac]);
   AlertOut(m, s).start();
   // a node plugged in or pulled out switches the source (auto / usb)
@@ -128,7 +130,15 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(content: Text(t), duration: const Duration(seconds: 2)));
-    });
+    }); // a drone's Show on map / Follow land on the map tab
+    showDrone.addListener(_toMap);
+    followDrone.addListener(_toMap);
+  }
+
+  void _toMap() {
+    if ((showDrone.value ?? followDrone.value) == null || !mounted) return;
+    setState(() => tab = 2);
+    App.I.link.fetchDroneWindow();
   }
 
   @override
