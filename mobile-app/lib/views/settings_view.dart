@@ -86,8 +86,10 @@ class _SettingsViewState extends State<SettingsView> {
       Link.refused => ('Refused', C.red),
       Link.off => ('Not connected', C.red),
     };
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+    return ReconPage(
+      title: 'Settings',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (context, _) => ListView(

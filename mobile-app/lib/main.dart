@@ -165,46 +165,10 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
     return ListenableBuilder(
       listenable: m,
       builder: (context, _) => Scaffold(
-        body: Stack(
-          children: [
-            // the art lives in the header only: clipped at its foot, where a silk rule closes it off
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              height: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) + 6,
-              child: Container(
-                decoration: const BoxDecoration(
-                  border: Border(bottom: BorderSide(color: C.silkLine)),
-                ),
-                child: ClipRect(
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _bandCentre(context),
-                        left: 0,
-                        right: 0,
-                        child: const HeaderArt(),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            SafeArea(
-              bottom: false,
-              child: Column(
-                children: [
-                  _TopBar(pulse: pulse),
-                  const SizedBox(height: 7),
-                  if (m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
-                  Expanded(
-                    child: IndexedStack(index: tab, children: _pages),
-                  ),
-                ],
-              ),
-            ),
-          ],
+        body: ReconFrame(
+          pulse: pulse,
+          banner: true,
+          body: IndexedStack(index: tab, children: _pages),
         ),
         bottomNavigationBar: _BottomNav(
           tab: tab,
@@ -218,9 +182,120 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
   }
 }
 
-class _TopBar extends StatelessWidget {
-  const _TopBar({required this.pulse});
+/// The header every screen shares: the board's art and moon behind the title, the status
+/// and the band's two buttons, closed off by a silk rule, then the screen's own content.
+class ReconFrame extends StatelessWidget {
+  const ReconFrame({super.key, required this.pulse, required this.body, this.leading, this.trailing, this.banner = false});
   final Animation<double> pulse;
+  final Widget body;
+  final Widget? leading, trailing;
+  final bool banner;
+  @override
+  Widget build(BuildContext context) {
+    final m = App.I.m;
+    return ListenableBuilder(
+      listenable: m,
+      builder: (context, _) => Stack(
+        children: [
+          // the art lives in the header only: clipped at its foot, where a silk rule closes it off
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            height: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) + 6,
+            child: Container(
+              decoration: const BoxDecoration(
+                border: Border(bottom: BorderSide(color: C.silkLine)),
+              ),
+              child: ClipRect(
+                child: Stack(
+                  children: [
+                    Positioned(
+                      top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _bandCentre(context),
+                      left: 0,
+                      right: 0,
+                      child: const HeaderArt(),
+                    ),
+                    Positioned(
+                      top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _moonD(context) / 2,
+                      left: MediaQuery.sizeOf(context).width / 2 - _moonD(context) / 2,
+                      child: Moon(size: _moonD(context), live: isLive(m)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            bottom: false,
+            child: Column(
+              children: [
+                _TopBar(pulse: pulse, leading: leading, trailing: trailing),
+                const SizedBox(height: 7),
+                if (banner && m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
+                Expanded(child: body),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A page opened from a tab, under the same header: back in the bell's place, the page's
+/// name printed in silk under the rule, its actions beside the name.
+class ReconPage extends StatefulWidget {
+  const ReconPage({super.key, required this.title, required this.body, this.actions = const []});
+  final String title;
+  final Widget body;
+  final List<Widget> actions;
+  @override
+  State<ReconPage> createState() => _ReconPageState();
+}
+
+class _ReconPageState extends State<ReconPage> with SingleTickerProviderStateMixin {
+  late final AnimationController pulse = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..repeat();
+
+  @override
+  void dispose() {
+    pulse.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: ReconFrame(
+      pulse: pulse,
+      leading: _RoundBtn(Ph.arrowLeft, C.text, () => Navigator.of(context).maybePop()),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 2, 8, 2),
+            child: SizedBox(
+              height: 36,
+              child: Row(
+                children: [
+                  Text(widget.title.toUpperCase(), style: T.label.copyWith(fontSize: 12, color: C.soft)),
+                  const SizedBox(width: 10),
+                  Expanded(child: Container(height: 1, color: C.silkLine)),
+                  ...widget.actions,
+                ],
+              ),
+            ),
+          ),
+          Expanded(child: widget.body),
+        ],
+      ),
+    ),
+  );
+}
+
+class _TopBar extends StatelessWidget {
+  const _TopBar({required this.pulse, this.leading, this.trailing});
+  final Animation<double> pulse;
+  final Widget? leading, trailing; // the band's two ends: the bell and settings, or a page's back and its action
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
@@ -238,6 +313,7 @@ class _TopBar extends StatelessWidget {
             : ('Live', C.green),
     };
     final down = c == C.red;
+    final live = isLive(m);
     // cut out of the art like the title: a black outline round the letters
     const cut = [
       Shadow(color: C.bg, blurRadius: 0, offset: Offset(1.2, 0)),
@@ -251,15 +327,17 @@ class _TopBar extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          AnimatedBuilder(
-            animation: pulse,
-            builder: (_, _) => Container(
-              padding: const EdgeInsets.all(1.5),
-              decoration: const BoxDecoration(color: C.bg, shape: BoxShape.circle),
-              child: Dot(c.withValues(alpha: down ? 0.45 + 0.55 * math.sin(pulse.value * 2 * math.pi).abs() : 1), size: 7, halo: !down),
+          if (!live) ...[
+            AnimatedBuilder(
+              animation: pulse,
+              builder: (_, _) => Container(
+                padding: const EdgeInsets.all(1.5),
+                decoration: const BoxDecoration(color: C.bg, shape: BoxShape.circle),
+                child: Dot(c.withValues(alpha: down ? 0.45 + 0.55 * math.sin(pulse.value * 2 * math.pi).abs() : 1), size: 7, halo: !down),
+              ),
             ),
-          ),
-          const SizedBox(width: 6),
+            const SizedBox(width: 6),
+          ],
           Text(
             state.toUpperCase(),
             style: TextStyle(fontFamily: mono, color: c, fontSize: 11.5, fontWeight: FontWeight.w600, letterSpacing: 1.6, shadows: cut),
@@ -276,9 +354,10 @@ class _TopBar extends StatelessWidget {
           height: _titleH(context) - _statusH,
           child: Center(child: TitleArt(width: _titleW(context))),
         ),
+        // the status sits right above the moon, tucked against it
         SizedBox(
           height: _statusH,
-          child: Center(child: status),
+          child: Align(alignment: Alignment.bottomCenter, child: status),
         ),
         SizedBox(
           height: _barH(context),
@@ -287,19 +366,21 @@ class _TopBar extends StatelessWidget {
               SizedBox(
                 width: end,
                 child: Center(
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      _RoundBtn(m.alertsUnacked > 0 ? PhF.bellRinging : Ph.bell, m.alertsUnacked > 0 ? C.hot : C.text, () => _open(context, const AlertsView())),
-                      if (m.alertsUnacked > 0) Positioned(right: -2, top: -2, child: _Badge(m.alertsUnacked, C.hot)),
-                    ],
-                  ),
+                  child:
+                      leading ??
+                      Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          _RoundBtn(m.alertsUnacked > 0 ? PhF.bellRinging : Ph.bell, m.alertsUnacked > 0 ? C.hot : C.text, () => _open(context, const AlertsView())),
+                          if (m.alertsUnacked > 0) Positioned(right: -2, top: -2, child: _Badge(m.alertsUnacked, C.hot)),
+                        ],
+                      ),
                 ),
               ),
               const Spacer(),
               SizedBox(
                 width: end,
-                child: Center(child: _RoundBtn(Ph.gearSix, C.text, () => _open(context, const SettingsView()))),
+                child: Center(child: trailing ?? _RoundBtn(Ph.gearSix, C.text, () => _open(context, const SettingsView()))),
               ),
             ],
           ),
@@ -309,7 +390,7 @@ class _TopBar extends StatelessWidget {
   }
 }
 
-const _statusH = 20.0;
+const _statusH = 18.0;
 
 /// An icon button on a dark disc, so it reads over the art.
 class _RoundBtn extends StatelessWidget {
@@ -351,6 +432,35 @@ class TitleArt extends StatelessWidget {
   );
 }
 
+/// The link is up and the mesh is live (the status reads LIVE).
+bool isLive(Model m) => m.link == Link.up && m.mode != 'demo' && m.mode != 'replay' && m.home['alive'] != false;
+
+/// The board's full moon as the live light: green when live, the pale moon's own grey when
+/// not, its silkscreen texture kept either way.
+class Moon extends StatelessWidget {
+  const Moon({super.key, required this.size, required this.live});
+  final double size;
+  final bool live;
+  @override
+  Widget build(BuildContext context) => AnimatedContainer(
+    duration: const Duration(milliseconds: 400),
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      boxShadow: live ? [BoxShadow(color: C.green.withValues(alpha: 0.45), blurRadius: 14, spreadRadius: 1)] : null,
+    ),
+    child: Image.asset(
+      'assets/art/moon.png',
+      width: size,
+      height: size,
+      color: live ? C.green : const Color(0xFFB4BAC2),
+      colorBlendMode: BlendMode.srcIn,
+      filterQuality: FilterQuality.high,
+    ),
+  );
+}
+
 class HeaderArt extends StatelessWidget {
   const HeaderArt({super.key});
   @override
@@ -377,6 +487,8 @@ double _bandCentre(BuildContext context) => MediaQuery.sizeOf(context).width * (
 // the title (board banner, 1620 x 199) is centred above the band
 double _titleW(BuildContext context) => (MediaQuery.sizeOf(context).width * 0.8).clamp(240.0, 420.0);
 double _titleH(BuildContext context) => _titleW(context) * 199 / 1620 + 12 + _statusH;
+// the moon: 4.6 mm across on the 60 mm strip (tool/make_header_art.py MOON_D)
+double _moonD(BuildContext context) => MediaQuery.sizeOf(context).width * 4.6 / 60;
 double _barH(BuildContext context) => (MediaQuery.sizeOf(context).width * 8.2 / 60).clamp(56.0, 76.0);
 
 class _Badge extends StatelessWidget {

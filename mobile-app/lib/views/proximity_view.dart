@@ -79,11 +79,10 @@ class _ProximityViewState extends State<ProximityView> with SingleTickerProvider
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: Text('FIND IT', style: T.label.copyWith(fontSize: 12, color: C.soft)),
-      ),
+    return ReconPage(
+      title: 'FIND IT',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (_, _) {

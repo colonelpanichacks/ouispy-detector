@@ -18,6 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "cicada-silk.png")
 MOON = os.path.join(HERE, "moon-silk.png")
 OUT = os.path.join(HERE, "..", "assets", "art", "header.png")
+MOON_OUT = os.path.join(HERE, "..", "assets", "art", "moon.png")   # the moon on its own: the app tints it as the live light
 
 PPM = 44                                # output px per mm
 SS = 3                                  # supersampling
@@ -66,7 +67,16 @@ def main():
     disc = Image.new("L", (md, md), 0)
     ImageDraw.Draw(disc).ellipse((0, 0, md - 1, md - 1), fill=255)
     moon = Image.fromarray(np.minimum(np.array(moon), np.array(disc)))
-    cic.paste(moon, (int(cx - md / 2), int(cy - md / 2)), moon)
+    # the moon is its own image (the live light); the band keeps its bare ring round it
+    mo = Image.new("LA", (md, md), (255, 0))
+    mo.putalpha(moon)
+    mo = mo.resize((md // SS, md // SS), Image.LANCZOS)
+    # nothing outside the disc: resampling leaves a faint fringe the app's tint would show
+    o = md // SS
+    clip = Image.new("L", (o, o), 0)
+    ImageDraw.Draw(clip).ellipse((0.5, 0.5, o - 1.5, o - 1.5), fill=255)
+    mo.putalpha(Image.fromarray(np.minimum(np.array(mo.getchannel("A")), np.array(clip))))
+    mo.save(MOON_OUT, optimize=True)
 
     # the bare outline round each cicada, cut out of the rings
     gap = int(ART_GAP * k) * 2 + 1

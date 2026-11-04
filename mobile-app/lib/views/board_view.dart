@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../data/blue_modes.dart';
+import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 
@@ -12,19 +13,21 @@ class BoardView extends StatelessWidget {
   const BoardView({super.key});
 
   @override
+  Widget build(BuildContext context) => const ReconPage(title: 'BOARD', body: BoardBody());
+}
+
+/// The screen's content on its own (the tests render it without the app's header).
+class BoardBody extends StatelessWidget {
+  const BoardBody({super.key});
+
+  @override
   Widget build(BuildContext context) {
     final b = Board.I;
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: Text('BOARD', style: T.label.copyWith(fontSize: 12, color: C.soft)),
-      ),
-      body: ListenableBuilder(
-        listenable: b,
-        builder: (context, _) => ListView(
-          padding: const EdgeInsets.only(bottom: 30),
-          children: [_IdCard(b), if (b.family == BoardFamily.recon) ..._recon(context, b), ..._modePanel(context, b)],
-        ),
+    return ListenableBuilder(
+      listenable: b,
+      builder: (context, _) => ListView(
+        padding: const EdgeInsets.only(bottom: 30),
+        children: [_IdCard(b), if (b.family == BoardFamily.recon) ..._recon(context, b), ..._modePanel(context, b)],
       ),
     );
   }

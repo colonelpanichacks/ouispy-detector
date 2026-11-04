@@ -289,8 +289,10 @@ class _DroneDetailState extends State<DroneDetail> {
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Drone')),
+    return ReconPage(
+      title: 'Drone',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: Listenable.merge([m, RidLookup.I, followDrone]),
         builder: (context, _) {

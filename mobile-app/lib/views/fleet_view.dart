@@ -25,22 +25,6 @@ class FleetView extends StatelessWidget {
           ..sort((a, b) => a.isHome != b.isHome ? (a.isHome ? -1 : 1) : (a.online != b.online ? (a.online ? -1 : 1) : a.label.compareTo(b.label)));
         final h = m.home;
         final up = h['alive'] != false;
-        Widget cell(String k, String v, {Color c = C.text}) => SizedBox(
-          width: 96,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(k, style: T.meta.copyWith(fontSize: 11.5)),
-              const SizedBox(height: 2),
-              Text(
-                v,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: T.code.copyWith(color: c, fontSize: 14, fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-        );
         return RefreshIndicator(
           color: C.accent,
           onRefresh: App.I.link.fetchState,
@@ -58,26 +42,7 @@ class FleetView extends StatelessWidget {
                     ],
                   ),
                 ),
-                Panel(
-                  margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-                  child: Wrap(
-                    spacing: 10,
-                    runSpacing: 14,
-                    children: [
-                      cell('Node', '${h['id'] ?? '-'}'),
-                      cell('Channel', '${h['ch'] ?? '-'}'),
-                      cell('Rate', '${h['rate'] ?? '-'}'.toUpperCase()),
-                      cell('Encrypted', h['enc'] == 1 ? 'Yes' : 'No', c: h['enc'] == 1 ? C.green : C.red),
-                      cell('Peers', '${h['n'] ?? '-'}'),
-                      cell('Uptime', h['up'] is num ? dur(h['up']) : '-'),
-                      cell('RX', '${h['rx'] ?? 0}'),
-                      cell('TX', '${h['tx'] ?? 0}'),
-                      cell('Dupes', '${h['dup'] ?? 0}'),
-                      cell('TX fail', '${h['txf'] ?? 0}', c: (h['txf'] ?? 0) == 0 ? C.text : C.red),
-                      cell('Bad', '${h['bad'] ?? 0}', c: (h['bad'] ?? 0) == 0 ? C.text : C.red),
-                    ],
-                  ),
-                ),
+                _HomeLink(h),
               ],
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
@@ -195,6 +160,94 @@ class _NodeCard extends StatelessWidget {
   }
 }
 
+/// The home's link in one compact printed line; tap it for the counters.
+class _HomeLink extends StatefulWidget {
+  const _HomeLink(this.h);
+  final Map<String, dynamic> h;
+  @override
+  State<_HomeLink> createState() => _HomeLinkState();
+}
+
+class _HomeLinkState extends State<_HomeLink> {
+  bool open = false;
+
+  Widget _pair(String k, String v, {Color c = C.text}) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(k.toUpperCase(), style: T.silk.copyWith(fontSize: 9.5)),
+      const SizedBox(width: 5),
+      Text(
+        v,
+        style: T.code.copyWith(color: c, fontSize: 12.5, fontWeight: FontWeight.w600),
+      ),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final h = widget.h;
+    final enc = h['enc'] == 1;
+    int n(String k) => (h[k] as num?)?.toInt() ?? 0;
+    final bad = n('txf') + n('bad');
+    return Panel(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+      padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+      onTap: () => setState(() => open = !open),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Wrap(
+                  spacing: 14,
+                  runSpacing: 6,
+                  children: [
+                    _pair('Node', '${h['id'] ?? '-'}'),
+                    _pair('Ch', '${h['ch'] ?? '-'}'),
+                    _pair('Rate', '${h['rate'] ?? '-'}'.toUpperCase()),
+                    _pair('Peers', '${h['n'] ?? '-'}'),
+                    _pair('Up', h['up'] is num ? dur(h['up']) : '-'),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(enc ? PhF.lock : Ph.lockOpen, size: 13, color: enc ? C.green : C.red),
+                        const SizedBox(width: 4),
+                        Text(enc ? 'ENCRYPTED' : 'PLAINTEXT', style: T.silk.copyWith(fontSize: 9.5, color: enc ? C.green : C.red)),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              if (bad > 0 && !open) ...[const Tag('Errors', color: C.red), const SizedBox(width: 6)],
+              Icon(open ? Ph.caretUp : Ph.caretDown, size: 15, color: C.silk),
+            ],
+          ),
+          if (open) ...[
+            const SizedBox(height: 10),
+            Container(height: 1, color: C.silkLine),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 14,
+              runSpacing: 6,
+              children: [
+                _pair('RX', '${n('rx')}'),
+                _pair('TX', '${n('tx')}'),
+                _pair('Dupes', '${n('dup')}'),
+                _pair('TX fail', '${n('txf')}', c: n('txf') == 0 ? C.text : C.red),
+                _pair('Bad', '${n('bad')}', c: n('bad') == 0 ? C.text : C.red),
+                if (h['pend'] != null) _pair('Pending', '${n('pend')}'),
+                if (h['lrssi'] != null) _pair('Best nbr', '${h['lrssi']} dBm', c: C.rssi((h['lrssi'] as num?)?.toInt())),
+                if (h['heap'] != null) _pair('Heap', '${(n('heap') / 1024).round()} KB'),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 const presets = ['axon', 'meta', 'ipro', 'verkada'];
 const nodeHues = [0, 25, 45, 90, 140, 175, 195, 220, 260, 285, 310, 335];
 
@@ -212,8 +265,10 @@ class _NodeDetailState extends State<NodeDetail> {
   Widget build(BuildContext context) {
     final m = App.I.m;
     final dash = App.I.link;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Node')),
+    return ReconPage(
+      title: 'Node',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (context, _) {

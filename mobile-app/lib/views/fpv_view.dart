@@ -17,11 +17,10 @@ class FpvView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final f = Fpv.I;
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: Text('FPV  5.8 GHZ', style: T.label.copyWith(fontSize: 12, color: C.soft)),
-      ),
+    return ReconPage(
+      title: 'FPV  5.8 GHZ',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: f,
         builder: (context, _) {

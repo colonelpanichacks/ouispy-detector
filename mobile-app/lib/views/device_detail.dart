@@ -101,17 +101,15 @@ class _DeviceDetailState extends State<DeviceDetail> {
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
-    return Scaffold(
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: Text('DEVICE', style: T.label.copyWith(fontSize: 12, color: C.soft)),
-        actions: [
-          IconButton(
-            onPressed: _load,
-            icon: const Icon(Ph.arrowsClockwise, color: C.silk, size: 20),
-          ),
-        ],
-      ),
+    return ReconPage(
+      title: 'DEVICE',
+      actions: [
+        IconButton(
+          onPressed: _load,
+          icon: const Icon(Ph.arrowsClockwise, color: C.silk, size: 20),
+        ),
+      ],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (_, _) {

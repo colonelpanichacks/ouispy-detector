@@ -220,10 +220,10 @@ class _FleetControlViewState extends State<FleetControlView> {
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('FLEET CONTROL', style: T.label.copyWith(fontSize: 13, color: C.text)),
-      ),
+    return ReconPage(
+      title: 'FLEET CONTROL',
+      actions: const [],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (context, _) {

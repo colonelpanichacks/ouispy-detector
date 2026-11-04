@@ -283,18 +283,17 @@ class _MetricsViewState extends State<MetricsView> {
     final m = App.I.m;
     final d = data;
     final nodeIds = <String>{...m.nodes.keys, for (final n in _l(d?['by_node'])) '${_m(n)['id']}'}..removeWhere((e) => e.isEmpty);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('METRICS', style: T.label.copyWith(fontSize: 13, color: C.text)),
-        actions: [
-          if (loading)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
-            ),
-          IconButton(icon: const Icon(Ph.arrowClockwise, size: 20), onPressed: _load),
-        ],
-      ),
+    return ReconPage(
+      title: 'METRICS',
+      actions: [
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+        IconButton(icon: const Icon(Ph.arrowClockwise, size: 20), onPressed: _load),
+      ],
+
       body: RefreshIndicator(
         color: C.accent,
         onRefresh: _load,

@@ -208,19 +208,18 @@ class _NodeFiltersViewState extends State<NodeFiltersView> {
         final ours = fs == null ? null : filtersCrc(fs);
         final theirs = n?.cfg['fcrc'] is num ? (n!.cfg['fcrc'] as num).toInt().toRadixString(16).toUpperCase().padLeft(8, '0') : '${n?.cfg['fcrc'] ?? ''}'.toUpperCase();
         final same = ours != null && theirs.isNotEmpty ? ours == theirs : null;
-        return Scaffold(
-          appBar: AppBar(
-            title: Text('FILTERS · ${n?.label ?? widget.id}', style: T.label.copyWith(fontSize: 13, color: C.text)),
-            actions: [
-              IconButton(
-                tooltip: 'Read from the node',
-                onPressed: busy ? null : _read,
-                icon: busy || _pollLeft > 0
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.accent))
-                    : const Icon(Ph.arrowsClockwise, color: C.silk),
-              ),
-            ],
-          ),
+        return ReconPage(
+          title: 'FILTERS · ${n?.label ?? widget.id}',
+          actions: [
+            IconButton(
+              tooltip: 'Read from the node',
+              onPressed: busy ? null : _read,
+              icon: busy || _pollLeft > 0
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.accent))
+                  : const Icon(Ph.arrowsClockwise, color: C.silk),
+            ),
+          ],
+
           body: ListView(
             padding: const EdgeInsets.only(bottom: 30),
             children: [

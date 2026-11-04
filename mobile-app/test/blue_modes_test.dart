@@ -338,10 +338,10 @@ void main() {
       for (final l in e.value) {
         Board.I.feed(l);
       }
-      await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: const BoardView()));
+      await tester.pumpWidget(MaterialApp(theme: buildTheme(), home: const Scaffold(body: BoardBody())));
       await tester.pump(const Duration(milliseconds: 300));
       expect(tester.takeException(), isNull);
-      expect(find.text('BOARD'), findsOneWidget);
+      expect(find.byType(BoardBody), findsOneWidget); // the page title is the shared header's, not the body's
       // scroll to the bottom too
       await tester.drag(find.byType(ListView), const Offset(0, -3000));
       await tester.pump(const Duration(milliseconds: 300));

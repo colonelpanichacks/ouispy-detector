@@ -139,32 +139,31 @@ class _ConsoleViewState extends State<ConsoleView> {
         _bind();
         final q = _filter.text.trim().toLowerCase();
         final shown = q.isEmpty ? _lines : _lines.where((l) => l.line.toLowerCase().contains(q)).toList();
-        return Scaffold(
-          appBar: AppBar(
-            title: Text('CONSOLE', style: T.label.copyWith(fontSize: 13, color: C.text)),
-            actions: [
-              IconButton(
-                tooltip: paused ? 'Resume' : 'Pause',
-                icon: Icon(paused ? Ph.play : Ph.pause, color: paused ? C.amber : C.silk),
-                onPressed: () => setState(() {
-                  paused = !paused;
-                  if (!paused) {
-                    _add(_held);
-                    _held.clear();
-                  }
-                }),
-              ),
-              IconButton(
-                tooltip: 'Clear',
-                icon: const Icon(Ph.trash, color: C.silk),
-                onPressed: () => setState(() {
-                  _clearedAt = DateTime.now().millisecondsSinceEpoch / 1000;
-                  _lines.clear();
+        return ReconPage(
+          title: 'CONSOLE',
+          actions: [
+            IconButton(
+              tooltip: paused ? 'Resume' : 'Pause',
+              icon: Icon(paused ? Ph.play : Ph.pause, color: paused ? C.amber : C.silk),
+              onPressed: () => setState(() {
+                paused = !paused;
+                if (!paused) {
+                  _add(_held);
                   _held.clear();
-                }),
-              ),
-            ],
-          ),
+                }
+              }),
+            ),
+            IconButton(
+              tooltip: 'Clear',
+              icon: const Icon(Ph.trash, color: C.silk),
+              onPressed: () => setState(() {
+                _clearedAt = DateTime.now().millisecondsSinceEpoch / 1000;
+                _lines.clear();
+                _held.clear();
+              }),
+            ),
+          ],
+
           body: Column(
             children: [
               Padding(

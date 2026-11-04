@@ -73,6 +73,7 @@ flutter:
   assets:
     - assets/art/header.png
     - assets/art/title.png
+    - assets/art/moon.png
     - assets/lookup.ldb
     - assets/library.json
 

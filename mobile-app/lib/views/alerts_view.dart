@@ -18,20 +18,19 @@ class AlertsView extends StatelessWidget {
       m.changed();
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Alerts'),
-        actions: [
-          if (m.alertsUnacked > 0)
-            TextButton(
-              onPressed: m.ackAlerts,
-              child: const Text(
-                'Dismiss all',
-                style: TextStyle(color: C.accent, fontWeight: FontWeight.w600),
-              ),
+    return ReconPage(
+      title: 'Alerts',
+      actions: [
+        if (m.alertsUnacked > 0)
+          TextButton(
+            onPressed: m.ackAlerts,
+            child: const Text(
+              'Dismiss all',
+              style: TextStyle(color: C.accent, fontWeight: FontWeight.w600),
             ),
-        ],
-      ),
+          ),
+      ],
+
       body: ListenableBuilder(
         listenable: m,
         builder: (context, _) => Column(
