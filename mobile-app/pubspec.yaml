@@ -44,6 +44,8 @@ dependencies:
   intl: ^0.20.3
   flutter_local_notifications: ^22.3.3
   phosphor_flutter: ^2.1.0
+  usb_serial: ^0.5.2
+  geolocator: ^14.0.1
 
 dev_dependencies:
   flutter_test:
@@ -70,6 +72,7 @@ flutter:
   assets:
     - assets/art/header.png
     - assets/art/title.png
+    - assets/lookup.ldb
 
   fonts:
     - family: Inter

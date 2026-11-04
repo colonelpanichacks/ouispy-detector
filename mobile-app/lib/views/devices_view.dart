@@ -27,7 +27,7 @@ class _DevicesViewState extends State<DevicesView> {
 
   Future<void> _load() async {
     setState(() => loading = true);
-    final j = await App.I.dash.history(q: q, dom: dom);
+    final j = await App.I.link.history(q: q, dom: dom);
     if (!mounted) return;
     setState(() {
       loading = false;

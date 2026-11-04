@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OUI-SPY boards: Espressif's USB VID (0x303A = 12346), the XIAO ESP32-S3's USB-Serial/JTAG -->
+<resources>
+    <usb-device vendor-id="12346" />
+</resources>

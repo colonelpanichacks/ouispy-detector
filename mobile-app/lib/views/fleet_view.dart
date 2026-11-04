@@ -38,7 +38,7 @@ class FleetView extends StatelessWidget {
         );
         return RefreshIndicator(
           color: C.accent,
-          onRefresh: App.I.dash.fetchState,
+          onRefresh: App.I.link.fetchState,
           child: ListView(
             padding: const EdgeInsets.only(bottom: 20),
             children: [
@@ -197,7 +197,7 @@ class _NodeDetailState extends State<NodeDetail> {
   @override
   Widget build(BuildContext context) {
     final m = App.I.m;
-    final dash = App.I.dash;
+    final dash = App.I.link;
     return Scaffold(
       appBar: AppBar(title: const Text('Node')),
       body: ListenableBuilder(
@@ -405,7 +405,7 @@ class _NodeDetailState extends State<NodeDetail> {
             for (final h in nodeHues)
               GestureDetector(
                 onTap: () {
-                  App.I.dash.nodeSet(n.id, {'color': h});
+                  App.I.link.nodeSet(n.id, {'color': h});
                   Navigator.pop(c);
                 },
                 child: Container(
@@ -450,7 +450,7 @@ class _NodeDetailState extends State<NodeDetail> {
       yes: 'Install',
       color: C.violet,
     )) {
-      App.I.dash.nodeCmd(n.id, 'preset', {'name': p});
+      App.I.link.nodeCmd(n.id, 'preset', {'name': p});
     }
   }
 }

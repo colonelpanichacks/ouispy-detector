@@ -27,7 +27,7 @@ class _FeedViewState extends State<FeedView> {
         return RefreshIndicator(
           color: C.accent,
           backgroundColor: C.panel,
-          onRefresh: App.I.dash.fetchState,
+          onRefresh: App.I.link.fetchState,
           child: CustomScrollView(
             slivers: [
               SliverToBoxAdapter(child: _Overview(m)),
@@ -147,10 +147,7 @@ class _Overview extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Text(
-                    'DETECTIONS · LAST 24 H',
-                    style: T.silk,
-                  ),
+                  Text('DETECTIONS · LAST 24 H', style: T.silk),
                   const Spacer(),
                   Text(
                     '${hours.fold(0, (a, b) => a + b)}',

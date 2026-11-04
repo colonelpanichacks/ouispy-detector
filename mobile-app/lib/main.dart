@@ -5,9 +5,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'data/alerts.dart';
+import 'data/backend.dart';
 import 'data/dashboard.dart';
+import 'data/local_mesh.dart';
+import 'data/lookup.dart';
 import 'data/model.dart';
 import 'data/settings.dart';
+import 'data/usb_link.dart';
 import 'theme.dart';
 import 'views/alerts_view.dart';
 import 'views/devices_view.dart';
@@ -19,11 +23,42 @@ import 'views/settings_view.dart';
 
 /// Everything the views share.
 class App {
-  App._(this.m, this.s, this.dash);
+  App._(this.m, this.s, this.dash) : link = dash;
   static late App I;
   final Model m;
   final Settings s;
+
+  /// The home dashboard client. Map tiles always come through it when it is reachable.
   final Dashboard dash;
+
+  /// Where the mesh comes from right now: the dashboard, or the app itself on a node.
+  Backend link;
+  bool _picking = false;
+
+  /// Settings' source: auto = a node on USB when one is plugged in, else the dashboard.
+  Future<void> pick() async {
+    if (_picking) return;
+    _picking = true;
+    try {
+      final boards = s.source == 'dashboard' ? const [] : await UsbLink.boards();
+      final Backend want;
+      if (boards.isNotEmpty) {
+        final cur = link;
+        if (cur is LocalMesh && cur.link.open) return;
+        want = LocalMesh(m, UsbLink(boards.first));
+      } else {
+        if (link is Dashboard && m.link != Link.off) return;
+        want = dash;
+      }
+      await link.stop();
+      m.clearData();
+      link = want;
+      await want.start();
+      m.changed();
+    } finally {
+      _picking = false;
+    }
+  }
 }
 
 Future<void> main() async {
@@ -35,8 +70,15 @@ Future<void> main() async {
   m.droneWindow = s.droneHours == 0 ? const DroneWindow.all() : DroneWindow.hours(s.droneHours);
   final dash = Dashboard(m, s);
   App.I = App._(m, s, dash);
+  await Lookup.I.load();
   AlertOut(m, s).start();
-  dash.start();
+  // a node plugged in or pulled out switches the source (auto / usb)
+  UsbLink.events?.listen((_) => Future.delayed(const Duration(milliseconds: 600), App.I.pick));
+  if (s.source == 'dashboard' || (await UsbLink.boards()).isEmpty) {
+    await dash.start();
+  } else {
+    await App.I.pick();
+  }
   runApp(const OuiSpyApp());
 }
 
@@ -98,18 +140,34 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
       builder: (context, _) => Scaffold(
         body: Stack(
           children: [
-            // the art sits behind the status bar and the top bar, its rings fading out below
+            // the art lives in the header only: clipped at its foot, where a silk rule closes it off
             Positioned(
-              top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _bandCentre(context),
+              top: 0,
               left: 0,
               right: 0,
-              child: const HeaderArt(),
+              height: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) + 6,
+              child: Container(
+                decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: C.silkLine))),
+                child: ClipRect(
+                  child: Stack(
+                    children: [
+                      Positioned(
+                        top: MediaQuery.paddingOf(context).top + _titleH(context) + _barH(context) / 2 - _bandCentre(context),
+                        left: 0,
+                        right: 0,
+                        child: const HeaderArt(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
             SafeArea(
               bottom: false,
               child: Column(
                 children: [
                   _TopBar(pulse: pulse),
+              const SizedBox(height: 7),
                   if (m.alertsUnacked > 0 && !m.muteAll && m.alerts.isNotEmpty) _AlertBanner(pulse: pulse),
                   Expanded(
                     child: IndexedStack(index: tab, children: _pages),
@@ -123,7 +181,7 @@ class _ShellState extends State<Shell> with SingleTickerProviderStateMixin {
           tab: tab,
           onTap: (i) {
             setState(() => tab = i);
-            if (i == 3 || i == 2) App.I.dash.fetchDroneWindow();
+            if (i == 3 || i == 2) App.I.link.fetchDroneWindow();
           },
         ),
       ),

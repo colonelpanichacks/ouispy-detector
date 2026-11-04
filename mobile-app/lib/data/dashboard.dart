@@ -10,6 +10,7 @@ import 'package:http/http.dart' as http;
 import 'package:nsd/nsd.dart' as nsd;
 import 'package:socket_io_client/socket_io_client.dart' as io;
 
+import 'backend.dart';
 import 'model.dart';
 import 'settings.dart';
 
@@ -52,7 +53,7 @@ Future<List<Discovered>> discoverDashboards({Duration wait = const Duration(seco
   return out;
 }
 
-class Dashboard implements FeedSource {
+class Dashboard implements FeedSource, Backend {
   Dashboard(this.m, this.s);
   final Model m;
   final Settings s;
@@ -68,10 +69,7 @@ class Dashboard implements FeedSource {
   @override
   String get label => 'dashboard';
   String get base => _host.isEmpty ? '' : 'http://$_host:$_port';
-  Map<String, String> get _headers => {
-        'User-Agent': 'OUI-SPY-Mesh-Mobile',
-        if (s.token.isNotEmpty) 'Cookie': 'ouispy_token=${s.token}',
-      };
+  Map<String, String> get _headers => {'User-Agent': 'OUI-SPY-Mesh-Mobile', if (s.token.isNotEmpty) 'Cookie': 'ouispy_token=${s.token}'};
   Map<String, String> get authHeaders => _headers;
 
   Future<bool> _resolve() async {
@@ -145,12 +143,12 @@ class Dashboard implements FeedSource {
       m.changed();
     });
     void on(String ev, void Function(Map<String, dynamic>) f) => sock.on(ev, (d) {
-          if (d is Map) {
-            try {
-              f(d.cast<String, dynamic>());
-            } catch (_) {}
-          }
-        });
+      if (d is Map) {
+        try {
+          f(d.cast<String, dynamic>());
+        } catch (_) {}
+      }
+    });
     on('fleet', m.ingestFleet);
     on('det', m.ingestDet);
     on('sighting', m.ingestSighting);
@@ -228,9 +226,7 @@ class Dashboard implements FeedSource {
   Future<Map<String, dynamic>?> post(String path, Map<String, dynamic> body, {String? okToast}) async {
     if (base.isEmpty) return null;
     try {
-      final r = await _client
-          .post(uri(path), headers: {..._headers, 'Content-Type': 'application/json'}, body: jsonEncode(body))
-          .timeout(const Duration(seconds: 10));
+      final r = await _client.post(uri(path), headers: {..._headers, 'Content-Type': 'application/json'}, body: jsonEncode(body)).timeout(const Duration(seconds: 10));
       if (r.statusCode != 200) {
         m.toast("dashboard didn't take it (${r.statusCode})");
         return null;
@@ -244,6 +240,7 @@ class Dashboard implements FeedSource {
     }
   }
 
+  @override
   Future<void> fetchState() async {
     _lastState = DateTime.now();
     // The Tab5's trimmed state: everything the views draw, a quarter of the full one.
@@ -253,6 +250,7 @@ class Dashboard implements FeedSource {
     fetchStats();
   }
 
+  @override
   Future<void> fetchStats() async {
     final j = await getJson('/api/stats');
     if (j is Map) {
@@ -263,6 +261,7 @@ class Dashboard implements FeedSource {
   }
 
   /// Every drone heard in the window, with its recent track (the drones tab and the map).
+  @override
   Future<void> fetchDroneWindow() async {
     _lastDrones = DateTime.now();
     final j = await getJson('/api/drones?${m.droneWindow.query}&track=0&rtrack=64&limit=60');
@@ -278,17 +277,20 @@ class Dashboard implements FeedSource {
     m.changed();
   }
 
+  @override
   Future<List<Flight>> flights(String mac) async {
     final j = await getJson('/api/drones/$mac/flights?compact=1&limit=10&pts=96');
     if (j is! Map || j['flights'] is! List) return [];
     return [for (final f in j['flights']) Flight((f as Map).cast<String, dynamic>())];
   }
 
+  @override
   Future<Map<String, dynamic>?> device(String mac) async {
     final j = await getJson('/api/devices/$mac?flat=1');
     return j is Map ? j.cast<String, dynamic>() : null;
   }
 
+  @override
   Future<Map<String, dynamic>?> history({String q = '', String dom = '', int limit = 300}) async {
     final p = StringBuffer('/api/devices?src=det&limit=$limit');
     if (q.isNotEmpty) p.write('&q=${Uri.encodeQueryComponent(q)}');
@@ -304,15 +306,33 @@ class Dashboard implements FeedSource {
   }
 
   // ---- writes (the same bodies the Tab5 posts)
+  @override
   Future<void> setAlias(String mac, String alias) => post('/api/devices/$mac', {'alias': alias}, okToast: alias.isEmpty ? 'name cleared' : 'named $alias');
+  @override
   Future<void> setNotes(String mac, String notes) => post('/api/devices/$mac', {'notes': notes}, okToast: 'notes saved');
-  Future<void> groupAdd(int id, String mac) => post('/api/groups', {'id': id, 'add': [mac]}, okToast: 'added to group');
-  Future<void> groupRemove(int id, String mac) => post('/api/groups', {'id': id, 'remove': [mac]}, okToast: 'taken out of group');
-  Future<void> groupNew(String name, String mac) =>
-      post('/api/groups', {'name': name, 'color': DateTime.now().millisecond % 360, 'add': [mac]}, okToast: 'group $name made');
+  @override
+  Future<void> groupAdd(int id, String mac) => post('/api/groups', {
+    'id': id,
+    'add': [mac],
+  }, okToast: 'added to group');
+  @override
+  Future<void> groupRemove(int id, String mac) => post('/api/groups', {
+    'id': id,
+    'remove': [mac],
+  }, okToast: 'taken out of group');
+  @override
+  Future<void> groupNew(String name, String mac) => post('/api/groups', {
+    'name': name,
+    'color': DateTime.now().millisecond % 360,
+    'add': [mac],
+  }, okToast: 'group $name made');
+  @override
   Future<void> droneMeta(String mac, Map<String, dynamic> body) => post('/api/drones/$mac', body, okToast: 'saved on the dashboard');
+  @override
   Future<void> nodeSet(String id, Map<String, dynamic> body) => post('/api/nodes/$id', body, okToast: 'saved on the dashboard');
+  @override
   Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) =>
       post('/api/nodes/$id/cmd', {'op': op, 'args': ?args}, okToast: '$op sent to ${m.nodeName(id)}');
+  @override
   Future<void> addMark(Map<String, dynamic> mark) => post('/api/marks', mark, okToast: 'mark saved');
 }

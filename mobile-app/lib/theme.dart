@@ -356,7 +356,10 @@ class Chip2 extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Material(
     color: on ? color.withValues(alpha: 0.1) : C.bg.withValues(alpha: 0.72),
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3), side: BorderSide(color: on ? color.withValues(alpha: 0.75) : C.silkLine)),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(3),
+      side: BorderSide(color: on ? color.withValues(alpha: 0.75) : C.silkLine),
+    ),
     clipBehavior: Clip.antiAlias,
     child: InkWell(
       onTap: onTap,
@@ -523,7 +526,10 @@ class KV extends StatelessWidget {
       children: [
         SizedBox(
           width: 124,
-          child: Padding(padding: const EdgeInsets.only(top: 2), child: Text(k.toUpperCase(), style: T.silk)),
+          child: Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(k.toUpperCase(), style: T.silk),
+          ),
         ),
         Expanded(
           child: SelectableText(
@@ -586,15 +592,7 @@ class RssiBar extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        for (var i = 0; i < 4; i++)
-          Container(
-            width: 3,
-            height: 4.0 + i * 2.5,
-            margin: const EdgeInsets.only(left: 1.5),
-            color: i < n ? c : C.silkLine,
-          ),
-      ],
+      children: [for (var i = 0; i < 4; i++) Container(width: 3, height: 4.0 + i * 2.5, margin: const EdgeInsets.only(left: 1.5), color: i < n ? c : C.silkLine)],
     );
   }
 }

@@ -22,7 +22,7 @@ class DronesView extends StatelessWidget {
       a.s.save();
     }
     a.m.changed();
-    await a.dash.fetchDroneWindow();
+    await a.link.fetchDroneWindow();
   }
 
   Future<void> _span(BuildContext context) async {
@@ -51,7 +51,7 @@ class DronesView extends StatelessWidget {
         final past = list.where((d) => m.now - d.last >= droneLiveS).toList();
         return RefreshIndicator(
           color: C.accent,
-          onRefresh: App.I.dash.fetchDroneWindow,
+          onRefresh: App.I.link.fetchDroneWindow,
           child: ListView(
             padding: const EdgeInsets.only(bottom: 20),
             children: [
@@ -180,7 +180,7 @@ class _DroneDetailState extends State<DroneDetail> {
   @override
   void initState() {
     super.initState();
-    App.I.dash.flights(widget.mac).then((f) {
+    App.I.link.flights(widget.mac).then((f) {
       if (mounted) setState(() => flights = f);
     });
   }
@@ -227,7 +227,7 @@ class _DroneDetailState extends State<DroneDetail> {
                   items: [for (final t in m.droneTags) (t, _cap(t))],
                   value: d.tag,
                   color: C.droneTag(d.tag),
-                  onChanged: (t) => App.I.dash.droneMeta(d.mac, {'tag': t}),
+                  onChanged: (t) => App.I.link.droneMeta(d.mac, {'tag': t}),
                 ),
               ),
               Padding(
@@ -241,7 +241,7 @@ class _DroneDetailState extends State<DroneDetail> {
                         expand: true,
                         onTap: () async {
                           final v = await askText(context, 'Name this drone', d.alias);
-                          if (v != null) App.I.dash.droneMeta(d.mac, {'alias': v});
+                          if (v != null) App.I.link.droneMeta(d.mac, {'alias': v});
                         },
                       ),
                     ),
@@ -254,7 +254,7 @@ class _DroneDetailState extends State<DroneDetail> {
                         expand: true,
                         onTap: () async {
                           final v = await askText(context, 'Notes', d.notes, maxLines: 4);
-                          if (v != null) App.I.dash.droneMeta(d.mac, {'notes': v});
+                          if (v != null) App.I.link.droneMeta(d.mac, {'notes': v});
                         },
                       ),
                     ),

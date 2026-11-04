@@ -16,6 +16,7 @@ class Settings extends ChangeNotifier {
   bool alertSound = true;
   Set<String> muted = {};
   int droneHours = 24;
+  String source = 'auto'; // auto: a node on USB when one is plugged in, else the dashboard; usb; dashboard
 
   Future<void> load() async {
     _p = await SharedPreferences.getInstance();
@@ -29,6 +30,7 @@ class Settings extends ChangeNotifier {
     alertSound = _p.getBool('alertSound') ?? true;
     muted = (_p.getStringList('muted') ?? const []).toSet();
     droneHours = _p.getInt('droneHours') ?? 24;
+    source = _p.getString('source') ?? 'auto';
   }
 
   Future<void> save() async {
@@ -42,6 +44,7 @@ class Settings extends ChangeNotifier {
     await _p.setBool('alertSound', alertSound);
     await _p.setStringList('muted', muted.toList());
     await _p.setInt('droneHours', droneHours);
+    await _p.setString('source', source);
     notifyListeners();
   }
 }

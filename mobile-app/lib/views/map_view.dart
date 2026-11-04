@@ -251,7 +251,7 @@ class _MapViewState extends State<MapView> {
   Future<void> _dropPin(LatLng p) async {
     final name = await askText(context, 'Drop a pin', '', hint: 'Name');
     if (name == null) return;
-    await App.I.dash.addMark({'kind': 'pin', 'name': name, 'lat': p.latitude, 'lon': p.longitude, 'hue': 190, 'icon': 'pin'});
+    await App.I.link.addMark({'kind': 'pin', 'name': name, 'lat': p.latitude, 'lon': p.longitude, 'hue': 190, 'icon': 'pin'});
   }
 
   void _nodeSheet(FleetNode n) => showModalBottomSheet(
@@ -422,20 +422,32 @@ class _MapViewState extends State<MapView> {
                 ),
               ],
             ),
+            // the layer toggles: one printed strip that always fits the width
             Positioned(
               top: 8,
               left: 8,
               right: 8,
-              child: ChipRow(
-                padding: EdgeInsets.zero,
-                children: [
-                  _chip('Layer', Ph.stack, true, _layerPick),
-                  _chip('Nodes', Ph.graph, showNodes, () => setState(() => showNodes = !showNodes)),
-                  _chip('Links', Ph.linkSimple, showLinks, () => setState(() => showLinks = !showLinks)),
-                  _chip('Targets', Ph.crosshair, showTargets, () => setState(() => showTargets = !showTargets), n: tri.length),
-                  _chip('Drones', Ph.drone, showDrones, () => setState(() => showDrones = !showDrones), n: m.windowDrones.length),
-                  _chip('Marks', Ph.mapPin, showMarks, () => setState(() => showMarks = !showMarks)),
-                ],
+              child: Container(
+                decoration: BoxDecoration(
+                  color: C.bg.withValues(alpha: 0.88),
+                  borderRadius: BorderRadius.circular(3),
+                  border: Border.all(color: C.silkLine),
+                ),
+                child: IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final (i, w) in [
+                        _chip('Layer', Ph.stack, true, _layerPick, lit: false),
+                        _chip('Nodes', Ph.graph, showNodes, () => setState(() => showNodes = !showNodes)),
+                        _chip('Links', Ph.linkSimple, showLinks, () => setState(() => showLinks = !showLinks)),
+                        _chip('Targets', Ph.crosshair, showTargets, () => setState(() => showTargets = !showTargets), n: tri.length),
+                        _chip('Drones', Ph.drone, showDrones, () => setState(() => showDrones = !showDrones), n: m.windowDrones.length),
+                        _chip('Marks', Ph.mapPin, showMarks, () => setState(() => showMarks = !showMarks)),
+                      ].indexed) ...[if (i > 0) Container(width: 1, color: C.silkLine), Expanded(child: w)],
+                    ],
+                  ),
+                ),
               ),
             ),
             Positioned(
@@ -488,40 +500,51 @@ class _MapViewState extends State<MapView> {
   Widget _float(Widget child) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     decoration: BoxDecoration(
-      color: C.bg.withValues(alpha: 0.88),
-      borderRadius: BorderRadius.circular(12),
-      border: Border.all(color: C.line2),
+      color: C.bg.withValues(alpha: 0.9),
+      borderRadius: BorderRadius.circular(3),
+      border: Border.all(color: C.silkLine),
     ),
     child: child,
   );
 
-  Widget _chip(String l, IconData i, bool on, VoidCallback f, {int? n}) => Material(
-    color: on ? C.bg.withValues(alpha: 0.9) : C.bg.withValues(alpha: 0.65),
-    shape: StadiumBorder(side: BorderSide(color: on ? C.accent.withValues(alpha: 0.55) : C.line2)),
-    clipBehavior: Clip.antiAlias,
-    child: InkWell(
-      onTap: f,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(i, size: 15, color: on ? C.accent : C.muted),
-            const SizedBox(width: 6),
-            Text(
-              l,
-              style: TextStyle(fontFamily: sans, color: on ? C.text : C.muted, fontSize: 12.5, fontWeight: FontWeight.w600),
-            ),
-            if (n != null) ...[const SizedBox(width: 5), Text('$n', style: T.code.copyWith(fontSize: 11.5, color: on ? C.accent : C.faint))],
-          ],
-        ),
+  /// One cell of the toggle strip: icon over a silk label, lit with an accent rule when on.
+  Widget _chip(String l, IconData i, bool on, VoidCallback f, {int? n, bool lit = true}) => InkWell(
+    onTap: f,
+    child: Container(
+      padding: const EdgeInsets.fromLTRB(2, 7, 2, 6),
+      decoration: BoxDecoration(
+        color: on && lit ? C.accent.withValues(alpha: 0.08) : null,
+        border: Border(bottom: BorderSide(color: on && lit ? C.accent : Colors.transparent, width: 2)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(i, size: 17, color: on ? (lit ? C.accent : C.text) : C.silk),
+              if (n != null && n > 0) ...[const SizedBox(width: 3), Text('$n', style: T.code.copyWith(fontSize: 10.5, color: on ? C.accent : C.silk))],
+            ],
+          ),
+          const SizedBox(height: 3),
+          Text(
+            l.toUpperCase(),
+            maxLines: 1,
+            overflow: TextOverflow.fade,
+            softWrap: false,
+            style: T.silk.copyWith(fontSize: 9, letterSpacing: 0.8, color: on ? C.text : C.silk),
+          ),
+        ],
       ),
     ),
   );
 
   Widget _fab(IconData i, VoidCallback f) => Material(
     color: C.bg.withValues(alpha: 0.9),
-    shape: const CircleBorder(side: BorderSide(color: C.line2)),
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(3),
+      side: const BorderSide(color: C.silkLine),
+    ),
     clipBehavior: Clip.antiAlias,
     child: InkWell(
       onTap: f,

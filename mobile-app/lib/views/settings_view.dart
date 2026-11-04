@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 
 import '../data/dashboard.dart';
+import '../data/local_mesh.dart';
 import '../data/model.dart';
 import '../data/tiles.dart';
 import '../main.dart';
@@ -57,7 +58,7 @@ class _SettingsViewState extends State<SettingsView> {
     s.token = token.text.trim();
     await s.save();
     App.I.m.clearData();
-    await App.I.dash.start();
+    await App.I.link.start();
     if (mounted) App.I.m.toast('reconnecting');
   }
 
@@ -92,6 +93,30 @@ class _SettingsViewState extends State<SettingsView> {
         builder: (context, _) => ListView(
           padding: const EdgeInsets.only(bottom: 40),
           children: [
+            const SectionHead('Source'),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+              child: Seg<String>(
+                items: const [('auto', 'Auto'), ('usb', 'Node on USB'), ('dashboard', 'Dashboard')],
+                value: s.source,
+                onChanged: (v) async {
+                  setState(() => s.source = v);
+                  await s.save();
+                  await App.I.pick();
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 2, 20, 4),
+              child: Text(
+                App.I.link is LocalMesh
+                    ? 'This phone is the dashboard: it reads the node on USB itself. Names, groups, notes and marks are kept on the phone.'
+                    : (s.source == 'dashboard'
+                          ? 'Data comes from the home dashboard.'
+                          : 'Plug a node into the phone (USB OTG) and the app becomes the dashboard. With none plugged in it uses the home dashboard.'),
+                style: T.meta.copyWith(height: 1.4),
+              ),
+            ),
             SectionHead(
               'Dashboard',
               trailing: Row(
