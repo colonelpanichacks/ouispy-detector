@@ -147,7 +147,19 @@ class LocalMesh implements Backend {
 
   // ------------------------------------------------------------ lines
 
+  @override
+  final console = Console();
+
+  @override
+  Future<bool> sendLine(String line) async {
+    if (!link.open) return false;
+    console.add(line, src: 'phone');
+    await link.send(line);
+    return true;
+  }
+
   void _line(String l) {
+    console.add(l);
     if (l.startsWith('OK') || l.startsWith('ERR') || l.startsWith('CMD ') || l.startsWith('ACK ') || l.startsWith('RST ') || l.startsWith('RFL ')) {
       _reply(l);
     }

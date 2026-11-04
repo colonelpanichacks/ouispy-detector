@@ -150,6 +150,7 @@ class Dashboard implements FeedSource, Backend {
       }
     });
     on('fleet', m.ingestFleet);
+    on('console', (c) => console.add('${c['line'] ?? ''}', src: '${c['source'] ?? 'serial'}', ts: (c['ts'] as num?)?.toDouble()));
     on('det', m.ingestDet);
     on('sighting', m.ingestSighting);
     on('dets_cleared', m.ingestCleared);
@@ -333,6 +334,15 @@ class Dashboard implements FeedSource, Backend {
   @override
   Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) =>
       post('/api/nodes/$id/cmd', {'op': op, 'args': ?args}, okToast: '$op sent to ${m.nodeName(id)}');
+  @override
+  final console = Console();
+
+  @override
+  Future<bool> sendLine(String line) async {
+    console.add(line, src: 'phone');
+    return await post('/api/console', {'line': line}) != null;
+  }
+
   @override
   Future<void> addMark(Map<String, dynamic> mark) => post('/api/marks', mark, okToast: mark['delete'] == true ? 'mark deleted' : 'mark saved');
 }

@@ -1,7 +1,29 @@
 // What the views ask of wherever the mesh comes from. Two implement it: the home
 // dashboard (dashboard.dart, the same REST + socket the Tab5 uses) and the app being the
 // dashboard itself, straight off a node on USB or BLE (local_mesh.dart).
+import 'dart:async';
+
 import 'model.dart';
+
+/// One console line: when, where from, what.
+class ConsoleLine {
+  ConsoleLine(this.ts, this.src, this.line);
+  final double ts;
+  final String src, line;
+}
+
+/// The last lines of the console, and the live ones after them.
+class Console {
+  final ring = <ConsoleLine>[];
+  final _ctl = StreamController<ConsoleLine>.broadcast();
+  Stream<ConsoleLine> get stream => _ctl.stream;
+  void add(String line, {String src = 'serial', double? ts}) {
+    final c = ConsoleLine(ts ?? DateTime.now().millisecondsSinceEpoch / 1000, src, line);
+    ring.add(c);
+    if (ring.length > 600) ring.removeRange(0, ring.length - 600);
+    _ctl.add(c);
+  }
+}
 
 abstract class Backend {
   String get label;
@@ -31,4 +53,10 @@ abstract class Backend {
   /// wardrive, filters_get, rechan, ...): one node by id, or `all`.
   Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]);
   Future<void> addMark(Map<String, dynamic> mark);
+
+  /// The node's console (USB: the board itself; the dashboard: its serial console).
+  Console get console;
+
+  /// Sends one console line; false when nothing is listening.
+  Future<bool> sendLine(String line);
 }
