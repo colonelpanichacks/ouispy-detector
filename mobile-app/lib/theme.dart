@@ -622,3 +622,49 @@ class Empty extends StatelessWidget {
     ),
   );
 }
+
+/// A row of actions as one printed strip: icon over a silk label, cells split by rules.
+class ActionStrip extends StatelessWidget {
+  const ActionStrip(this.items, {super.key});
+  final List<(String, IconData, Color, VoidCallback?)> items;
+  @override
+  Widget build(BuildContext context) => Container(
+    decoration: BoxDecoration(
+      color: C.bg.withValues(alpha: 0.72),
+      borderRadius: BorderRadius.circular(3),
+      border: Border.all(color: C.silkLine),
+    ),
+    child: IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final (i, (l, ic, c, f)) in items.indexed) ...[
+            if (i > 0) Container(width: 1, color: C.silkLine),
+            Expanded(
+              child: InkWell(
+                onTap: f,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(ic, size: 19, color: f == null ? C.faint : c),
+                      const SizedBox(height: 5),
+                      Text(
+                        l.toUpperCase(),
+                        maxLines: 1,
+                        overflow: TextOverflow.fade,
+                        softWrap: false,
+                        style: T.silk.copyWith(fontSize: 9.5, letterSpacing: 0.8, color: c == C.text ? C.silk : c),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
+}

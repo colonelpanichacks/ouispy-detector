@@ -12,18 +12,26 @@ import '../main.dart';
 import '../theme.dart';
 import 'common.dart';
 import 'drones_view.dart';
+import 'map_edit.dart';
 
-TileLayer dashTiles() {
+/// The base layer, and its labels on top when it has them (tiles.dart mapLayers).
+TileLayer _tiles(String id, {bool over = false}) {
   final a = App.I;
+  final l = layerById(id);
   return TileLayer(
-    tileProvider: DashboardTileProvider(base: a.dash.base, authHeaders: a.dash.authHeaders, layer: a.s.tileLayer, online: a.s.tilesOnline),
-    maxNativeZoom: a.s.tileLayer == 'esri-sat' ? 19 : 16,
+    tileProvider: DashboardTileProvider(base: a.dash.base, authHeaders: a.dash.authHeaders, layer: id, online: a.s.tilesOnline),
+    maxNativeZoom: l.maxZoom,
     maxZoom: 22,
-    keepBuffer: 3,
-    // the dark ground the Tab5 shows under a missing tile
+    keepBuffer: over ? 1 : 3,
     errorImage: null,
     tileBuilder: (context, w, tile) => w,
   );
+}
+
+Widget dashTiles() {
+  final l = layerById(App.I.s.tileLayer);
+  if (l.labels == null) return _tiles(l.id);
+  return Stack(children: [_tiles(l.id), _tiles(l.labels!, over: true)]);
 }
 
 LatLng? fleetCenter() {
@@ -155,12 +163,16 @@ class _MapViewState extends State<MapView> {
   String centeredFor = ''; // the dashboard the view was last fitted to
   Map<String, String> layers = {};
   String? prefetch;
+  String? moving; // a node id: the next tap places it
+  List<LatLng>? area; // corners of the area being drawn
+  bool placingPin = false;
   bool _cancel = false;
 
   @override
   void initState() {
     super.initState();
     App.I.dash.tileLayers().then((l) {
+      TileCache.I.dashLayers = l.keys.toSet();
       if (mounted && l.isNotEmpty) setState(() => layers = l);
     });
   }
@@ -184,11 +196,16 @@ class _MapViewState extends State<MapView> {
   Future<void> _download() async {
     final b = ctl.camera.visibleBounds;
     final z = ctl.camera.zoom.floor();
-    final zMax = math.min(z + 3, App.I.s.tileLayer == 'esri-sat' ? 19 : 16);
+    final layer = layerById(App.I.s.tileLayer);
+    if (!layer.bulk) {
+      App.I.m.toast("${layer.name} doesn't allow saving areas offline: pick another layer");
+      return;
+    }
+    final zMax = math.min(z + 3, layer.maxZoom);
     final ok = await confirm(
       context,
       'Save this area offline?',
-      'Stores the ${layers[App.I.s.tileLayer] ?? App.I.s.tileLayer} tiles of this view, zoom $z to $zMax (up to 4000 tiles), on the phone.',
+      'Stores the ${layer.name} tiles of this view, zoom $z to $zMax (up to 4000 tiles), on the phone.',
       yes: 'Save',
       color: C.accent,
     );
@@ -220,16 +237,18 @@ class _MapViewState extends State<MapView> {
           shrinkWrap: true,
           children: [
             const SectionHead('Map layer'),
-            for (final e in (layers.isEmpty ? {'esri-sat': 'Satellite', 'carto-dark': 'Dark'} : layers).entries)
+            for (final l in mapLayers)
               ListTile(
-                leading: Icon(e.key == App.I.s.tileLayer ? PhF.checkCircle : Ph.stack, color: e.key == App.I.s.tileLayer ? C.accent : C.muted),
-                title: Text(e.value),
-                subtitle: Text(e.key, style: T.code),
-                onTap: () => Navigator.pop(c, e.key),
+                dense: true,
+                leading: Icon(l.id == App.I.s.tileLayer ? PhF.checkCircle : Ph.stack, color: l.id == App.I.s.tileLayer ? C.accent : C.silk),
+                title: Text(l.name),
+                subtitle: Text(l.credit, style: T.meta.copyWith(fontSize: 11.5)),
+                trailing: layers.containsKey(l.id) ? const Tag('Dashboard', color: C.accent) : null,
+                onTap: () => Navigator.pop(c, l.id),
               ),
             SwitchListTile(
-              title: const Text('Fetch new tiles from the dashboard'),
-              subtitle: const Text('Off: only what is saved on the phone'),
+              title: const Text('Fetch new tiles'),
+              subtitle: const Text('Off: only tiles already saved on the phone'),
               value: App.I.s.tilesOnline,
               onChanged: (v) {
                 App.I.s.tilesOnline = v;
@@ -248,35 +267,110 @@ class _MapViewState extends State<MapView> {
     setState(() {});
   }
 
-  Future<void> _dropPin(LatLng p) async {
-    final name = await askText(context, 'Drop a pin', '', hint: 'Name');
-    if (name == null) return;
-    await App.I.link.addMark({'kind': 'pin', 'name': name, 'lat': p.latitude, 'lon': p.longitude, 'hue': 190, 'icon': 'pin'});
+  Future<void> _dropPin(LatLng p) => editMark(context, {'kind': 'pin', 'lat': p.latitude, 'lon': p.longitude, 'hue': 190, 'icon': 'pin'}, isNew: true);
+
+  Future<void> _nodeSheet(FleetNode n) async {
+    final a = await nodeCard(context, n);
+    if (!mounted) return;
+    if (a == 'move') {
+      setState(() => moving = n.id);
+      return;
+    }
+    await nodeAction(context, n, a);
   }
 
-  void _nodeSheet(FleetNode n) => showModalBottomSheet(
-    context: context,
-    builder: (_) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(4, 0, 4, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
-              child: Text(n.label, style: T.title),
-            ),
-            KV('ID', n.id, monoValue: true),
-            KV('Role', n.isHome ? 'home' : n.role),
-            KV('State', n.online ? 'online' : '${n.silent ? 'silent' : 'offline'} for ${dur(n.age)}', color: n.online ? C.green : (n.silent ? C.amber : C.red)),
-            if (n.rssi != null) KV('Link', '${n.rssi} dBm', color: C.rssi(n.rssi)),
-            KV('Runs', n.kind),
-          ],
-        ),
+  /// A tap on the map: places a moving node, adds an area corner, drops a pin, or opens
+  /// the area it landed in.
+  Future<void> _tap(LatLng p) async {
+    if (moving != null) {
+      final id = moving!;
+      setState(() => moving = null);
+      await App.I.link.nodeSet(id, {'lat': p.latitude, 'lon': p.longitude});
+      return;
+    }
+    if (area != null) {
+      if (area!.length < 24) setState(() => area!.add(p));
+      return;
+    }
+    if (placingPin) {
+      setState(() => placingPin = false);
+      await _dropPin(p);
+      return;
+    }
+    for (final mk in App.I.m.marks.reversed) {
+      if (mk.kind == 'area' && mk.pts.length >= 3 && _inside(p, mk.pts)) {
+        await editMark(context, Map.of(mk.raw));
+        return;
+      }
+    }
+  }
+
+  static bool _inside(LatLng p, List<List<double>> poly) {
+    var c = false;
+    for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      final yi = poly[i][0], xi = poly[i][1], yj = poly[j][0], xj = poly[j][1];
+      if ((yi > p.latitude) != (yj > p.latitude) && p.longitude < (xj - xi) * (p.latitude - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  }
+
+  Future<void> _finishArea() async {
+    final pts = area!;
+    setState(() => area = null);
+    if (pts.length < 3) return;
+    await editMark(context, {
+      'kind': 'area',
+      'pts': [
+        for (final q in pts) [q.latitude, q.longitude],
+      ],
+      'hue': 30,
+    }, isNew: true);
+  }
+
+  /// What the next tap does, with its way out.
+  Widget? _modeBar() {
+    String? text;
+    final acts = <Widget>[];
+    if (moving != null) {
+      text = 'Tap where ${App.I.m.nodeName(moving!)} goes';
+    } else if (placingPin) {
+      text = 'Tap where the pin goes';
+    } else if (area != null) {
+      text = area!.isEmpty ? 'Tap the corners of the area' : '${area!.length} corner${area!.length == 1 ? '' : 's'}${area!.length < 3 ? ', at least 3' : ''}';
+      acts.addAll([
+        if (area!.isNotEmpty) Btn('', icon: Ph.arrowCounterClockwise, kind: BtnKind.ghost, color: C.text, onTap: () => setState(() => area!.removeLast())),
+        const SizedBox(width: 6),
+        Btn('Done', icon: Ph.check, kind: BtnKind.filled, onTap: area!.length >= 3 ? _finishArea : null),
+      ]);
+    }
+    if (text == null) return null;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: C.bg.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(3),
+        border: Border.all(color: C.accent.withValues(alpha: 0.6)),
       ),
-    ),
-  );
+      child: Row(
+        children: [
+          Expanded(child: Text(text, style: T.row.copyWith(fontSize: 14))),
+          ...acts,
+          const SizedBox(width: 6),
+          Btn(
+            '',
+            icon: Ph.x,
+            kind: BtnKind.ghost,
+            color: C.silk,
+            onTap: () => setState(() {
+              moving = null;
+              area = null;
+              placingPin = false;
+            }),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -328,6 +422,7 @@ class _MapViewState extends State<MapView> {
                 maxZoom: 22,
                 backgroundColor: const Color(0xFF0A0D12),
                 onLongPress: (_, p) => _dropPin(p),
+                onTap: (_, p) => _tap(p),
               ),
               children: [
                 dashTiles(),
@@ -347,6 +442,21 @@ class _MapViewState extends State<MapView> {
                     ],
                   ),
                 PolylineLayer(polylines: links),
+                if (area != null && area!.isNotEmpty) ...[
+                  PolylineLayer(
+                    polylines: [
+                      Polyline(
+                        points: [...area!, if (area!.length >= 3) area!.first],
+                        color: C.accent,
+                        strokeWidth: 2,
+                        pattern: StrokePattern.dashed(segments: const [8, 5]),
+                      ),
+                    ],
+                  ),
+                  CircleLayer(
+                    circles: [for (final q in area!) CircleMarker(point: q, radius: 5, color: C.accent, borderColor: C.bg, borderStrokeWidth: 2)],
+                  ),
+                ],
                 if (showTargets)
                   CircleLayer(
                     circles: [
@@ -397,16 +507,19 @@ class _MapViewState extends State<MapView> {
                             point: LatLng(mk.lat!, mk.lon!),
                             width: 120,
                             height: 44,
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(PhF.mapPin, color: C.hue(mk.hue), size: 26, shadows: glowOf(C.bg, 4)),
-                                Text(
-                                  mk.name,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(fontFamily: sans, color: C.text, fontSize: 10, fontWeight: FontWeight.w600, shadows: glowOf(C.bg, 3)),
-                                ),
-                              ],
+                            child: GestureDetector(
+                              onTap: () => editMark(context, Map.of(mk.raw)),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(markIcons[mk.icon] ?? PhF.mapPin, color: C.hue(mk.hue), size: 26, shadows: glowOf(C.bg, 4)),
+                                  Text(
+                                    mk.name,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(fontFamily: sans, color: C.text, fontSize: 10, fontWeight: FontWeight.w600, shadows: glowOf(C.bg, 3)),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                     ],
@@ -455,12 +568,31 @@ class _MapViewState extends State<MapView> {
               bottom: 14,
               child: Column(
                 children: [
+                  _fab(
+                    Ph.mapPin,
+                    () => setState(() {
+                      placingPin = true;
+                      area = null;
+                      moving = null;
+                    }),
+                  ),
+                  const SizedBox(height: 10),
+                  _fab(
+                    Ph.polygon,
+                    () => setState(() {
+                      area = [];
+                      placingPin = false;
+                      moving = null;
+                    }),
+                  ),
+                  const SizedBox(height: 10),
                   _fab(Ph.crosshair, _fit),
                   const SizedBox(height: 10),
                   _fab(prefetch == null ? Ph.downloadSimple : Ph.x, prefetch == null ? _download : () => _cancel = true),
                 ],
               ),
             ),
+            if (_modeBar() != null) Positioned(left: 8, right: 64, bottom: 14, child: _modeBar()!),
             if (prefetch != null)
               Positioned(
                 left: 12,

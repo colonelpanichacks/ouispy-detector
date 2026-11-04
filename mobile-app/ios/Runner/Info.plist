@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>To place nodes where you stand, show you on the map and tag wardriving finds.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Finds and talks to your OUI-SPY Mesh dashboard on this network.</string>
 	<key>NSBonjourServices</key>

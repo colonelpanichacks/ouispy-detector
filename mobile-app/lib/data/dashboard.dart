@@ -334,5 +334,5 @@ class Dashboard implements FeedSource, Backend {
   Future<Map<String, dynamic>?> nodeCmd(String id, String op, [Map<String, dynamic>? args]) =>
       post('/api/nodes/$id/cmd', {'op': op, 'args': ?args}, okToast: '$op sent to ${m.nodeName(id)}');
   @override
-  Future<void> addMark(Map<String, dynamic> mark) => post('/api/marks', mark, okToast: 'mark saved');
+  Future<void> addMark(Map<String, dynamic> mark) => post('/api/marks', mark, okToast: mark['delete'] == true ? 'mark deleted' : 'mark saved');
 }

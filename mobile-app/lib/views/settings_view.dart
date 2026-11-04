@@ -254,7 +254,13 @@ class _SettingsViewState extends State<SettingsView> {
               children: [
                 KV('Layer', s.tileLayer, monoValue: true),
                 KV('Saved tiles', cache == null ? '...' : '${cache!.$1} tiles, ${(cache!.$2 / 1048576).toStringAsFixed(1)} MB'),
-                _sw(Ph.cloudArrowDown, 'Fetch new tiles', 'From the dashboard only. Off uses saved tiles only.', s.tilesOnline, (v) => s.tilesOnline = v),
+                _sw(
+                  Ph.cloudArrowDown,
+                  'Fetch new tiles',
+                  'Through your dashboard when it has the layer, else from the free map provider. Off: saved tiles only.',
+                  s.tilesOnline,
+                  (v) => s.tilesOnline = v,
+                ),
                 Tile(
                   icon: Ph.trash,
                   color: C.red,
@@ -287,7 +293,12 @@ class _SettingsViewState extends State<SettingsView> {
                     children: [
                       const Icon(Ph.shieldCheck, size: 18, color: C.green),
                       const SizedBox(width: 10),
-                      Expanded(child: Text('Talks only to your own dashboard. No accounts, no analytics, no outside map servers.', style: T.meta.copyWith(height: 1.4))),
+                      Expanded(
+                        child: Text(
+                          'Free, no accounts, no analytics. It talks to your nodes and your dashboard; the only outside servers are the free map layers you pick (and the FAA registry for Remote ID lookups).',
+                          style: T.meta.copyWith(height: 1.4),
+                        ),
+                      ),
                     ],
                   ),
                 ),

@@ -229,54 +229,39 @@ class _DeviceDetailState extends State<DeviceDetail> {
                     ),
                   ),
                 ),
-                // what you can do with it: one printed row, one colour
+                // what you can do with it: one printed strip, one colour
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Btn(alias.isEmpty ? 'Name' : 'Rename', icon: Ph.pencilSimple, onTap: _rename, kind: BtnKind.ghost, color: C.text, expand: true),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Btn('Group', icon: Ph.folderSimple, onTap: _group, kind: BtnKind.ghost, color: C.text, expand: true),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Btn('Notes', icon: Ph.notePencil, onTap: _notes, kind: BtnKind.ghost, color: C.text, expand: true),
-                      ),
-                      const SizedBox(width: 8),
-                      // watch it: the phone (and the nodes, once installed) alert whenever it shows up
-                      ListenableBuilder(
-                        listenable: Watch.I,
-                        builder: (_, _) {
-                          final r = Rule('MAC', widget.mac.replaceAll(':', ''), title);
-                          final on = Watch.I.has(r);
-                          return Btn(
-                            '',
-                            icon: on ? PhF.eye : Ph.eye,
-                            kind: BtnKind.ghost,
-                            color: on ? C.accent : C.text,
-                            onTap: () async {
-                              if (on) return Watch.I.remove([r]);
-                              await addRule(context, t: 'MAC', id: widget.mac, d: title);
-                            },
-                          );
-                        },
-                      ),
-                      const SizedBox(width: 8),
-                      Btn(
-                        '',
-                        icon: muted ? Ph.bellSlash : Ph.bell,
-                        kind: BtnKind.ghost,
-                        color: muted ? C.red : C.text,
-                        onTap: () {
-                          m.toggleMute(widget.mac);
-                          App.I.s.muted = m.muted;
-                          App.I.s.save();
-                        },
-                      ),
-                    ],
+                  child: ListenableBuilder(
+                    listenable: Watch.I,
+                    builder: (_, _) {
+                      final r = Rule('MAC', widget.mac.replaceAll(':', ''), title);
+                      final watched = Watch.I.has(r);
+                      return ActionStrip([
+                        (alias.isEmpty ? 'Name' : 'Rename', Ph.pencilSimple, C.text, _rename),
+                        ('Group', Ph.folderSimple, C.text, _group),
+                        ('Notes', Ph.notePencil, C.text, _notes),
+                        (
+                          watched ? 'Watched' : 'Watch',
+                          watched ? PhF.eye : Ph.eye,
+                          watched ? C.accent : C.text,
+                          () async {
+                            if (watched) return Watch.I.remove([r]);
+                            await addRule(context, t: 'MAC', id: widget.mac, d: title);
+                          },
+                        ),
+                        (
+                          muted ? 'Muted' : 'Alerts',
+                          muted ? Ph.bellSlash : Ph.bell,
+                          muted ? C.red : C.text,
+                          () {
+                            m.toggleMute(widget.mac);
+                            App.I.s.muted = m.muted;
+                            App.I.s.save();
+                          },
+                        ),
+                      ]);
+                    },
                   ),
                 ),
                 if (t != null && t.seen.isNotEmpty)

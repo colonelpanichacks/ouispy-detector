@@ -603,7 +603,9 @@ class LocalMesh implements Backend {
         final buf = encodeFilters(fs);
         if (buf.isEmpty || buf.length > 4000) return null;
         final verb = {'filters_set': 'mfbegin', 'filters_add': 'mfadd', 'filters_del': 'mfdel'}[op]!;
-        final hex = [for (var i = 0; i < buf.length; i += 96) buf.sublist(i, math.min(buf.length, i + 96)).map((x) => x.toRadixString(16).padLeft(2, '0')).join().toUpperCase()];
+        final hex = [
+          for (var i = 0; i < buf.length; i += 96) buf.sublist(i, math.min(buf.length, i + 96)).map((x) => x.toRadixString(16).padLeft(2, '0')).join().toUpperCase(),
+        ];
         final lines = ['$verb ${local ? 'self' : tgt}', for (final h in hex) 'mfdata $h', 'mfend'];
         return _Job(lines, 'OK', '${fs.length} filters', wants: [for (var i = 0; i < lines.length - 1; i++) 'OK', local ? 'OK' : 'CMD']);
       case 'raw':
@@ -936,7 +938,12 @@ class LocalMesh implements Backend {
   Future<void> nodeSet(String id, Map<String, dynamic> body) async {
     final n = store.nodes.putIfAbsent(id, () => {});
     for (final k in const ['alias', 'color', 'lat', 'lon']) {
-      if (body.containsKey(k)) n[k] = body[k];
+      if (!body.containsKey(k)) continue;
+      if (body[k] == null) {
+        n.remove(k);
+      } else {
+        n[k] = body[k];
+      }
     }
     store.dirty();
     // a name goes onto the node too, so the mesh and the Tab5 show it
@@ -947,9 +954,11 @@ class LocalMesh implements Backend {
 
   @override
   Future<void> addMark(Map<String, dynamic> mark) async {
-    store.marks.add({'id': 'p${DateTime.now().millisecondsSinceEpoch}', ...mark});
+    final id = _s(mark['id']).isEmpty ? 'p${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}' : _s(mark['id']);
+    store.marks.removeWhere((x) => x['id'] == id);
+    if (mark['delete'] != true) store.marks.add({...mark, 'id': id});
     store.dirty();
     m.ingestMarks({'marks': store.marks});
-    m.toast('mark saved');
+    m.toast(mark['delete'] == true ? 'mark deleted' : 'mark saved');
   }
 }
