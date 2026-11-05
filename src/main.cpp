@@ -147,14 +147,26 @@ enum FilterType : uint8_t {
     // source OUI of an 802.11 management frame.
     FT_WIFI_PROBE      = 6,  // WiFi probe request from OUI
     FT_WIFI_BEACON     = 7,  // WiFi beacon from OUI
+
+    // BLE signatures that survive MAC randomisation (appended: 0-7 stay put).
+    FT_SERVICE_UUID_128 = 8,  // identifier = 32 hex, a 128-bit svc UUID (list or Service Data)
+    FT_COMPANY_DATA     = 9,  // identifier = "CCCC:HEX[/MASK]": mfr CID then the bytes after it
+    FT_NAME_PREFIX      = 10, // identifier = case-insensitive name prefix ("Flipper ")
+    FT_NAME_PATTERN     = 11, // identifier = whole-name pattern: # hex digit, ? any char, * any run
 };
+static const FilterType FT_LAST = FT_NAME_PATTERN;
+
+// Longest filter identifier: a 128-bit UUID is 32 hex, company data up to
+// CID + 8 bytes and their mask.
+static const uint8_t FILTER_ID_MAX = 40;
+static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countOut);
 
 // Raw detection report. Producers (BLE callback, WiFi promiscuous callback)
 // only fill this and push it; everything heavier — device bookkeeping,
 // cooldown, alerts, MQTT, session file — happens when loop() drains the ring.
 struct DetectionEntry {
     char mac[18];
-    char identifier[18];
+    char identifier[FILTER_ID_MAX + 2];
     char description[64];
     int rssi;
     FilterType matchedType;
@@ -252,6 +264,10 @@ static const char* filterTypeCode(FilterType t) {
         case FT_META_COMPOSITE:  return "META";
         case FT_WIFI_PROBE:      return "PROBE";
         case FT_WIFI_BEACON:     return "BEACON";
+        case FT_SERVICE_UUID_128: return "UUID";
+        case FT_COMPANY_DATA:    return "MFR";
+        case FT_NAME_PREFIX:     return "PFX";
+        case FT_NAME_PATTERN:    return "PAT";
     }
     return "OUI";
 }
@@ -342,7 +358,9 @@ bool isSerialConnected() {
 //
 //   mesh <0|1> <home|remote> <ch>     e.g. "mesh 1 remote 6"
 //   filter <oui> <ble> <wifi> <wtype> <desc...>   e.g. "filter 0025DF 0 1 probe AXON"
-//   preset <axon|meta|ipro|verkada>   install a full vendor signature set + reboot
+//   sig <cid|svc|uuid|mfr|name|pfx|pat> <id> <desc...>   e.g. "sig mfr 004C:121910/FFFF18 AirTag away"
+//   preset <axon|meta|ipro|verkada|trackers|flipper|police|drones|wearables|vehicles>
+//                                     install a full vendor signature set + reboot
 //   meshpush                          flood the current filter list to the fleet
 //   meshrechan <ch>                   re-channel the whole fleet, any mode
 //   meshmute [all] / meshunmute       fleet buzzer (and LED) off / on, any mode
@@ -359,6 +377,26 @@ extern const PresetEntry PRESET_IPRO[];
 extern const size_t PRESET_IPRO_COUNT;
 extern const PresetEntry PRESET_VERKADA[];
 extern const size_t PRESET_VERKADA_COUNT;
+
+// Every preset, by name. The index is what MESH_CMD_PRESET carries, so new ones
+// are appended (older nodes refuse an index they don't know).
+struct PresetDef {
+    const char* name;
+    const char* label;
+    const PresetEntry* table;
+    size_t count;
+};
+extern const PresetDef PRESETS[];
+extern const size_t PRESETS_COUNT;
+static int presetIndex(const String& name) {
+    for (size_t i = 0; i < PRESETS_COUNT; i++) if (name.equalsIgnoreCase(PRESETS[i].name)) return (int)i;
+    return -1;
+}
+static String presetNameList() {
+    String s;
+    for (size_t i = 0; i < PRESETS_COUNT; i++) { if (i) s += "|"; s += PRESETS[i].name; }
+    return s;
+}
 
 // THE AP-visibility bug: the mesh turns on WIFI_PROTOCOL_LR, and the driver
 // lets LR land on the AP interface too (apcheck showed ap=0xF). An LR AP
@@ -485,14 +523,11 @@ static void serialConsoleTick() {
     if (line.startsWith("preset ")) {
         String name = line.substring(7);
         name.toLowerCase();
-        const PresetEntry* table = nullptr;
-        size_t count = 0;
-        const char* label = nullptr;
-        if (name == "axon")    { table = PRESET_AXON;    count = PRESET_AXON_COUNT;    label = "Axon body cam"; }
-        else if (name == "meta")    { table = PRESET_META;    count = PRESET_META_COUNT;    label = "META / RAY-BAN"; }
-        else if (name == "ipro")    { table = PRESET_IPRO;    count = PRESET_IPRO_COUNT;    label = "I-PRO body cam"; }
-        else if (name == "verkada") { table = PRESET_VERKADA; count = PRESET_VERKADA_COUNT; label = "Verkada camera"; }
-        if (!table) { Serial.println("ERR unknown preset (axon|meta|ipro|verkada)"); return; }
+        int pi = presetIndex(name);
+        if (pi < 0) { Serial.printf("ERR unknown preset (%s)\n", presetNameList().c_str()); return; }
+        const PresetEntry* table = PRESETS[pi].table;
+        size_t count = PRESETS[pi].count;
+        const char* label = PRESETS[pi].label;
         filterEditBegin();
         int added = applyPreset(table, count, label);
         filterEditEnd();
@@ -557,6 +592,44 @@ static void serialConsoleTick() {
         } else {
             Serial.println("ERR usage: mesh <0|1> <home|remote> <ch>");
         }
+        return;
+    }
+
+    if (line.startsWith("sig ")) {
+        // sig <cid|svc|uuid|mfr|name|pfx|pat> <identifier> <desc...>: one BLE signature
+        // of any kind, checked by the same rules as a pushed filter list.
+        int p1 = line.indexOf(' '), p2 = line.indexOf(' ', p1 + 1);
+        String kind = line.substring(p1 + 1, p2 > 0 ? p2 : line.length());
+        String rest = p2 > 0 ? line.substring(p2 + 1) : "";
+        int p3 = rest.indexOf(' ');
+        String id = p3 > 0 ? rest.substring(0, p3) : rest;
+        String desc = p3 > 0 ? rest.substring(p3 + 1) : "";
+        kind.toLowerCase();
+        int t = kind == "cid" ? FT_COMPANY_ID : kind == "svc" ? FT_SERVICE_UUID_16 : kind == "uuid" ? FT_SERVICE_UUID_128
+              : kind == "mfr" ? FT_COMPANY_DATA : kind == "name" ? FT_NAME_SUBSTRING : kind == "pfx" ? FT_NAME_PREFIX
+              : kind == "pat" ? FT_NAME_PATTERN : -1;
+        if (t == FT_SERVICE_UUID_128) id.replace("-", "");
+        if (t == FT_COMPANY_ID || t == FT_SERVICE_UUID_16 || t == FT_SERVICE_UUID_128 || t == FT_COMPANY_DATA) id.toUpperCase();
+        if (desc.isEmpty()) desc = kind + " " + id;
+        if (desc.length() > 48) desc = desc.substring(0, 48);
+        uint8_t rec[4 + FILTER_ID_MAX + 48], cnt = 0;
+        bool fits = t >= 0 && id.length() > 0 && id.length() <= FILTER_ID_MAX;
+        if (fits) {
+            rec[0] = (uint8_t)t; rec[1] = 0; rec[2] = id.length(); rec[3] = desc.length();
+            memcpy(rec + 4, id.c_str(), id.length());
+            memcpy(rec + 4 + id.length(), desc.c_str(), desc.length());
+        }
+        if (!fits || !filterRecordsValid(rec, 4 + id.length() + desc.length(), cnt)) {
+            Serial.println("ERR usage: sig <cid|svc|uuid|mfr|name|pfx|pat> <id> <desc> (cid/svc 4 hex, uuid 32 hex, mfr CCCC:HEX[/MASK])");
+            return;
+        }
+        TargetFilter f;
+        f.identifier = id;
+        f.isFullMAC = false;
+        f.description = desc;
+        f.type = (FilterType)t;
+        targetFilters.push_back(f);
+        Serial.printf("OK sig %s %s total=%d\n", filterTypeCode(f.type), id.c_str(), targetFilters.size());
         return;
     }
 
@@ -1218,7 +1291,7 @@ void loadConfiguration() {
             filter.description = preferences.getString(("desc_" + n).c_str(), "");
             uint8_t rawType = preferences.getUChar(("type_" + n).c_str(), 0xFF);
             if (rawType == 0xFF)               filter.type = filter.isFullMAC ? FT_FULL_MAC : FT_MAC_PREFIX;
-            else if (rawType <= FT_WIFI_BEACON) filter.type = (FilterType)rawType;
+            else if (rawType <= FT_LAST)        filter.type = (FilterType)rawType;
             else                                filter.type = FT_MAC_PREFIX;   // corrupt value, fail safe
             if (filter.identifier.length() > 0) targetFilters.push_back(filter);
         }
@@ -1372,7 +1445,7 @@ static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countO
         if (off + 4 > len || count >= FILTER_MAX) return false;
         uint8_t type = buf[off], idLen = buf[off + 2], descLen = buf[off + 3];
         off += 4;
-        if (type > FT_WIFI_BEACON || idLen == 0 || idLen > 16 || descLen > 48 ||
+        if (type > FT_LAST || idLen == 0 || idLen > FILTER_ID_MAX || descLen > 48 ||
             off + idLen + descLen > len) return false;
         const char* id = (const char*)(buf + off);
         uint8_t needHex = 0;
@@ -1380,11 +1453,13 @@ static bool filterRecordsValid(const uint8_t* buf, uint16_t len, uint8_t& countO
             case FT_MAC_PREFIX: case FT_WIFI_PROBE: case FT_WIFI_BEACON: needHex = 6; break;
             case FT_FULL_MAC: needHex = 12; break;
             case FT_COMPANY_ID: case FT_SERVICE_UUID_16: needHex = 4; break;
+            case FT_SERVICE_UUID_128: needHex = 32; break;
             default: break;
         }
         for (uint8_t i = 0; i < idLen; i++) {
             unsigned char c = (unsigned char)id[i];
-            if (needHex ? !isxdigit(c) : (c < 0x20 || c > 0x7E)) return false;
+            if (type == FT_COMPANY_DATA ? !(isxdigit(c) || c == ':' || c == '/')
+                : needHex ? !isxdigit(c) : (c < 0x20 || c > 0x7E)) return false;
         }
         if (needHex && idLen != needHex) return false;
         for (uint8_t i = 0; i < descLen; i++) {
@@ -1411,7 +1486,7 @@ static TargetFilter filterFromRecord(const uint8_t* buf, uint16_t& off) {
     f.isFullMAC = (buf[off + 1] & 0x01) != 0;
     uint8_t idLen = buf[off + 2], descLen = buf[off + 3];
     off += 4;
-    char ident[17], desc[49];
+    char ident[FILTER_ID_MAX + 1], desc[49];
     memcpy(ident, buf + off, idLen);
     ident[idLen] = '\0';
     memcpy(desc, buf + off + idLen, descLen);
@@ -1508,7 +1583,6 @@ static void locateStart(uint8_t mode) {
         digitalWrite(LED_PIN, HIGH);
     }
 }
-static const char* PRESET_NAMES[] = { "axon", "meta", "ipro", "verkada" };
 static String jsonEsc(const String& in);
 static void printFilterReport(const char* id, const uint8_t* buf, uint16_t len);
 
@@ -1522,13 +1596,11 @@ static void selfIdBytes(uint8_t out[3]) {
 }
 
 static bool presetLookup(uint8_t idx, const PresetEntry*& table, size_t& count, const char*& label) {
-    switch (idx) {
-        case 0: table = PRESET_AXON;    count = PRESET_AXON_COUNT;    label = "Axon body cam";   return true;
-        case 1: table = PRESET_META;    count = PRESET_META_COUNT;    label = "META / RAY-BAN";  return true;
-        case 2: table = PRESET_IPRO;    count = PRESET_IPRO_COUNT;    label = "I-PRO body cam";  return true;
-        case 3: table = PRESET_VERKADA; count = PRESET_VERKADA_COUNT; label = "Verkada camera";  return true;
-    }
-    return false;
+    if (idx >= PRESETS_COUNT) return false;
+    table = PRESETS[idx].table;
+    count = PRESETS[idx].count;
+    label = PRESETS[idx].label;
+    return true;
 }
 
 // Command handler invoked by meshTick (loop context) with a complete,
@@ -1704,7 +1776,7 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         filterEditEnd();
         meshSendAck(cmd, cmdId, 0, (uint8_t)added);
         if (isSerialConnected()) {
-            Serial.printf("[MESH] preset %s installed live by home (%d new)\n", PRESET_NAMES[payload[0]], added);
+            Serial.printf("[MESH] preset %s installed live by home (%d new)\n", PRESETS[payload[0]].name, added);
         }
         if (liveEditNeedsRestart()) restartAfterAck("first BLE filter installed");
         break;
@@ -1802,7 +1874,7 @@ static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig, bool 
     for (const TargetFilter& f : targetFilters) {
         uint8_t idLen = f.identifier.length();
         uint8_t descLen = withDesc ? min((int)f.description.length(), 48) : 0;
-        if (idLen == 0 || idLen > 16) continue;
+        if (idLen == 0 || idLen > FILTER_ID_MAX) continue;
         if (n + 4 + idLen + descLen > cap) { tooBig = true; break; }
         buf[n++] = (uint8_t)f.type;
         buf[n++] = f.isFullMAC ? 1 : 0;
@@ -1820,11 +1892,11 @@ static uint16_t serializeFilters(uint8_t* buf, uint16_t cap, bool& tooBig, bool 
 // long lists short, so the CRC stopped matching the dashboard's).
 static uint32_t filtersCrc() {
     uint32_t crc = 0;
-    uint8_t rec[4 + 16 + 48];
+    uint8_t rec[4 + FILTER_ID_MAX + 48];
     for (const TargetFilter& f : targetFilters) {
         uint8_t idLen = f.identifier.length();
         uint8_t descLen = min((int)f.description.length(), 48);
-        if (idLen == 0 || idLen > 16) continue;
+        if (idLen == 0 || idLen > FILTER_ID_MAX) continue;
         rec[0] = (uint8_t)f.type;
         rec[1] = f.isFullMAC ? 1 : 0;
         rec[2] = idLen;
@@ -2324,11 +2396,8 @@ static bool remoteConsoleCommand(const String& line) {
             if (!aliasValid(a)) { Serial.println("ERR ralias: up to 32 plain ASCII characters, no quotes or backslashes"); return true; }
             sendMgmt("ralias", t, all, MESH_CMD_ALIAS, (const uint8_t*)a.c_str(), (uint16_t)a.length());
         } else if (verb == "rpreset") {
-            int idx = -1;
-            String name = arg[1];
-            name.toLowerCase();
-            for (int i = 0; i < 4; i++) if (name == PRESET_NAMES[i]) idx = i;
-            if (idx < 0) { Serial.println("ERR unknown preset (axon|meta|ipro|verkada)"); return true; }
+            int idx = presetIndex(arg[1]);
+            if (idx < 0) { Serial.printf("ERR unknown preset (%s)\n", presetNameList().c_str()); return true; }
             uint8_t p[1] = { (uint8_t)idx };
             sendMgmt("rpreset", t, all, MESH_CMD_PRESET, p, 1);
         }
@@ -2568,6 +2637,89 @@ static bool matchesWifiFilter(const uint8_t mac[6], uint8_t subtype,
 // Forward declaration — defined below; FT_META_COMPOSITE filters defer to it.
 bool matchesMetaComposite(NimBLEAdvertisedDevice* dev, const char*& outLabel);
 
+// A NimBLE UUID as lower-case hex with no dashes: 4 chars (16-bit), 8 (32-bit) or 32.
+static String uuidHex(const NimBLEUUID& uuid) {
+    String s = uuid.toString().c_str();
+    s.toLowerCase();
+    s.replace("-", "");
+    if (s.startsWith("0x")) s = s.substring(2);
+    return s;
+}
+
+// A 16-bit filter matches a 16-bit UUID, or the same value inside the Bluetooth
+// base UUID (0000xxxx-0000-1000-8000-00805f9b34fb). Not any 128-bit UUID that
+// happens to hold those 4 hex digits at that place, which vendor UUIDs often do.
+static bool uuidIs16(const String& hex, const String& target) {
+    if (hex.length() == 4) return hex.equals(target);
+    if (hex.length() == 8) return hex.startsWith("0000") && hex.substring(4).equals(target);
+    return hex.length() == 32 && hex.startsWith("0000") && hex.substring(4, 8).equals(target) &&
+           hex.substring(8).equals("00001000800000805f9b34fb");
+}
+
+// Every UUID an advert names: its service list and its Service Data. Trackers
+// (SmartTag 0xFD5A, Google Find My 0xFEAA, Tile 0xFEED), Remote ID (0xFFFA)
+// and Fast Pair (0xFE2C) put theirs only in Service Data.
+template <typename F>
+static bool anyAdvertUuid(NimBLEAdvertisedDevice* dev, F pred) {
+    for (int i = 0; i < dev->getServiceUUIDCount(); i++) {
+        if (pred(uuidHex(dev->getServiceUUID(i)))) return true;
+    }
+    for (int i = 0; i < dev->getServiceDataCount(); i++) {
+        if (pred(uuidHex(dev->getServiceDataUUID(i)))) return true;
+    }
+    return false;
+}
+
+static int hexNib(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    c |= 0x20;
+    return (c >= 'a' && c <= 'f') ? c - 'a' + 10 : -1;
+}
+
+// "CCCC:HEX[/MASK]": a manufacturer field from company CCCC whose bytes after the
+// CID match HEX under MASK (FF per byte when no mask). "004C:12" is any Apple
+// Find My frame; "004C:121910/FFFF18" an AirTag away from its owner.
+static bool matchCompanyData(NimBLEAdvertisedDevice* dev, const String& id) {
+    int colon = id.indexOf(':');
+    if (colon != 4) return false;
+    int slash = id.indexOf('/');
+    String hex = id.substring(5, slash > 0 ? slash : id.length());
+    String mask = slash > 0 ? id.substring(slash + 1) : "";
+    if (hex.length() % 2 || (mask.length() && mask.length() != hex.length())) return false;
+    uint16_t cid = (uint16_t)((hexNib(id[0]) << 12) | (hexNib(id[1]) << 8) | (hexNib(id[2]) << 4) | hexNib(id[3]));
+    size_t n = hex.length() / 2;
+    for (int f = 0; f < dev->getManufacturerDataCount(); f++) {
+        std::string m = dev->getManufacturerData(f);
+        if (m.length() < 2 + n) continue;
+        if ((uint16_t)((uint8_t)m[0] | ((uint8_t)m[1] << 8)) != cid) continue;
+        bool ok = true;
+        for (size_t k = 0; ok && k < n; k++) {
+            uint8_t want = (hexNib(hex[2 * k]) << 4) | hexNib(hex[2 * k + 1]);
+            uint8_t mk = mask.length() ? (uint8_t)((hexNib(mask[2 * k]) << 4) | hexNib(mask[2 * k + 1])) : 0xFF;
+            ok = (((uint8_t)m[2 + k]) & mk) == (want & mk);
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+// Whole-name pattern, case-insensitive: # a hex digit, ? any one char, * any run.
+// Tesla cars: "S################C".
+static bool namePattern(const char* p, const char* s) {
+    for (; *p; p++, s++) {
+        if (*p == '*') {
+            for (const char* t = s;; t++) {
+                if (namePattern(p + 1, t)) return true;
+                if (!*t) return false;
+            }
+        }
+        if (!*s) return false;
+        if (*p == '#') { if (hexNib(*s) < 0) return false; }
+        else if (*p != '?' && tolower((unsigned char)*p) != tolower((unsigned char)*s)) return false;
+    }
+    return *s == '\0';
+}
+
 bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
                           String& matchedDescription, String& matchedIdentifier,
                           FilterType& outType) {
@@ -2612,22 +2764,56 @@ bool matchesTargetFilter(NimBLEAdvertisedDevice* dev, const String& deviceMAC,
             case FT_SERVICE_UUID_16: {
                 if (!dev) break;
                 String target = normalizeHexId(filter.identifier);
-                for (int i = 0; i < dev->getServiceUUIDCount(); i++) {
-                    NimBLEUUID uuid = dev->getServiceUUID(i);
-                    String s = uuid.toString().c_str();
-                    s.toLowerCase();
-                    if (s.length() == 4 && s.equals(target)) {
-                        matchedDescription = filter.description;
-                        matchedIdentifier  = filter.identifier;
-                        outType            = filter.type;
-                        return true;
-                    }
-                    if (s.length() >= 8 && s.substring(4, 8).equals(target)) {
-                        matchedDescription = filter.description;
-                        matchedIdentifier  = filter.identifier;
-                        outType            = filter.type;
-                        return true;
-                    }
+                if (anyAdvertUuid(dev, [&](const String& h) { return uuidIs16(h, target); })) {
+                    matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
+                    return true;
+                }
+                break;
+            }
+            case FT_SERVICE_UUID_128: {
+                if (!dev) break;
+                String target = filter.identifier;
+                target.toLowerCase();
+                target.replace("-", "");
+                if (anyAdvertUuid(dev, [&](const String& h) { return h.equals(target); })) {
+                    matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
+                    return true;
+                }
+                break;
+            }
+            case FT_COMPANY_DATA: {
+                if (!dev || !dev->haveManufacturerData()) break;
+                if (matchCompanyData(dev, filter.identifier)) {
+                    matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
+                    return true;
+                }
+                break;
+            }
+            case FT_NAME_PREFIX: {
+                if (!dev || !dev->haveName()) break;
+                String name = dev->getName().c_str();
+                if (name.length() >= filter.identifier.length() &&
+                    name.substring(0, filter.identifier.length()).equalsIgnoreCase(filter.identifier)) {
+                    matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
+                    return true;
+                }
+                break;
+            }
+            case FT_NAME_PATTERN: {
+                if (!dev || !dev->haveName()) break;
+                if (namePattern(filter.identifier.c_str(), dev->getName().c_str())) {
+                    matchedDescription = filter.description;
+                    matchedIdentifier  = filter.identifier;
+                    outType            = filter.type;
+                    return true;
                 }
                 break;
             }
@@ -2692,16 +2878,9 @@ bool matchesMetaComposite(NimBLEAdvertisedDevice* dev, const char*& outLabel) {
         }
     }
     if (haveLuxottica) {
-        for (int i = 0; i < dev->getServiceUUIDCount(); i++) {
-            NimBLEUUID uuid = dev->getServiceUUID(i);
-            String s = uuid.toString().c_str();
-            s.toLowerCase();
-            bool short16 = (s.length() == 4 && s.equals("fd5f"));
-            bool long128 = (s.length() >= 8 && s.substring(4, 8).equals("fd5f"));
-            if (short16 || long128) {
-                outLabel = "META-RAYBAN (mfr+svc)";
-                return true;
-            }
+        if (anyAdvertUuid(dev, [](const String& h) { return uuidIs16(h, "fd5f"); })) {
+            outLabel = "META-RAYBAN (mfr+svc)";
+            return true;
         }
     }
 
@@ -2801,6 +2980,143 @@ const PresetEntry PRESET_VERKADA[] = {
     { FT_WIFI_BEACON, "E0A700", "Verkada camera (WiFi beacon / setup AP)" },
 };
 const size_t PRESET_VERKADA_COUNT = sizeof(PRESET_VERKADA) / sizeof(PRESET_VERKADA[0]);
+
+// The presets below come from the 2026-11-04 signature research
+// (oui-spy-recon-development app/docs/SIGNATURE-CANDIDATES-*.md): company IDs and
+// member UUIDs checked against the Bluetooth SIG assigned numbers, OUIs against
+// the IEEE MA-L registry. "Unverified" there means registered to that company but
+// not yet seen on the air by us.
+
+// Trackers that follow someone: Find My devices away from their owner (the full
+// key advert, status byte & 0x18: 0x10 AirTag, 0x08 third-party Find My, 0x00
+// Apple device), Samsung SmartTag, Tile, Chipolo, Pebblebee. Google's Find My
+// Device tags (0xFEAA) need the Service Data frame byte, which no filter reads
+// yet.
+const PresetEntry PRESET_TRACKERS[] = {
+    { FT_COMPANY_DATA,    "004C:121910/FFFF18", "AirTag away from its owner" },
+    { FT_COMPANY_DATA,    "004C:121908/FFFF18", "Find My tag away from its owner" },
+    { FT_COMPANY_DATA,    "004C:121900/FFFF18", "Apple device away from its owner" },
+    { FT_SERVICE_UUID_16, "FD5A", "Samsung SmartTag" },
+    { FT_SERVICE_UUID_16, "FEED", "Tile tracker" },
+    { FT_SERVICE_UUID_16, "FEEC", "Tile tracker" },
+    { FT_SERVICE_UUID_16, "FD84", "Tile tracker" },
+    { FT_COMPANY_ID,      "067C", "Tile (mfr data)" },
+    { FT_SERVICE_UUID_16, "FE33", "Chipolo tracker" },
+    { FT_SERVICE_UUID_16, "FE65", "Chipolo tracker" },
+    { FT_COMPANY_ID,      "08C3", "Chipolo (mfr data)" },
+    { FT_SERVICE_UUID_16, "FA25", "Pebblebee tracker" },
+};
+const size_t PRESET_TRACKERS_COUNT = sizeof(PRESET_TRACKERS) / sizeof(PRESET_TRACKERS[0]);
+
+// Flipper Zero: its own service UUID (0x3080 | case colour), the stock name, the
+// prefix its BLE addresses use (80:E1:26/27, not registered to anyone) and Flipper
+// Devices' registered OUI and company ID.
+const PresetEntry PRESET_FLIPPER[] = {
+    { FT_SERVICE_UUID_16, "3081", "Flipper Zero (black)" },
+    { FT_SERVICE_UUID_16, "3082", "Flipper Zero (white)" },
+    { FT_SERVICE_UUID_16, "3083", "Flipper Zero (clear)" },
+    { FT_SERVICE_UUID_16, "3080", "Flipper Zero" },
+    { FT_NAME_PREFIX,     "Flipper ", "Flipper Zero (name)" },
+    { FT_COMPANY_ID,      "0E29", "Flipper Devices CID" },
+    { FT_MAC_PREFIX,      "80E126", "Flipper Zero address" },
+    { FT_MAC_PREFIX,      "80E127", "Flipper Zero address" },
+    { FT_MAC_PREFIX,      "0CFA22", "Flipper Devices OUI (IEEE)" },
+};
+const size_t PRESET_FLIPPER_COUNT = sizeof(PRESET_FLIPPER) / sizeof(PRESET_FLIPPER[0]);
+
+// Police and public-safety gear beyond the Axon / I-PRO presets: Axon's other
+// UUIDs, Motorola Solutions (radios, WatchGuard / V300 body cams), Vuzix HUDs,
+// and the body-cam, plate-reader and gunshot-sensor makers' own OUIs.
+const PresetEntry PRESET_POLICE[] = {
+    { FT_SERVICE_UUID_16, "FE6B", "Axon / TASER svc UUID" },
+    { FT_SERVICE_UUID_16, "FE6C", "Axon / TASER svc UUID" },
+    { FT_COMPANY_ID,      "04EC", "Motorola Solutions CID (radios, body cams)" },
+    { FT_SERVICE_UUID_16, "FD8E", "Motorola Solutions svc UUID" },
+    { FT_SERVICE_UUID_16, "FE04", "Motorola Solutions svc UUID" },
+    { FT_COMPANY_ID,      "060C", "Vuzix CID (smart glasses, HUDs)" },
+    { FT_MAC_PREFIX,      "00047D", "Motorola Solutions OUI" },
+    { FT_MAC_PREFIX,      "001885", "Motorola Solutions OUI" },
+    { FT_MAC_PREFIX,      "001F92", "Motorola Solutions OUI" },
+    { FT_MAC_PREFIX,      "4CCC34", "Motorola Solutions OUI" },
+    { FT_MAC_PREFIX,      "10746F", "Motorola Solutions (radio plant) OUI" },
+    { FT_MAC_PREFIX,      "9C862B", "Motorola Solutions (radio plant) OUI" },
+    { FT_MAC_PREFIX,      "B8E28C", "Motorola Solutions (radio plant) OUI" },
+    { FT_WIFI_PROBE,      "001D96", "WatchGuard Video body/car cam (WiFi)" },
+    { FT_WIFI_BEACON,     "001D96", "WatchGuard Video AP (WiFi)" },
+    { FT_WIFI_PROBE,      "0023BD", "Digital Ally cam (WiFi)" },
+    { FT_WIFI_BEACON,     "0023BD", "Digital Ally AP (WiFi)" },
+    { FT_WIFI_PROBE,      "0009BC", "Utility / BodyWorn (WiFi)" },
+    { FT_WIFI_BEACON,     "0009BC", "Utility Rocket car router (WiFi)" },
+    { FT_WIFI_PROBE,      "0016ED", "Utility / BodyWorn (WiFi)" },
+    { FT_WIFI_BEACON,     "0016ED", "Utility Rocket car router (WiFi)" },
+    { FT_WIFI_BEACON,     "00BF15", "Genetec AutoVu plate reader (WiFi)" },
+    { FT_WIFI_BEACON,     "0CBF15", "Genetec AutoVu plate reader (WiFi)" },
+    { FT_WIFI_BEACON,     "D411D6", "ShotSpotter sensor (WiFi)" },
+    { FT_WIFI_BEACON,     "701AD5", "Avigilon Alta camera (WiFi)" },
+};
+const size_t PRESET_POLICE_COUNT = sizeof(PRESET_POLICE) / sizeof(PRESET_POLICE[0]);
+
+// Drones over Bluetooth: ASTM F3411 Remote ID (Service Data 0xFFFA, legacy
+// adverts only until extended advertising is on), DJI's CID and the two DJI and
+// one Teal Drones OUIs the DJI preset in the library lacks.
+const PresetEntry PRESET_DRONES[] = {
+    { FT_SERVICE_UUID_16, "FFFA", "Remote ID broadcast (Bluetooth)" },
+    { FT_COMPANY_ID,      "08AA", "DJI CID (drones, RCs, Osmo)" },
+    { FT_MAC_PREFIX,      "4C43F6", "DJI OUI" },
+    { FT_MAC_PREFIX,      "882985", "DJI OUI" },
+    { FT_WIFI_BEACON,     "B030C8", "Teal Drones (WiFi)" },
+};
+const size_t PRESET_DRONES_COUNT = sizeof(PRESET_DRONES) / sizeof(PRESET_DRONES[0]);
+
+// Cameras and recorders worn on a face or a body, beyond the Meta preset: Snap
+// Spectacles, Even Realities, Brilliant Labs Frame, GoPro, Insta360, PLAUD.
+const PresetEntry PRESET_WEARABLES[] = {
+    { FT_COMPANY_ID,       "03C2", "Snap Spectacles CID" },
+    { FT_SERVICE_UUID_16,  "FE45", "Snap Spectacles svc UUID" },
+    { FT_MAC_PREFIX,       "98A40E", "Snap Inc OUI" },
+    { FT_COMPANY_ID,       "10F9", "Even Realities glasses CID" },
+    { FT_SERVICE_UUID_128, "7A2300015475A6A4654C8431F6AD49C4", "Brilliant Labs Frame glasses" },
+    { FT_SERVICE_UUID_16,  "FEA6", "GoPro camera" },
+    { FT_SERVICE_UUID_16,  "FEA5", "GoPro camera" },
+    { FT_COMPANY_ID,       "02F2", "GoPro CID" },
+    { FT_COMPANY_ID,       "10D7", "Insta360 camera CID" },
+    { FT_SERVICE_UUID_16,  "FC2D", "Insta360 camera" },
+    { FT_SERVICE_UUID_16,  "FC2E", "Insta360 camera" },
+    { FT_SERVICE_UUID_16,  "FC2F", "Insta360 camera" },
+    { FT_SERVICE_UUID_16,  "FC30", "Insta360 camera" },
+    { FT_COMPANY_ID,       "0FB2", "PLAUD voice recorder CID" },
+};
+const size_t PRESET_WEARABLES_COUNT = sizeof(PRESET_WEARABLES) / sizeof(PRESET_WEARABLES[0]);
+
+// Vehicles: Tesla (the per-car name S + 16 hex + C, its UUIDs and CID) and the
+// usual Bluetooth OBD-II dongles.
+const PresetEntry PRESET_VEHICLES[] = {
+    { FT_NAME_PATTERN,    "S################C", "Tesla vehicle (name)" },
+    { FT_SERVICE_UUID_16, "FE96", "Tesla svc UUID" },
+    { FT_SERVICE_UUID_16, "FE97", "Tesla svc UUID" },
+    { FT_COMPANY_ID,      "022B", "Tesla CID" },
+    { FT_NAME_SUBSTRING,  "OBDII", "OBD-II dongle" },
+    { FT_NAME_SUBSTRING,  "OBDBLE", "OBD-II dongle" },
+    { FT_NAME_SUBSTRING,  "OBDLink", "OBDLink dongle" },
+    { FT_NAME_SUBSTRING,  "Vgate", "Vgate OBD dongle" },
+    { FT_NAME_SUBSTRING,  "vLinker", "vLinker OBD dongle" },
+    { FT_NAME_SUBSTRING,  "VEEPEAK", "Veepeak OBD dongle" },
+};
+const size_t PRESET_VEHICLES_COUNT = sizeof(PRESET_VEHICLES) / sizeof(PRESET_VEHICLES[0]);
+
+const PresetDef PRESETS[] = {
+    { "axon",      "Axon body cam",  PRESET_AXON,      sizeof(PRESET_AXON) / sizeof(PRESET_AXON[0]) },
+    { "meta",      "META / RAY-BAN", PRESET_META,      sizeof(PRESET_META) / sizeof(PRESET_META[0]) },
+    { "ipro",      "I-PRO body cam", PRESET_IPRO,      sizeof(PRESET_IPRO) / sizeof(PRESET_IPRO[0]) },
+    { "verkada",   "Verkada camera", PRESET_VERKADA,   sizeof(PRESET_VERKADA) / sizeof(PRESET_VERKADA[0]) },
+    { "trackers",  "Tracker",        PRESET_TRACKERS,  sizeof(PRESET_TRACKERS) / sizeof(PRESET_TRACKERS[0]) },
+    { "flipper",   "Flipper",        PRESET_FLIPPER,   sizeof(PRESET_FLIPPER) / sizeof(PRESET_FLIPPER[0]) },
+    { "police",    "Police gear",    PRESET_POLICE,    sizeof(PRESET_POLICE) / sizeof(PRESET_POLICE[0]) },
+    { "drones",    "Drone",          PRESET_DRONES,    sizeof(PRESET_DRONES) / sizeof(PRESET_DRONES[0]) },
+    { "wearables", "Wearable cam",   PRESET_WEARABLES, sizeof(PRESET_WEARABLES) / sizeof(PRESET_WEARABLES[0]) },
+    { "vehicles",  "Vehicle",        PRESET_VEHICLES,  sizeof(PRESET_VEHICLES) / sizeof(PRESET_VEHICLES[0]) },
+};
+const size_t PRESETS_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
 
 // Returns count added. Skips entries whose (type, identifier) already
 // exists so repeated clicks don't duplicate rows.
@@ -4091,6 +4407,14 @@ R"html(
                 <div id="filterList">%FILTER_LIST_ROWS%</div>
                 <div id="emptyFilterMsg" class="empty-state-message">No filters yet — add one above or pick a vendor below.</div>
                 <div id="sigLines" class="sig-lines"></div>
+                <div class="sig-presets" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+                    <button type="button" class="oui-add-btn" onclick="addVendor('trackers','TRACKERS','')">+ Trackers (AirTag, SmartTag, Tile)</button>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('flipper','FLIPPER ZERO','')">+ Flipper Zero</button>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('police','POLICE GEAR','')">+ Police gear</button>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('drones','DRONES','')">+ Drones (Remote ID)</button>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('wearables','WEARABLE CAMS','')">+ Wearable cams</button>
+                    <button type="button" class="oui-add-btn" onclick="addVendor('vehicles','VEHICLES','')">+ Vehicles</button>
+                </div>
             </div>
 
             <div class="section">
@@ -4134,8 +4458,8 @@ R"html(
                     <div class="oui-meta"><strong>Common Devices:</strong> Axon Body 3/4, Fleet dash cam, Taser 7/10 — same IEEE block as the WiFi side; BT SIG company ID `0x034D` and service UUID `0xFC81` complete the signature (AXON preset installs all five)</div>
                     </details>
                     <details>
-                    <summary><b>DJI</b> <code>8 OUIs</code></summary>
-                    <div class="oui-entries"><code data-oui="0C:9A:E6" onclick="toggleOuiChip(this)">0C:9A:E6</code> <code data-oui="8C:58:23" onclick="toggleOuiChip(this)">8C:58:23</code> <code data-oui="04:A8:5A" onclick="toggleOuiChip(this)">04:A8:5A</code> <code data-oui="58:B8:58" onclick="toggleOuiChip(this)">58:B8:58</code> <code data-oui="E4:7A:2C" onclick="toggleOuiChip(this)">E4:7A:2C</code> <code data-oui="60:60:1F" onclick="toggleOuiChip(this)">60:60:1F</code> <code data-oui="48:1C:B9" onclick="toggleOuiChip(this)">48:1C:B9</code> <code data-oui="34:D2:62" onclick="toggleOuiChip(this)">34:D2:62</code></div>
+                    <summary><b>DJI</b> <code>10 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="0C:9A:E6" onclick="toggleOuiChip(this)">0C:9A:E6</code> <code data-oui="8C:58:23" onclick="toggleOuiChip(this)">8C:58:23</code> <code data-oui="04:A8:5A" onclick="toggleOuiChip(this)">04:A8:5A</code> <code data-oui="58:B8:58" onclick="toggleOuiChip(this)">58:B8:58</code> <code data-oui="E4:7A:2C" onclick="toggleOuiChip(this)">E4:7A:2C</code> <code data-oui="60:60:1F" onclick="toggleOuiChip(this)">60:60:1F</code> <code data-oui="48:1C:B9" onclick="toggleOuiChip(this)">48:1C:B9</code> <code data-oui="34:D2:62" onclick="toggleOuiChip(this)">34:D2:62</code> <code data-oui="4C:43:F6" onclick="toggleOuiChip(this)">4C:43:F6</code> <code data-oui="88:29:85" onclick="toggleOuiChip(this)">88:29:85</code></div>
                     <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="DJI" onclick="addFilterCard(this)">+ Add selected to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Consumer & Commercial Drones</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/OcuSync up to several km</div>
@@ -4158,22 +4482,166 @@ R"html(
                     <div class="oui-meta"><strong>Common Devices:</strong> Skydio 2, Skydio X2, Skydio 3</div>
                     </details>
                     <details>
-                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>7 OUIs</code></summary>
+                    <summary><b>META/RAYBAN SMARTGLASSES</b> <code>4 OUIs</code></summary>
                     <div class="oui-note"><em>sourced from <a href=\"https://github.com/sh4d0wm45k/glass-detect/blob/main/glass-detect/glass-detect.ino#L21\" target=\"_blank\" style=\"color:#4ecdc4;\">glass-detect repository</a></em></div>
-                    <div class="oui-note">Last one from Luxottica Group S.P.A. detected by @konradit.</div>
-                    <div class="oui-entries"><code data-oui="7C:2A:9E" onclick="toggleOuiChip(this)">7C:2A:9E</code> <code data-oui="CC:66:0A" onclick="toggleOuiChip(this)">CC:66:0A</code> <code data-oui="F4:03:43" onclick="toggleOuiChip(this)">F4:03:43</code> <code data-oui="5C:E9:1E" onclick="toggleOuiChip(this)">5C:E9:1E</code> <code data-oui="98:59:49" onclick="toggleOuiChip(this)">98:59:49</code> <code data-oui="80:AA:1C" onclick="toggleOuiChip(this)">80:AA:1C</code> <code data-oui="38:47:12" onclick="toggleOuiChip(this)">38:47:12</code></div>
+                    <div class="oui-note">Last one from Luxottica Group S.P.A. detected by @konradit. The three Luxottica blocks are IEEE-registered; `7C:2A:9E` is unregistered (community-reported). Blocks registered to Apple and HPE were removed on 2026-11-04. The glasses use rotating random addresses, so the META preset (company ID + service UUID + name) is the reliable signature. The three Luxottica blocks are IEEE-registered; `7C:2A:9E` is unregistered (community-reported). Blocks registered to Apple and HPE were removed on 2026-11-04. The glasses use rotating random addresses, so the META preset (company ID + service UUID + name) is the reliable signature.</div>
+                    <div class="oui-entries"><code data-oui="7C:2A:9E" onclick="toggleOuiChip(this)">7C:2A:9E</code> <code data-oui="98:59:49" onclick="toggleOuiChip(this)">98:59:49</code> <code data-oui="80:AA:1C" onclick="toggleOuiChip(this)">80:AA:1C</code> <code data-oui="38:47:12" onclick="toggleOuiChip(this)">38:47:12</code></div>
                     <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="META/RAYBAN SMARTGLASSES" onclick="addFilterCard(this)">+ Add selected to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> WiFi/BLE range</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Meta/Ray-Ban Smartglasses</div>
                     </details>
                     <details>
-                    <summary><b>FLIPPER ZERO</b> <code>2 OUIs</code></summary>
-                    <div class="oui-entries"><code data-oui="80:E1:26" onclick="toggleOuiChip(this)">80:E1:26</code> <code data-oui="80:E1:27" onclick="toggleOuiChip(this)">80:E1:27</code></div>
+                    <summary><b>FLIPPER ZERO</b> <code>3 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="80:E1:26" onclick="toggleOuiChip(this)">80:E1:26</code> <code data-oui="80:E1:27" onclick="toggleOuiChip(this)">80:E1:27</code> <code data-oui="0C:FA:22" onclick="toggleOuiChip(this)">0C:FA:22</code></div>
                     <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="FLIPPER ZERO" onclick="addFilterCard(this)">+ Add selected to filter list</button>
                     <div class="oui-meta"><strong>Category:</strong> Pentest / Hacking Tool</div>
                     <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
-                    <div class="oui-meta"><strong>Common Devices:</strong> Flipper Zero (BLE address prefixes, community-reported; its BLE name also contains "Flipper")</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Flipper Zero (80:E1:26/27 are the prefixes its BLE addresses use, community-reported and not registered to anyone; 0C:FA:22 is Flipper Devices' IEEE block; the FLIPPER preset adds its service UUIDs 0x3080-0x3083 and name)</div>
+                    </details>
+                    <details>
+                    <summary><b>ZEBRA TECHNOLOGIES</b> <code>17 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:05:12" onclick="toggleOuiChip(this)">00:05:12</code> <code data-oui="00:07:4D" onclick="toggleOuiChip(this)">00:07:4D</code> <code data-oui="00:15:70" onclick="toggleOuiChip(this)">00:15:70</code> <code data-oui="00:23:68" onclick="toggleOuiChip(this)">00:23:68</code> <code data-oui="00:A0:F8" onclick="toggleOuiChip(this)">00:A0:F8</code> <code data-oui="40:83:DE" onclick="toggleOuiChip(this)">40:83:DE</code> <code data-oui="48:8E:B7" onclick="toggleOuiChip(this)">48:8E:B7</code> <code data-oui="60:95:32" onclick="toggleOuiChip(this)">60:95:32</code> <code data-oui="74:93:A4" onclick="toggleOuiChip(this)">74:93:A4</code> <code data-oui="78:B8:D6" onclick="toggleOuiChip(this)">78:B8:D6</code> <code data-oui="84:24:8D" onclick="toggleOuiChip(this)">84:24:8D</code> <code data-oui="88:BC:AC" onclick="toggleOuiChip(this)">88:BC:AC</code> <code data-oui="90:75:DE" onclick="toggleOuiChip(this)">90:75:DE</code> <code data-oui="94:FB:29" onclick="toggleOuiChip(this)">94:FB:29</code> <code data-oui="C4:7D:CC" onclick="toggleOuiChip(this)">C4:7D:CC</code> <code data-oui="C8:1C:FE" onclick="toggleOuiChip(this)">C8:1C:FE</code> <code data-oui="FC:59:7A" onclick="toggleOuiChip(this)">FC:59:7A</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="ZEBRA TECHNOLOGIES" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / tablets / printers</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Zebra TC/MC/ET handhelds and tablets, ZQ/ZD Bluetooth printers, ring scanners (enterprise fleets often pin the MAC)</div>
+                    </details>
+                    <details>
+                    <summary><b>HONEYWELL / INTERMEC</b> <code>5 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:10:40" onclick="toggleOuiChip(this)">00:10:40</code> <code data-oui="00:10:20" onclick="toggleOuiChip(this)">00:10:20</code> <code data-oui="0C:23:69" onclick="toggleOuiChip(this)">0C:23:69</code> <code data-oui="AC:77:13" onclick="toggleOuiChip(this)">AC:77:13</code> <code data-oui="94:CA:0F" onclick="toggleOuiChip(this)">94:CA:0F</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="HONEYWELL / INTERMEC" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / scanners</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Honeywell, Intermec and Hand Held Products scanners and mobile computers</div>
+                    </details>
+                    <details>
+                    <summary><b>DATALOGIC</b> <code>3 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:07:BE" onclick="toggleOuiChip(this)">00:07:BE</code> <code data-oui="00:11:83" onclick="toggleOuiChip(this)">00:11:83</code> <code data-oui="00:18:67" onclick="toggleOuiChip(this)">00:18:67</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="DATALOGIC" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / scanners</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Datalogic scanners and mobile computers</div>
+                    </details>
+                    <details>
+                    <summary><b>SONIM</b> <code>2 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:24:A3" onclick="toggleOuiChip(this)">00:24:A3</code> <code data-oui="74:4D:DC" onclick="toggleOuiChip(this)">74:4D:DC</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="SONIM" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged phones</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Sonim rugged push-to-talk phones (first-responder carriers)</div>
+                    </details>
+                    <details>
+                    <summary><b>PANASONIC (TOUGHBOOK)</b> <code>6 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="4C:36:4E" onclick="toggleOuiChip(this)">4C:36:4E</code> <code data-oui="B8:20:8E" onclick="toggleOuiChip(this)">B8:20:8E</code> <code data-oui="BC:3E:0B" onclick="toggleOuiChip(this)">BC:3E:0B</code> <code data-oui="00:19:87" onclick="toggleOuiChip(this)">00:19:87</code> <code data-oui="54:CD:10" onclick="toggleOuiChip(this)">54:CD:10</code> <code data-oui="D8:B1:2A" onclick="toggleOuiChip(this)">D8:B1:2A</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="PANASONIC (TOUGHBOOK)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged laptops / tablets</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Panasonic Toughbook / Toughpad (common in patrol cars)</div>
+                    </details>
+                    <details>
+                    <summary><b>MOTOROLA SOLUTIONS</b> <code>8 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:04:7D" onclick="toggleOuiChip(this)">00:04:7D</code> <code data-oui="00:18:85" onclick="toggleOuiChip(this)">00:18:85</code> <code data-oui="00:1F:92" onclick="toggleOuiChip(this)">00:1F:92</code> <code data-oui="10:74:6F" onclick="toggleOuiChip(this)">10:74:6F</code> <code data-oui="4C:CC:34" onclick="toggleOuiChip(this)">4C:CC:34</code> <code data-oui="9C:86:2B" onclick="toggleOuiChip(this)">9C:86:2B</code> <code data-oui="B8:E2:8C" onclick="toggleOuiChip(this)">B8:E2:8C</code> <code data-oui="48:2C:EA" onclick="toggleOuiChip(this)">48:2C:EA</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="MOTOROLA SOLUTIONS" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Police radios / body cams / in-car</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> APX and business radios, Si-series and V300 body cams, in-car video (the PRESET "police" adds its BLE IDs)</div>
+                    </details>
+                    <details>
+                    <summary><b>AVIGILON</b> <code>1 OUI</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="70:1A:D5" onclick="toggleOuiChip(this)">70:1A:D5</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="AVIGILON" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Security Cameras</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Avigilon Alta cloud cameras (Motorola Solutions)</div>
+                    </details>
+                    <details>
+                    <summary><b>META PLATFORMS</b> <code>16 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="2C:26:17" onclick="toggleOuiChip(this)">2C:26:17</code> <code data-oui="48:05:60" onclick="toggleOuiChip(this)">48:05:60</code> <code data-oui="48:57:DD" onclick="toggleOuiChip(this)">48:57:DD</code> <code data-oui="50:99:03" onclick="toggleOuiChip(this)">50:99:03</code> <code data-oui="78:C4:FA" onclick="toggleOuiChip(this)">78:C4:FA</code> <code data-oui="80:F3:EF" onclick="toggleOuiChip(this)">80:F3:EF</code> <code data-oui="84:57:F7" onclick="toggleOuiChip(this)">84:57:F7</code> <code data-oui="88:25:08" onclick="toggleOuiChip(this)">88:25:08</code> <code data-oui="94:F9:29" onclick="toggleOuiChip(this)">94:F9:29</code> <code data-oui="A4:0E:2B" onclick="toggleOuiChip(this)">A4:0E:2B</code> <code data-oui="B4:17:A8" onclick="toggleOuiChip(this)">B4:17:A8</code> <code data-oui="C0:DD:8A" onclick="toggleOuiChip(this)">C0:DD:8A</code> <code data-oui="CC:A1:74" onclick="toggleOuiChip(this)">CC:A1:74</code> <code data-oui="D0:B3:C2" onclick="toggleOuiChip(this)">D0:B3:C2</code> <code data-oui="D4:D6:59" onclick="toggleOuiChip(this)">D4:D6:59</code> <code data-oui="F4:4E:35" onclick="toggleOuiChip(this)">F4:4E:35</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="META PLATFORMS" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses / VR</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Meta Quest headsets, Portal, other Meta hardware (Ray-Ban Meta glasses use Luxottica blocks, above)</div>
+                    </details>
+                    <details>
+                    <summary><b>SNAP (SPECTACLES)</b> <code>1 OUI</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="98:A4:0E" onclick="toggleOuiChip(this)">98:A4:0E</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="SNAP (SPECTACLES)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Snap Spectacles camera glasses</div>
+                    </details>
+                    <details>
+                    <summary><b>TESLA</b> <code>6 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="0C:29:8F" onclick="toggleOuiChip(this)">0C:29:8F</code> <code data-oui="4C:FC:AA" onclick="toggleOuiChip(this)">4C:FC:AA</code> <code data-oui="54:F8:F0" onclick="toggleOuiChip(this)">54:F8:F0</code> <code data-oui="90:E6:43" onclick="toggleOuiChip(this)">90:E6:43</code> <code data-oui="98:ED:5C" onclick="toggleOuiChip(this)">98:ED:5C</code> <code data-oui="D4:4F:14" onclick="toggleOuiChip(this)">D4:4F:14</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="TESLA" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Vehicles</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Tesla vehicles (the PRESET "vehicles" adds the per-car BLE name)</div>
+                    </details>
+                    <details>
+                    <summary><b>SQUARE</b> <code>1 OUI</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="44:59:25" onclick="toggleOuiChip(this)">44:59:25</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="SQUARE" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment readers</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Square card readers</div>
+                    </details>
+                    <details>
+                    <summary><b>VERIFONE</b> <code>5 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:0B:4F" onclick="toggleOuiChip(this)">00:0B:4F</code> <code data-oui="60:C7:98" onclick="toggleOuiChip(this)">60:C7:98</code> <code data-oui="88:BF:35" onclick="toggleOuiChip(this)">88:BF:35</code> <code data-oui="A4:60:11" onclick="toggleOuiChip(this)">A4:60:11</code> <code data-oui="E8:05:DC" onclick="toggleOuiChip(this)">E8:05:DC</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="VERIFONE" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment terminals</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Verifone card terminals</div>
+                    </details>
+                    <details>
+                    <summary><b>INGENICO</b> <code>7 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:03:81" onclick="toggleOuiChip(this)">00:03:81</code> <code data-oui="10:1E:DA" onclick="toggleOuiChip(this)">10:1E:DA</code> <code data-oui="38:EF:E3" onclick="toggleOuiChip(this)">38:EF:E3</code> <code data-oui="44:D4:7F" onclick="toggleOuiChip(this)">44:D4:7F</code> <code data-oui="54:7F:54" onclick="toggleOuiChip(this)">54:7F:54</code> <code data-oui="54:E1:40" onclick="toggleOuiChip(this)">54:E1:40</code> <code data-oui="B4:00:16" onclick="toggleOuiChip(this)">B4:00:16</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="INGENICO" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment terminals</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Ingenico card terminals</div>
+                    </details>
+                    <details>
+                    <summary><b>KASTLE SYSTEMS</b> <code>1 OUI</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="7C:55:A7" onclick="toggleOuiChip(this)">7C:55:A7</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="KASTLE SYSTEMS" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Access control</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Kastle building access readers</div>
+                    </details>
+                    <details>
+                    <summary><b>BRIVO</b> <code>1 OUI</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="00:1D:00" onclick="toggleOuiChip(this)">00:1D:00</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="BRIVO" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Access control</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Brivo access control panels</div>
+                    </details>
+                    <details>
+                    <summary><b>RASPBERRY PI</b> <code>8 OUIs</code></summary>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    <div class="oui-entries"><code data-oui="28:CD:C1" onclick="toggleOuiChip(this)">28:CD:C1</code> <code data-oui="2C:CF:67" onclick="toggleOuiChip(this)">2C:CF:67</code> <code data-oui="88:A2:9E" onclick="toggleOuiChip(this)">88:A2:9E</code> <code data-oui="98:FE:54" onclick="toggleOuiChip(this)">98:FE:54</code> <code data-oui="B8:27:EB" onclick="toggleOuiChip(this)">B8:27:EB</code> <code data-oui="D8:3A:DD" onclick="toggleOuiChip(this)">D8:3A:DD</code> <code data-oui="DC:A6:32" onclick="toggleOuiChip(this)">DC:A6:32</code> <code data-oui="E4:5F:01" onclick="toggleOuiChip(this)">E4:5F:01</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="true" data-wifi="true" data-label="RASPBERRY PI" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Hobbyist / Hacking Boards</div>
+                    <div class="oui-meta"><strong>Detection Range:</strong> BLE range</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Raspberry Pi boards (Pi-based tools such as Pwnagotchi, Kismet rigs)</div>
                     </details>
                     <!-- OUI_DB_END -->
                     <!-- WIFI_OUI_DB_START -->
@@ -4202,6 +4670,15 @@ R"html(
                     <div class="oui-meta"><strong>Common Devices:</strong> Verkada security cameras (CD/CM/CF series, WiFi models)</div>
                     </details>
                     <details>
+                    <summary><b>CRADLEPOINT</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:30:44" onclick="toggleOuiChip(this)">00:30:44</code> <code data-oui="00:E0:1C" onclick="toggleOuiChip(this)">00:E0:1C</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="CRADLEPOINT" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Vehicle / Mobile Routers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Cradlepoint cellular routers (IBR / R-series), common in police vehicles and mobile command units</div>
+                    <div class="oui-note"><em>IEEE registry: CradlePoint, Inc (now Ericsson Enterprise Wireless).</em></div>
+                    </details>
+                    <details>
                     <summary><b>WiFi PINEAPPLE (Hak5)</b> <code>1 OUI</code></summary>
                     <div class="oui-entries"><code data-oui="00:13:37" onclick="toggleOuiChip(this)">00:13:37</code></div>
                     <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="WiFi PINEAPPLE (Hak5)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
@@ -4216,6 +4693,249 @@ R"html(
                     <div class="oui-meta"><strong>Category:</strong> Pentest / Hacking Tool (WiFi handshake capture)</div>
                     <div class="oui-meta"><strong>Frame Types:</strong> Beacon</div>
                     <div class="oui-meta"><strong>Common Devices:</strong> Pwnagotchi (beacons from DE:AD:BE:EF:DE:AD)</div>
+                    </details>
+                    <details>
+                    <summary><b>ZEBRA TECHNOLOGIES (WiFi)</b> <code>17 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:05:12" onclick="toggleOuiChip(this)">00:05:12</code> <code data-oui="00:07:4D" onclick="toggleOuiChip(this)">00:07:4D</code> <code data-oui="00:15:70" onclick="toggleOuiChip(this)">00:15:70</code> <code data-oui="00:23:68" onclick="toggleOuiChip(this)">00:23:68</code> <code data-oui="00:A0:F8" onclick="toggleOuiChip(this)">00:A0:F8</code> <code data-oui="40:83:DE" onclick="toggleOuiChip(this)">40:83:DE</code> <code data-oui="48:8E:B7" onclick="toggleOuiChip(this)">48:8E:B7</code> <code data-oui="60:95:32" onclick="toggleOuiChip(this)">60:95:32</code> <code data-oui="74:93:A4" onclick="toggleOuiChip(this)">74:93:A4</code> <code data-oui="78:B8:D6" onclick="toggleOuiChip(this)">78:B8:D6</code> <code data-oui="84:24:8D" onclick="toggleOuiChip(this)">84:24:8D</code> <code data-oui="88:BC:AC" onclick="toggleOuiChip(this)">88:BC:AC</code> <code data-oui="90:75:DE" onclick="toggleOuiChip(this)">90:75:DE</code> <code data-oui="94:FB:29" onclick="toggleOuiChip(this)">94:FB:29</code> <code data-oui="C4:7D:CC" onclick="toggleOuiChip(this)">C4:7D:CC</code> <code data-oui="C8:1C:FE" onclick="toggleOuiChip(this)">C8:1C:FE</code> <code data-oui="FC:59:7A" onclick="toggleOuiChip(this)">FC:59:7A</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="ZEBRA TECHNOLOGIES (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / tablets / printers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Zebra TC/MC/ET handhelds and tablets, ZQ/ZD Bluetooth printers, ring scanners (enterprise fleets often pin the MAC)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>HONEYWELL / INTERMEC (WiFi)</b> <code>5 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:10:40" onclick="toggleOuiChip(this)">00:10:40</code> <code data-oui="00:10:20" onclick="toggleOuiChip(this)">00:10:20</code> <code data-oui="0C:23:69" onclick="toggleOuiChip(this)">0C:23:69</code> <code data-oui="AC:77:13" onclick="toggleOuiChip(this)">AC:77:13</code> <code data-oui="94:CA:0F" onclick="toggleOuiChip(this)">94:CA:0F</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="HONEYWELL / INTERMEC (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / scanners</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Honeywell, Intermec and Hand Held Products scanners and mobile computers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>DATALOGIC (WiFi)</b> <code>3 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:07:BE" onclick="toggleOuiChip(this)">00:07:BE</code> <code data-oui="00:11:83" onclick="toggleOuiChip(this)">00:11:83</code> <code data-oui="00:18:67" onclick="toggleOuiChip(this)">00:18:67</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="DATALOGIC (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged handhelds / scanners</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Datalogic scanners and mobile computers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>SONIM (WiFi)</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:24:A3" onclick="toggleOuiChip(this)">00:24:A3</code> <code data-oui="74:4D:DC" onclick="toggleOuiChip(this)">74:4D:DC</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="SONIM (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged phones</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Sonim rugged push-to-talk phones (first-responder carriers)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>PANASONIC (TOUGHBOOK) (WiFi)</b> <code>6 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="4C:36:4E" onclick="toggleOuiChip(this)">4C:36:4E</code> <code data-oui="B8:20:8E" onclick="toggleOuiChip(this)">B8:20:8E</code> <code data-oui="BC:3E:0B" onclick="toggleOuiChip(this)">BC:3E:0B</code> <code data-oui="00:19:87" onclick="toggleOuiChip(this)">00:19:87</code> <code data-oui="54:CD:10" onclick="toggleOuiChip(this)">54:CD:10</code> <code data-oui="D8:B1:2A" onclick="toggleOuiChip(this)">D8:B1:2A</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="PANASONIC (TOUGHBOOK) (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged laptops / tablets</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Panasonic Toughbook / Toughpad (common in patrol cars)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>GETAC (WiFi)</b> <code>6 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:03:53" onclick="toggleOuiChip(this)">00:03:53</code> <code data-oui="00:22:20" onclick="toggleOuiChip(this)">00:22:20</code> <code data-oui="00:22:4D" onclick="toggleOuiChip(this)">00:22:4D</code> <code data-oui="00:40:D0" onclick="toggleOuiChip(this)">00:40:D0</code> <code data-oui="14:84:30" onclick="toggleOuiChip(this)">14:84:30</code> <code data-oui="4C:38:D5" onclick="toggleOuiChip(this)">4C:38:D5</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="GETAC (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Rugged laptops / body cams</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Getac rugged laptops and tablets, Getac Video body and in-car cameras</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>MOTOROLA SOLUTIONS (WiFi)</b> <code>8 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:04:7D" onclick="toggleOuiChip(this)">00:04:7D</code> <code data-oui="00:18:85" onclick="toggleOuiChip(this)">00:18:85</code> <code data-oui="00:1F:92" onclick="toggleOuiChip(this)">00:1F:92</code> <code data-oui="10:74:6F" onclick="toggleOuiChip(this)">10:74:6F</code> <code data-oui="4C:CC:34" onclick="toggleOuiChip(this)">4C:CC:34</code> <code data-oui="9C:86:2B" onclick="toggleOuiChip(this)">9C:86:2B</code> <code data-oui="B8:E2:8C" onclick="toggleOuiChip(this)">B8:E2:8C</code> <code data-oui="48:2C:EA" onclick="toggleOuiChip(this)">48:2C:EA</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="MOTOROLA SOLUTIONS (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Police radios / body cams / in-car</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> APX and business radios, Si-series and V300 body cams, in-car video (the PRESET "police" adds its BLE IDs)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>WATCHGUARD VIDEO (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="00:1D:96" onclick="toggleOuiChip(this)">00:1D:96</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="WATCHGUARD VIDEO (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / In-car Video</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> WatchGuard 4RE in-car and Vista body cameras (not WatchGuard Technologies firewalls)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>DIGITAL ALLY (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="00:23:BD" onclick="toggleOuiChip(this)">00:23:BD</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="DIGITAL ALLY (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / In-car Video</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Digital Ally body cams and in-car video</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>UTILITY / BODYWORN (WiFi)</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:09:BC" onclick="toggleOuiChip(this)">00:09:BC</code> <code data-oui="00:16:ED" onclick="toggleOuiChip(this)">00:16:ED</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="UTILITY / BODYWORN (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Body Camera / Vehicle Router</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Utility BodyWorn cameras and Rocket in-vehicle routers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>SIERRA WIRELESS (AIRLINK) (WiFi)</b> <code>6 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:A0:D5" onclick="toggleOuiChip(this)">00:A0:D5</code> <code data-oui="28:A3:31" onclick="toggleOuiChip(this)">28:A3:31</code> <code data-oui="50:13:9D" onclick="toggleOuiChip(this)">50:13:9D</code> <code data-oui="64:CE:6E" onclick="toggleOuiChip(this)">64:CE:6E</code> <code data-oui="84:DB:2F" onclick="toggleOuiChip(this)">84:DB:2F</code> <code data-oui="CC:93:4A" onclick="toggleOuiChip(this)">CC:93:4A</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="SIERRA WIRELESS (AIRLINK) (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Vehicle / Mobile Routers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Sierra Wireless AirLink vehicle routers (police and fleet vehicles)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>GENETEC (AUTOVU) (WiFi)</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:BF:15" onclick="toggleOuiChip(this)">00:BF:15</code> <code data-oui="0C:BF:15" onclick="toggleOuiChip(this)">0C:BF:15</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="GENETEC (AUTOVU) (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Automated License Plate Reader (ALPR)</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Genetec AutoVu plate readers, Security Center appliances</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>TEAL DRONES (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="B0:30:C8" onclick="toggleOuiChip(this)">B0:30:C8</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="TEAL DRONES (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Military / Police Drones</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Teal Drones (Red Cat) Teal 2 / Black Widow</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>AXIS COMMUNICATIONS (WiFi)</b> <code>4 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:40:8C" onclick="toggleOuiChip(this)">00:40:8C</code> <code data-oui="AC:CC:8E" onclick="toggleOuiChip(this)">AC:CC:8E</code> <code data-oui="B8:A4:4F" onclick="toggleOuiChip(this)">B8:A4:4F</code> <code data-oui="E8:27:25" onclick="toggleOuiChip(this)">E8:27:25</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="AXIS COMMUNICATIONS (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Security Cameras</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Axis network cameras and body-worn cameras</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>HANWHA VISION (WiFi)</b> <code>3 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:09:18" onclick="toggleOuiChip(this)">00:09:18</code> <code data-oui="44:B4:23" onclick="toggleOuiChip(this)">44:B4:23</code> <code data-oui="E4:30:22" onclick="toggleOuiChip(this)">E4:30:22</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="HANWHA VISION (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Security Cameras</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Hanwha (Wisenet) network cameras</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>META PLATFORMS (WiFi)</b> <code>16 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="2C:26:17" onclick="toggleOuiChip(this)">2C:26:17</code> <code data-oui="48:05:60" onclick="toggleOuiChip(this)">48:05:60</code> <code data-oui="48:57:DD" onclick="toggleOuiChip(this)">48:57:DD</code> <code data-oui="50:99:03" onclick="toggleOuiChip(this)">50:99:03</code> <code data-oui="78:C4:FA" onclick="toggleOuiChip(this)">78:C4:FA</code> <code data-oui="80:F3:EF" onclick="toggleOuiChip(this)">80:F3:EF</code> <code data-oui="84:57:F7" onclick="toggleOuiChip(this)">84:57:F7</code> <code data-oui="88:25:08" onclick="toggleOuiChip(this)">88:25:08</code> <code data-oui="94:F9:29" onclick="toggleOuiChip(this)">94:F9:29</code> <code data-oui="A4:0E:2B" onclick="toggleOuiChip(this)">A4:0E:2B</code> <code data-oui="B4:17:A8" onclick="toggleOuiChip(this)">B4:17:A8</code> <code data-oui="C0:DD:8A" onclick="toggleOuiChip(this)">C0:DD:8A</code> <code data-oui="CC:A1:74" onclick="toggleOuiChip(this)">CC:A1:74</code> <code data-oui="D0:B3:C2" onclick="toggleOuiChip(this)">D0:B3:C2</code> <code data-oui="D4:D6:59" onclick="toggleOuiChip(this)">D4:D6:59</code> <code data-oui="F4:4E:35" onclick="toggleOuiChip(this)">F4:4E:35</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="META PLATFORMS (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses / VR</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Meta Quest headsets, Portal, other Meta hardware (Ray-Ban Meta glasses use Luxottica blocks, above)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>SNAP (SPECTACLES) (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="98:A4:0E" onclick="toggleOuiChip(this)">98:A4:0E</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="SNAP (SPECTACLES) (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Smartglasses</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Snap Spectacles camera glasses</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>STARLINK / SPACEX (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="00:26:12" onclick="toggleOuiChip(this)">00:26:12</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="STARLINK / SPACEX (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Satellite internet terminals</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Starlink dishes and routers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>TESLA (WiFi)</b> <code>6 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="0C:29:8F" onclick="toggleOuiChip(this)">0C:29:8F</code> <code data-oui="4C:FC:AA" onclick="toggleOuiChip(this)">4C:FC:AA</code> <code data-oui="54:F8:F0" onclick="toggleOuiChip(this)">54:F8:F0</code> <code data-oui="90:E6:43" onclick="toggleOuiChip(this)">90:E6:43</code> <code data-oui="98:ED:5C" onclick="toggleOuiChip(this)">98:ED:5C</code> <code data-oui="D4:4F:14" onclick="toggleOuiChip(this)">D4:4F:14</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="TESLA (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Vehicles</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Tesla vehicles (the PRESET "vehicles" adds the per-car BLE name)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>SQUARE (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="44:59:25" onclick="toggleOuiChip(this)">44:59:25</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="SQUARE (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment readers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Square card readers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>CLOVER (WiFi)</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="04:C1:03" onclick="toggleOuiChip(this)">04:C1:03</code> <code data-oui="D4:95:24" onclick="toggleOuiChip(this)">D4:95:24</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="CLOVER (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment readers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Clover POS terminals and Go readers</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>VERIFONE (WiFi)</b> <code>5 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:0B:4F" onclick="toggleOuiChip(this)">00:0B:4F</code> <code data-oui="60:C7:98" onclick="toggleOuiChip(this)">60:C7:98</code> <code data-oui="88:BF:35" onclick="toggleOuiChip(this)">88:BF:35</code> <code data-oui="A4:60:11" onclick="toggleOuiChip(this)">A4:60:11</code> <code data-oui="E8:05:DC" onclick="toggleOuiChip(this)">E8:05:DC</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="VERIFONE (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment terminals</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Verifone card terminals</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>INGENICO (WiFi)</b> <code>7 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:03:81" onclick="toggleOuiChip(this)">00:03:81</code> <code data-oui="10:1E:DA" onclick="toggleOuiChip(this)">10:1E:DA</code> <code data-oui="38:EF:E3" onclick="toggleOuiChip(this)">38:EF:E3</code> <code data-oui="44:D4:7F" onclick="toggleOuiChip(this)">44:D4:7F</code> <code data-oui="54:7F:54" onclick="toggleOuiChip(this)">54:7F:54</code> <code data-oui="54:E1:40" onclick="toggleOuiChip(this)">54:E1:40</code> <code data-oui="B4:00:16" onclick="toggleOuiChip(this)">B4:00:16</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="INGENICO (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Payment terminals</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Ingenico card terminals</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>BRIVO (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="00:1D:00" onclick="toggleOuiChip(this)">00:1D:00</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="BRIVO (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Access control</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Brivo access control panels</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>RASPBERRY PI (WiFi)</b> <code>8 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="28:CD:C1" onclick="toggleOuiChip(this)">28:CD:C1</code> <code data-oui="2C:CF:67" onclick="toggleOuiChip(this)">2C:CF:67</code> <code data-oui="88:A2:9E" onclick="toggleOuiChip(this)">88:A2:9E</code> <code data-oui="98:FE:54" onclick="toggleOuiChip(this)">98:FE:54</code> <code data-oui="B8:27:EB" onclick="toggleOuiChip(this)">B8:27:EB</code> <code data-oui="D8:3A:DD" onclick="toggleOuiChip(this)">D8:3A:DD</code> <code data-oui="DC:A6:32" onclick="toggleOuiChip(this)">DC:A6:32</code> <code data-oui="E4:5F:01" onclick="toggleOuiChip(this)">E4:5F:01</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="RASPBERRY PI (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Hobbyist / Hacking Boards</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> Raspberry Pi boards (Pi-based tools such as Pwnagotchi, Kismet rigs)</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>SHOTSPOTTER (WiFi)</b> <code>1 OUI</code></summary>
+                    <div class="oui-entries"><code data-oui="D4:11:D6" onclick="toggleOuiChip(this)">D4:11:D6</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="SHOTSPOTTER (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Gunshot detection sensors</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> ShotSpotter / SoundThinking acoustic sensors</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
+                    </details>
+                    <details>
+                    <summary><b>HID GLOBAL (WiFi)</b> <code>2 OUIs</code></summary>
+                    <div class="oui-entries"><code data-oui="00:06:33" onclick="toggleOuiChip(this)">00:06:33</code> <code data-oui="00:30:8E" onclick="toggleOuiChip(this)">00:30:8E</code></div>
+                    <button type="button" class="oui-add-btn" data-ble="false" data-wifi="true" data-label="HID GLOBAL (WiFi)" onclick="addFilterCard(this)">+ Add selected to filter list</button>
+                    <div class="oui-meta"><strong>Category:</strong> Access control readers</div>
+                    <div class="oui-meta"><strong>Frame Types:</strong> Probe Request, Beacon</div>
+                    <div class="oui-meta"><strong>Common Devices:</strong> HID Signo / iCLASS readers, HID Mobile Access</div>
+                    <div class="oui-note"><em>IEEE MA-L registry, checked 2026-11-04</em></div>
                     </details>
                     <!-- WIFI_OUI_DB_END -->
                 </div>
@@ -4386,6 +5106,8 @@ R"html(
                 .match-badge.type-MAC  { color: #e2e8f0; }
                 .match-badge.type-CID  { color: var(--amber); }
                 .match-badge.type-SVC  { color: #5eead4; }
+                .match-badge.type-UUID { color: #5eead4; }
+                .match-badge.type-MFR  { color: var(--amber); }
                 .match-badge.type-NAME { color: #c4b5fd; }
                 .match-badge.type-META { color: #f0abfc; }
                 .match-badge.type-PROBE  { background: rgba(78, 205, 196, 0.12); color: var(--accent); border-color: rgba(78, 205, 196, 0.30); }
@@ -4622,7 +5344,7 @@ R"html(
             
             function makeMatchBadge(type, description, matchIdent) {
                 var badge = document.createElement('span');
-                var allowed = ['OUI','MAC','CID','SVC','NAME','META','PROBE','BEACON'];
+                var allowed = ['OUI','MAC','CID','SVC','NAME','META','PROBE','BEACON','UUID','MFR','PFX','PAT'];
                 var t = (allowed.indexOf(type) >= 0) ? type : 'OUI';
                 badge.className = 'match-badge type-' + t;
                 badge.textContent = t;
@@ -4836,9 +5558,10 @@ R"html(
                 axon:   '00:25:DF',
                 ipro:   'D4:2D:C5',
                 verkada:'E0:A7:00',
-                meta:   '7C:2A:9E,CC:66:0A,F4:03:43,5C:E9:1E,98:59:49'
+                meta:   '98:59:49,80:AA:1C,38:47:12'
             };
-            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN', ipro: 'I-PRO', verkada: 'VERKADA' };
+            var VENDOR_LABELS = { axon: 'AXON', meta: 'META / RAY-BAN', ipro: 'I-PRO', verkada: 'VERKADA',
+                trackers: 'TRACKERS', flipper: 'FLIPPER ZERO', police: 'POLICE GEAR', drones: 'DRONES', wearables: 'WEARABLE CAMS', vehicles: 'VEHICLES' };
 
             // Repopulate the signature lines on page load. Without this the
             // filters stay installed in NVS but the UI looks empty after a
@@ -5504,10 +6227,10 @@ String configProcessor(const String& var) {
             rows += "</div>";
         }
 
-        // Preset-only rows: FT_COMPANY_ID, FT_SERVICE_UUID_16, FT_NAME_SUBSTRING, FT_META_COMPOSITE
+        // Preset-only rows: every non-OUI type (CID, SVC, NAME, META, UUID, MFR, PFX, PAT)
         for (const TargetFilter& f : targetFilters) {
-            if (f.type != FT_COMPANY_ID && f.type != FT_SERVICE_UUID_16 &&
-                f.type != FT_NAME_SUBSTRING && f.type != FT_META_COMPOSITE) continue;
+            if (f.type == FT_MAC_PREFIX || f.type == FT_FULL_MAC ||
+                f.type == FT_WIFI_PROBE || f.type == FT_WIFI_BEACON) continue;
 
             String badgeType = String(filterTypeCode(f.type));
             String escapedDesc = escapeHtmlAttr(f.description);
@@ -6448,25 +7171,14 @@ a { display: inline-block; margin-top: 16px; padding: 11px 22px; border-radius: 
         else if (request->hasParam("name", false)) presetName = request->getParam("name", false)->value();
         presetName.toLowerCase();
 
-        int added = 0;
-        String label;
-        if (presetName == "axon") {
-            label = "Axon body cam";
-            added = applyPreset(PRESET_AXON, PRESET_AXON_COUNT, "Axon body cam");
-        } else if (presetName == "meta") {
-            label = "Meta glasses";
-            added = applyPreset(PRESET_META, PRESET_META_COUNT, "Meta glasses");
-        } else if (presetName == "ipro") {
-            label = "I-PRO";
-            added = applyPreset(PRESET_IPRO, PRESET_IPRO_COUNT, "I-PRO");
-        } else if (presetName == "verkada") {
-            label = "Verkada";
-            added = applyPreset(PRESET_VERKADA, PRESET_VERKADA_COUNT, "Verkada");
-        } else {
+        int pi = presetIndex(presetName);
+        if (pi < 0) {
             request->send(400, "application/json",
                 "{\"ok\":false,\"error\":\"unknown preset\"}");
             return;
         }
+        String label = PRESETS[pi].label;
+        int added = applyPreset(PRESETS[pi].table, PRESETS[pi].count, PRESETS[pi].label);
 
         // Filter set changed — refresh the promiscuous fast-path OUI table.
         rebuildWifiOuiTable();
@@ -6489,12 +7201,9 @@ a { display: inline-block; margin-top: 16px; padding: 11px 22px; border-radius: 
         else if (request->hasParam("name", false)) n = request->getParam("name", false)->value();
         n.toLowerCase();
 
-        int removed = 0;
-        if (n == "axon")           removed = removePreset(PRESET_AXON, PRESET_AXON_COUNT);
-        else if (n == "meta")      removed = removePreset(PRESET_META, PRESET_META_COUNT);
-        else if (n == "ipro")      removed = removePreset(PRESET_IPRO, PRESET_IPRO_COUNT);
-        else if (n == "verkada")   removed = removePreset(PRESET_VERKADA, PRESET_VERKADA_COUNT);
-        else { request->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown preset\"}"); return; }
+        int pi = presetIndex(n);
+        if (pi < 0) { request->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown preset\"}"); return; }
+        int removed = removePreset(PRESETS[pi].table, PRESETS[pi].count);
 
         // Filter set changed — refresh the promiscuous fast-path OUI table.
         rebuildWifiOuiTable();
@@ -6505,14 +7214,11 @@ a { display: inline-block; margin-top: 16px; padding: 11px 22px; border-radius: 
     });
 
     server.on("/api/presets/status", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String body = "{\"axon\":";
-        body += presetInstalled(PRESET_AXON, PRESET_AXON_COUNT) ? "true" : "false";
-        body += ",\"meta\":";
-        body += presetInstalled(PRESET_META, PRESET_META_COUNT) ? "true" : "false";
-        body += ",\"ipro\":";
-        body += presetInstalled(PRESET_IPRO, PRESET_IPRO_COUNT) ? "true" : "false";
-        body += ",\"verkada\":";
-        body += presetInstalled(PRESET_VERKADA, PRESET_VERKADA_COUNT) ? "true" : "false";
+        String body = "{";
+        for (size_t i = 0; i < PRESETS_COUNT; i++) {
+            body += String(i ? "," : "") + "\"" + PRESETS[i].name + "\":";
+            body += presetInstalled(PRESETS[i].table, PRESETS[i].count) ? "true" : "false";
+        }
         body += "}";
         request->send(200, "application/json", body);
     });

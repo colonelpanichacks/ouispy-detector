@@ -1025,7 +1025,7 @@ void meshQueueDetection(const char* mac, const char* ident, const char* desc,
     b[5] = (wifiDomain ? 0x01 : 0x00) | (update ? 0x02 : 0x00);   // older homes ignore bit1
     memset(b + 6, 0, 18 + 18 + 40);
     memcpy(b + 6,  mac,   min(strlen(mac) + 1, (size_t)18));
-    memcpy(b + 24, ident, min(strlen(ident) + 1, (size_t)18));
+    memcpy(b + 24, ident, min(strlen(ident), (size_t)17));   // always NUL-terminated (long ids cut)
     memcpy(b + 42, desc,  min(strlen(desc) + 1, (size_t)40));
     d.infoLen = (info && infoLen) ? min((int)infoLen, MESH_DET_INFO_MAX) : 0;
     if (d.infoLen) memcpy(d.info, info, d.infoLen);
