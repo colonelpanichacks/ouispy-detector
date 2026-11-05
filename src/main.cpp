@@ -28,6 +28,11 @@
 #include "gpsnode.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
+#if CONFIG_IDF_TARGET_ESP32
+#include <esp32/rom/rtc.h>   // the atomgps builds (M5 Atom, plain ESP32)
+#else
+#include <esp32s3/rom/rtc.h>
+#endif
 #include <rom/crc.h>
 #include <mbedtls/sha256.h>
 
@@ -7311,6 +7316,41 @@ void startScanningMode() {
 // ================================
 // Setup Function
 // ================================
+// Why this boot happened, for the phone app and dashboard: a home that keeps
+// restarting on a phone's USB says whether it lost power (POWERON), browned
+// out, crashed (PANIC / *_WDT) or was reset by the USB host (raw 0x15, USB_UART_CHIP_RESET: this IDF
+// has no USB enum, so the raw ROM code carries it).
+static const char* g_resetReason = "UNKNOWN";
+static unsigned g_resetRaw = 0;
+static uint32_t g_boots = 0;
+
+static const char* resetReasonName(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        default:                return "UNKNOWN";
+    }
+}
+
+static void noteResetReason() {
+    g_resetReason = resetReasonName(esp_reset_reason());
+    g_resetRaw = (unsigned)rtc_get_reset_reason(0);
+    // The USB host reset the chip (DTR/RTS, as esptool does): this IDF calls it UNKNOWN.
+    if (g_resetRaw == 0x15) g_resetReason = "USB_HOST";
+    else if (g_resetRaw == 0x16) g_resetReason = "USB_JTAG";
+    preferences.begin("ouispy", false);
+    g_boots = preferences.getUInt("boots", 0) + 1;
+    preferences.putUInt("boots", g_boots);
+    preferences.end();
+}
+
 void setup() {
     // First sound within ~50 ms of power-on: the fanfare plays while the
     // rest of the board wakes up. The Mario "ready" pair still plays at the
@@ -7330,6 +7370,8 @@ void setup() {
     Serial.setTxBufferSize(4096);
     Serial.begin(115200);
     delay(250);
+    noteResetReason();
+    Serial.printf("[BOOT] reset reason %s (raw 0x%02X), boot %lu\n", g_resetReason, g_resetRaw, (unsigned long)g_boots);
 
     // Never let the WiFi driver persist radio settings to flash: the mesh's
     // LR protocol bit was surviving reboots there and leaking onto the AP.
@@ -7563,7 +7605,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"wd\":[%lu,%lu],\"wdch\":\"%s\",\"wdon\":%d,\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"wd\":[%lu,%lu],\"wdch\":\"%s\",\"wdon\":%d,\"rr\":\"%s\",\"rrc\":%u,\"boots\":%lu,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -7581,7 +7623,7 @@ static void emitTelemetry() {
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
                   encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
                   (unsigned long)eDropReplay, nvsFreeEntries(), FW_KIND + 12, ridEnabled ? 1 : 0, (unsigned)ridActive(),
-                  (unsigned long)wdWifiCount(), (unsigned long)wdBleCount(), wdch, wdActive() ? 1 : 0, stray.c_str(), nodes.c_str());
+                  (unsigned long)wdWifiCount(), (unsigned long)wdBleCount(), wdch, wdActive() ? 1 : 0, g_resetReason, g_resetRaw, (unsigned long)g_boots, stray.c_str(), nodes.c_str());
 }
 
 void loop() {
