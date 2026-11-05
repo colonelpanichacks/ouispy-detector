@@ -188,6 +188,7 @@ uint8_t meshTxPending();
 void meshSelfIdHex(char out[7]);
 void meshSelfId(uint8_t out[3]);
 void meshSendDrone(const uint8_t* body, uint8_t len);
+bool meshSendWd(const uint8_t* body, uint8_t len);   // wardrive.cpp's batches
 // Push everything pending in the TX queue immediately (used right before a
 // command-triggered reboot so the ack actually leaves the radio). No-op
 // unless the radio is parked on the mesh channel — see meshFlushTxNow.

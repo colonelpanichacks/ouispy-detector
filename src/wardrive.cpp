@@ -2,6 +2,7 @@
 #include "devinfo.h"
 #include <Preferences.h>
 #include "gpsnode.h"
+#include "mesh.h"
 
 // Sightings travel from the radio callbacks to loop() through a small ring (two
 // producers, so a spinlock), are de-duplicated against a table of every device seen,
@@ -176,7 +177,7 @@ void wdBleAdvert(const uint8_t mac[6], bool randomAddr, int8_t rssi, const char*
 
 // ---------------------------------------------------------------- loop side
 
-struct WdSeen { uint32_t key; uint32_t lastMs; int8_t lastRssi; };
+struct WdSeen { uint32_t key; uint32_t lastMs; int8_t lastRssi; uint32_t meshMs; };
 static WdSeen* seen = nullptr;   // WD_TABLE entries, allocated on first use
 static uint32_t nWifi = 0, nBle = 0;
 
@@ -284,6 +285,130 @@ static void printRaw(const WdRaw& r) {
     }
 }
 
+// ---------------------------------------------------------------- over the mesh
+//
+// MESH_T_WD body: id(3) flags(1: bit0 position follows) [lat i32 x1e7, lon i32 x1e7,
+// acc u16 dm] count(1), then per sighting: kind(1) mac(6) rssi(i8) ch(1) sec(1)
+// bits(1: 0 new, 1 random address, 2 hidden, 3 wps) mfr(u16, 0 none) len(1) text[len].
+// A batch goes when the next sighting won't fit, or WD_MESH_BATCH_MS after its first.
+
+#define WD_MESH_REPEAT_MS 60000
+#define WD_MESH_BATCH_MS  1200
+#define WD_MESH_HOLD_MS   4000   // a batch the TX queue had no room for waits this long, then drops
+#define WD_MESH_BODY_MAX  200
+
+static uint8_t mb[WD_MESH_BODY_MAX];
+static uint8_t mbLen = 0, mbCount = 0;
+static uint32_t mbFirst = 0;
+static uint32_t wdMeshSent = 0, wdMeshDropped = 0;
+
+static void meshWdStart() {
+    meshSelfId(mb);
+    double la, lo;
+    float acc;
+    mbLen = 4;
+    mb[3] = 0;
+    if (gpsNodeFix(la, lo, acc)) {
+        int32_t a = (int32_t)lround(la * 1e7), b = (int32_t)lround(lo * 1e7);
+        uint16_t d = (uint16_t)min(65535.0f, acc * 10);
+        memcpy(mb + 4, &a, 4);
+        memcpy(mb + 8, &b, 4);
+        memcpy(mb + 12, &d, 2);
+        mb[3] = 1;
+        mbLen = 14;
+    }
+    mbCount = 0;
+    mb[mbLen++] = 0;   // count, filled in as sightings go in
+    mbFirst = millis();
+}
+
+static void meshWdFlush(bool force) {
+    if (!mbCount) return;
+    uint32_t age = millis() - mbFirst;
+    if (!force && age < WD_MESH_BATCH_MS) return;
+    mb[(mb[3] & 1) ? 14 : 4] = mbCount;
+    if (meshSendWd(mb, mbLen)) {
+        wdMeshSent++;
+    } else if (age < WD_MESH_HOLD_MS) {
+        return;   // the queue is busy: try again next pass
+    } else {
+        wdMeshDropped += mbCount;
+    }
+    mbCount = 0;
+    mbLen = 0;
+}
+
+// Queue a sighting for the mesh; false when it had to be dropped.
+static bool meshWdAdd(const WdObs& o, bool isNew) {
+    if (!wdOn() || !meshCfg.enabled) return false;
+    uint8_t tl = (uint8_t)strnlen(o.txt, 32);
+    uint8_t need = 15 + tl;
+    if (mbCount && mbLen + need > WD_MESH_BODY_MAX) {
+        meshWdFlush(true);
+        if (mbCount) { wdMeshDropped++; return false; }   // still waiting on the last one
+    }
+    if (!mbCount) meshWdStart();
+    uint8_t* r = mb + mbLen;
+    r[0] = o.kind;
+    memcpy(r + 1, o.mac, 6);
+    r[7] = (uint8_t)o.rssi;
+    r[8] = o.ch;
+    r[9] = o.sec;
+    r[10] = (isNew ? 1 : 0) | (o.rnd ? 2 : 0) | ((o.wcap & 16) ? 4 : 0) | ((o.wcap & 8) ? 8 : 0);
+    uint16_t mf = o.hasMfr ? o.mfr : 0;
+    memcpy(r + 11, &mf, 2);
+    r[13] = tl;
+    memcpy(r + 14, o.txt, tl);
+    mbLen += 14 + tl;
+    mbCount++;
+    return true;
+}
+
+void wdFromMesh(const uint8_t* body, int len) {
+    if (len < 5 || !Serial) return;
+    char node[7];
+    snprintf(node, sizeof node, "%02X%02X%02X", body[0], body[1], body[2]);
+    char loc[64] = "";
+    int off = 4;
+    if (body[3] & 1) {
+        if (len < 15) return;
+        int32_t a, b;
+        uint16_t d;
+        memcpy(&a, body + 4, 4);
+        memcpy(&b, body + 8, 4);
+        memcpy(&d, body + 12, 2);
+        snprintf(loc, sizeof loc, ",\"lat\":%.7f,\"lon\":%.7f,\"acc\":%.1f", a / 1e7, b / 1e7, d / 10.0);
+        off = 14;
+    }
+    uint8_t count = body[off++];
+    for (uint8_t i = 0; i < count && off + 14 <= len; i++) {
+        const uint8_t* r = body + off;
+        uint8_t tl = r[13];
+        if (tl > 32 || off + 14 + tl > len) return;
+        off += 14 + tl;
+        if (Serial.availableForWrite() < 200) continue;   // a busy host: skip, never stall
+        char raw[33], txt[200], mac[18];
+        memcpy(raw, r + 14, tl);
+        raw[tl] = 0;
+        jsonStr(txt, sizeof txt, raw);
+        snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", r[1], r[2], r[3], r[4], r[5], r[6]);
+        int rssi = (int8_t)r[7];
+        uint8_t bits = r[10];
+        uint16_t mf;
+        memcpy(&mf, r + 11, 2);
+        if (r[0] == WD_WIFI) {
+            Serial.printf("WD {\"t\":\"wifi\",\"mac\":\"%s\",\"ssid\":\"%s\",\"ch\":%u,\"rssi\":%d,\"sec\":\"%s\","
+                          "\"hidden\":%d,\"wps\":%d%s,\"new\":%d,\"node\":\"%s\"}\n",
+                          mac, txt, r[8], rssi, secName(r[9]), (bits & 4) ? 1 : 0, (bits & 8) ? 1 : 0, loc, bits & 1, node);
+        } else {
+            char mfr[16] = "";
+            if (mf) snprintf(mfr, sizeof mfr, ",\"mfr\":%u", mf);
+            Serial.printf("WD {\"t\":\"ble\",\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d,\"rnd\":%d%s%s,\"new\":%d,\"node\":\"%s\"}\n",
+                          mac, txt, rssi, (bits & 2) ? 1 : 0, mfr, loc, bits & 1, node);
+        }
+    }
+}
+
 void wdLoop() {
     // A bounded batch per pass, and only while USB has room: a busy or absent host
     // must never stall the scan loop (sightings just wait in the ring, or drop).
@@ -303,7 +428,12 @@ void wdLoop() {
         s->lastMs = now;
         s->lastRssi = o.rssi;
         if (Serial && Serial.availableForWrite() > 200) printObs(o, isNew);
+        // over the mesh: every new device, and each one again at most once a minute
+        if (isNew || now - s->meshMs >= WD_MESH_REPEAT_MS) {
+            if (meshWdAdd(o, isNew)) s->meshMs = now;
+        }
     }
+    meshWdFlush(false);
     for (int i = 0; i < 6; i++) {
         WdRaw r;
         portENTER_CRITICAL(&wdMux);
@@ -436,9 +566,9 @@ bool wdConsole(const String& verb, const String& arg) {
     } else {
         char t[40];
         wdChannelsText(t, sizeof t);
-        Serial.printf("OK wd %s wifi=%lu ble=%lu ch=%s dropped=%lu raw=%s raw_dropped=%lu\n", wdActive() ? "on" : "off",
-                      (unsigned long)nWifi, (unsigned long)nBle, t, (unsigned long)dropped, rawOn ? "on" : "off",
-                      (unsigned long)rawDropped);
+        Serial.printf("OK wd %s wifi=%lu ble=%lu ch=%s dropped=%lu raw=%s raw_dropped=%lu mesh_sent=%lu mesh_dropped=%lu\n",
+                      wdActive() ? "on" : "off", (unsigned long)nWifi, (unsigned long)nBle, t, (unsigned long)dropped,
+                      rawOn ? "on" : "off", (unsigned long)rawDropped, (unsigned long)wdMeshSent, (unsigned long)wdMeshDropped);
     }
     return true;
 }

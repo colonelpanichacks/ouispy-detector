@@ -7,7 +7,9 @@
 // for the Tab5 (or any host): it stamps each sighting with its GPS fix, plots it and logs
 // WiGLE CSV. A device is printed when first heard and again every WD_REPEAT_MS while it
 // is still around (or sooner when it is a lot stronger), so a moving receiver gets fresh
-// positions to place it by. Nothing of this goes over the mesh.
+// positions to place it by. In a mesh the same sightings also go to the other nodes,
+// batched and rate-limited (each device when new and at most once a minute after), so
+// the home or any node a phone reads prints them as WD lines with "node" added.
 //
 // Raw mode (console "wd raw on"): every management frame and every BLE advert as hex,
 //   RAW {"t":"wifi","st":8,"ch":6,"rssi":-70,"a1":..,"a2":..,"a3":..,"len":180,"hex":".."}
@@ -30,8 +32,12 @@ void wdWifiFrame(const uint8_t* f, int len, uint8_t subtype, int8_t rssi, uint8_
 void wdBleAdvert(const uint8_t mac[6], bool randomAddr, int8_t rssi, const char* name,
                  bool hasMfr, uint16_t mfr, uint16_t appearance, const uint8_t* adv, int advLen);
 
-// loop(): print what the callbacks queued.
+// loop(): print what the callbacks queued (and, on a wardriver in a mesh, send it on).
 void wdLoop();
+
+// A MESH_T_WD body from another wardriver: printed as WD lines with its "node" (every
+// build, so the home, or any node a phone or the dashboard reads, shows them).
+void wdFromMesh(const uint8_t* body, int len);
 
 // Console: "wd" (state), "wd raw on|off", "wd ch all|6|1-6|1,6,11" (kept in NVS).
 // Returns true when the line was ours.
