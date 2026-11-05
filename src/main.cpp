@@ -301,6 +301,8 @@ void startScanningMode();
 void startConfigMode();
 void startDetectionFlash();
 void saveConfiguration();
+static volatile uint32_t g_bleAdverts = 0;   // every advert NimBLE handed us (TLM badv)
+
 class MyAdvertisedDeviceCallbacks;
 void enqueueDetection(const char* mac, const char* ident, const char* desc,
                       int rssi, FilterType type, bool wifi, const DevInfo* info);
@@ -3465,6 +3467,7 @@ class MyAdvertisedDeviceCallbacks;
 // BLE Advertised Device Callback Class
 class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
+        g_bleAdverts++;
         if (currentMode != SCANNING_MODE) return;
 
         String mac = advertisedDevice->getAddress().toString().c_str();
@@ -7675,7 +7678,7 @@ static void emitTelemetry() {
                   "\"rx\":%lu,\"q\":%lu,\"dup\":%lu,\"self\":%lu,\"bad\":%lu,"
                   "\"tx\":%lu,\"txf\":%lu,\"txcb\":%lu,\"pend\":%u,\"lrssi\":%d,"
                   "\"heal\":%d,\"mqtt\":%d,\"dsent\":%lu,\"dretry\":%lu,\"dack\":%lu,"
-                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"wd\":[%lu,%lu],\"wdch\":\"%s\",\"wdon\":%d,\"rr\":\"%s\",\"rrc\":%u,\"boots\":%lu,\"strays\":%s,%s}\n",
+                  "\"dlost\":%lu,\"dpend\":%u,\"park\":%u,\"pble\":%u,\"rate\":\"%s\",\"enc\":%d,\"eplain\":%lu,\"eauth\":%lu,\"ereplay\":%lu,\"nvs\":%u,\"kind\":\"%s\",\"rid\":%d,\"drones\":%u,\"wd\":[%lu,%lu],\"wdch\":\"%s\",\"wdon\":%d,\"badv\":%lu,\"rr\":\"%s\",\"rrc\":%u,\"boots\":%lu,\"strays\":%s,%s}\n",
                   selfId, meshCfg.enabled ? (meshCfg.home ? "home" : "remote") : "solo",
                   currentMode == SCANNING_MODE ? "scan" : "config",
                   meshCfg.enabled ? 1 : 0, meshCfg.channel,
@@ -7693,7 +7696,7 @@ static void emitTelemetry() {
                   (unsigned)park, (unsigned)parkBle, meshCfg.enabled ? meshTxRateName() : "off",
                   encOn ? 1 : 0, (unsigned long)eDropPlain, (unsigned long)eDropAuth,
                   (unsigned long)eDropReplay, nvsFreeEntries(), FW_KIND + 12, ridEnabled ? 1 : 0, (unsigned)ridActive(),
-                  (unsigned long)wdWifiCount(), (unsigned long)wdBleCount(), wdch, wdActive() ? 1 : 0, g_resetReason, g_resetRaw, (unsigned long)g_boots, stray.c_str(), nodes.c_str());
+                  (unsigned long)wdWifiCount(), (unsigned long)wdBleCount(), wdch, wdActive() ? 1 : 0, (unsigned long)g_bleAdverts, g_resetReason, g_resetRaw, (unsigned long)g_boots, stray.c_str(), nodes.c_str());
 }
 
 void loop() {
