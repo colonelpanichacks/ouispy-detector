@@ -16,16 +16,20 @@ void ridOnNewDrone();   // main.cpp
 #define RID_REPORT_MS  1000UL     // per drone, at most this often (serial + mesh)
 #endif
 #define RID_EXPIRE_MS  60000UL
+// USB is its own path: a host on this node's serial (the phone app, the dashboard) gets
+// every decoded frame within this, not the mesh's pace. A burst of one advert's message
+// parts (BLE sends Basic ID, Location, System one advert each) still comes out as one line.
+#define RID_USB_MS     50UL
 
 enum : uint8_t { RID_SRC_BEACON = 0, RID_SRC_NAN = 1, RID_SRC_BLE = 2 };
 enum : uint8_t { H_BASIC = 1, H_LOC = 2, H_SYS = 4, H_OP = 8, H_SELF = 16 };
 
 struct Drone {
-    bool used, dirty, fresh;
+    bool used, dirty, fresh, udirty;   // udirty: news for USB since the last line
     uint8_t mac[6];
     int8_t rssi;
     uint8_t src, has;
-    uint32_t seen, reported;
+    uint32_t seen, reported, printed;
     char id[ODID_ID_SIZE + 1];
     uint8_t idType, uaType;
     char opId[ODID_ID_SIZE + 1];
@@ -86,6 +90,7 @@ static void merge(const uint8_t mac[6], int8_t rssi, uint8_t src, const ODID_UAS
     if (u.OperatorIDValid) strlcpy(d.opId, u.OperatorID.OperatorId, sizeof(d.opId));
     if (u.SelfIDValid) strlcpy(d.desc, u.SelfID.Desc, sizeof(d.desc));
     d.dirty = true;
+    d.udirty = true;
     portEXIT_CRITICAL(&ridMux);
 }
 
@@ -247,6 +252,7 @@ void ridLoop() {
             copyAt[i] = now + RID_COPY_MS;
         }
     }
+    bool host = isSerialConnected();   // outside the spinlock
     for (int i = 0; i < RID_MAX; i++) {
         Drone snap;
         bool go = false;
@@ -262,14 +268,26 @@ void ridLoop() {
             snap = d;
             go = true;
         }
+        // USB: every frame as it comes (within RID_USB_MS), whatever the mesh pace
+        bool usb = host && d.used && d.udirty && now - d.printed >= RID_USB_MS;
+        Drone usnap;
+        if (usb) {
+            d.udirty = false;
+            d.printed = now;
+            usnap = d;
+        }
         portEXIT_CRITICAL(&ridMux);
-        if (!go) continue;
-        if (fresh) ridOnNewDrone();
         uint8_t selfId[3];
         meshSelfId(selfId);
+        if (usb && Serial.availableForWrite() >= 320) {   // a busy host: skip this one, never stall
+            uint8_t ub[RID_BODY_LEN];
+            encode(usnap, selfId, ub);
+            printBody(ub);
+        }
+        if (!go) continue;
+        if (fresh) ridOnNewDrone();
         uint8_t body[RID_BODY_LEN];
         encode(snap, selfId, body);
-        printBody(body);
         sendDrone(body);
         memcpy(copyBody[i], body, RID_BODY_LEN);
         copyLeft[i] = RID_COPIES;
