@@ -10,11 +10,16 @@ bool isSerialConnected();
 void ridOnNewDrone();   // main.cpp
 
 #define RID_MAX        12
-#ifdef SKYSPY_NODE
-#define RID_REPORT_MS  400UL      // a Sky-Spy node: as live as mesh-mapper (drones send position ~1-4 Hz)
-#else
-#define RID_REPORT_MS  1000UL     // per drone, at most this often (serial + mesh)
-#endif
+// Per drone, at most this often over the mesh, on every node: as live as mesh-mapper
+// (drones send their position ~1-4 Hz). What keeps the mesh clear is the hold-back below,
+// not a slower pace.
+#define RID_REPORT_MS  400UL
+// Hold-back: a node skips its report when another node reported the same drone in the
+// last RID_REPORT_MS and heard it louder. One drone then costs about one node's reports
+// (~2.5 a second) however many nodes hear it, instead of one stream per node (at the LR
+// rate a report is ~7 ms on the air, relayed ~3 times). Every node still sends one at
+// least every RID_FULL_MS, so the drone's heard-by list stays whole.
+#define RID_FULL_MS    2000UL
 #define RID_EXPIRE_MS  60000UL
 // USB is its own path: a host on this node's serial (the phone app, the dashboard) gets
 // every decoded frame within this, not the mesh's pace. A burst of one advert's message
@@ -30,6 +35,8 @@ struct Drone {
     int8_t rssi;
     uint8_t src, has;
     uint32_t seen, reported, printed;
+    uint32_t meshAt;                  // our last report into the mesh
+    uint32_t otherAt; int8_t otherRssi;   // another node's last report of it, and how loud it heard it
     char id[ODID_ID_SIZE + 1];
     uint8_t idType, uaType;
     char opId[ODID_ID_SIZE + 1];
@@ -222,16 +229,27 @@ static void printBody(const uint8_t* b) {
 void ridFromMesh(const uint8_t* body, int len) {
     if (len < RID_BODY_LEN) return;
     printBody(body);
+    // another node's report of a drone we hear too: note it for the hold-back
+    uint8_t self[3];
+    meshSelfId(self);
+    if (!memcmp(body, self, 3)) return;   // our own, relayed back
+    const uint8_t* mac = body + 6;
+    uint32_t now = millis();
+    portENTER_CRITICAL(&ridMux);
+    for (int i = 0; i < RID_MAX; i++) {
+        if (drones[i].used && !memcmp(drones[i].mac, mac, 6)) {
+            drones[i].otherAt = now;
+            drones[i].otherRssi = (int8_t)body[3];
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&ridMux);
 }
 
 // Repeats: the home sweeps channels and a drone report is best effort (no ack), so
 // each one goes out again ~150 ms and ~300 ms later; one copy reaching the home is
 // enough (the dashboard keeps the newest position).
-#ifdef SKYSPY_NODE
 #define RID_COPIES 1              // the next report is only 400 ms behind
-#else
-#define RID_COPIES 2
-#endif
 #define RID_COPY_MS 150UL
 static uint8_t copyBody[RID_MAX][RID_BODY_LEN];
 static uint8_t copyLeft[RID_MAX];
@@ -260,7 +278,9 @@ void ridLoop() {
         Drone& d = drones[i];
         if (d.used && now - d.seen > RID_EXPIRE_MS) d.used = false;
         bool fresh = false;
-        if (d.used && d.dirty && now - d.reported >= RID_REPORT_MS) {
+        // held back: a louder node just reported it (and our full report is not due)
+        bool held = d.used && now - d.otherAt < RID_REPORT_MS && d.otherRssi > d.rssi && now - d.meshAt < RID_FULL_MS && !d.fresh;
+        if (d.used && d.dirty && !held && now - d.reported >= RID_REPORT_MS) {
             fresh = d.fresh;
             d.fresh = false;
             d.dirty = false;
@@ -289,6 +309,9 @@ void ridLoop() {
         uint8_t body[RID_BODY_LEN];
         encode(snap, selfId, body);
         sendDrone(body);
+        portENTER_CRITICAL(&ridMux);
+        drones[i].meshAt = now;
+        portEXIT_CRITICAL(&ridMux);
         memcpy(copyBody[i], body, RID_BODY_LEN);
         copyLeft[i] = RID_COPIES;
         copyAt[i] = now + RID_COPY_MS;
