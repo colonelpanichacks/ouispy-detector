@@ -3636,6 +3636,14 @@ static bool scan_init() {
 #endif
             pBLEScan->setInterval(300);
             pBLEScan->setWindow(200);
+            // NimBLE keeps every device it heard in a list it walks on its own task when a
+            // scan ends, calling onResult for each. Its stop() and start(..., false) free
+            // that list from whichever task calls them: called from loop() as a 2 s scan
+            // ran out, they freed devices the host task was still reading (PANIC in
+            // findAdvField under onResult, Sky-Spy every few minutes). So: no list (each
+            // device is dropped on the host task right after its callback), stop is only
+            // the radio cancel (bleScanStop), and a restart continues instead of clearing.
+            pBLEScan->setMaxResults(0);
         }
     }
 
@@ -3682,12 +3690,18 @@ static bool scan_init() {
 
 // Transition to WiFi promiscuous sweep phase (idempotent).
 // STA must be disconnected before promiscuous can start.
+// Stop scanning without NimBLEScan::stop(): that frees the device list from this task
+// while the host task may still be reading it (see setMaxResults(0) above).
+static void bleScanStop() {
+    if (ble_gap_disc_active()) ble_gap_disc_cancel();
+}
+
 static void scan_to_wifi_sweep() {
     if (g_radioPhase == PHASE_WIFI_SWEEP) return;
 
     // Stop BLE scan if currently running
     if (g_radioPhase == PHASE_BLE_SCAN && pBLEScan) {
-        pBLEScan->stop();
+        bleScanStop();
         delay(50);
     }
 
@@ -3730,7 +3744,7 @@ static void scan_to_ble_scan() {
 
     // Start BLE scan (2 seconds)
     if (pBLEScan) {
-        pBLEScan->start(2, nullptr, false);
+        pBLEScan->start(2, nullptr, true);
     }
 
     // Park the radio on the mesh channel for the whole BLE phase: the mesh
@@ -3771,7 +3785,7 @@ static void scan_exit() {
     if (g_radioPhase == PHASE_WIFI_SWEEP) {
         esp_wifi_set_promiscuous(false);
     } else if (g_radioPhase == PHASE_BLE_SCAN && pBLEScan) {
-        pBLEScan->stop();
+        bleScanStop();
     }
 
     mesh_deinit();
@@ -7832,7 +7846,7 @@ void loop() {
         static bool otaParked = false;
         if (meshCfg.enabled && meshOtaBusy()) {
             if (!otaParked) {
-                if (pBLEScan && pBLEScan->isScanning()) pBLEScan->stop();
+                if (pBLEScan && pBLEScan->isScanning()) bleScanStop();
                 esp_wifi_set_promiscuous(false);
                 g_radioPhase = PHASE_IDLE;   // scanning restarts cleanly afterwards
                 meshParkChannel();
@@ -7890,7 +7904,7 @@ void loop() {
                 scan_to_wifi_sweep();            // the sweep then parks on the mesh (below)
                 g_phaseStartTime = currentMillis;
             } else if (pBLEScan && pBLEScan->isScanning()) {
-                pBLEScan->stop();                // BLE-only: already parked, just pause BLE
+                bleScanStop();                // BLE-only: already parked, just pause BLE
             }
         }
 
@@ -7916,7 +7930,7 @@ void loop() {
         // scanning instead of going silent after the first window.
         if (g_mqttReportState == MR_IDLE && hasBleFilters && !hasWifiFilters && !meshPriority &&
             g_radioPhase == PHASE_BLE_SCAN && pBLEScan && !pBLEScan->isScanning()) {
-            pBLEScan->start(2, nullptr, false);
+            pBLEScan->start(2, nullptr, true);
             g_phaseStartTime = currentMillis;
         }
 
