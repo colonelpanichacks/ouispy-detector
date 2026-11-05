@@ -1844,10 +1844,48 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
 //   RFL {json}  a node's installed filter list (a FILTERS_REPORT, or "filters")
 //   CMD {json}  a console command was accepted and flooded; id = cmdId
 #define STATUS_FMT 1
+// ================================
+// Why this boot happened, for the phone app and dashboard: a home that keeps
+// restarting on a phone's USB says whether it lost power (POWERON), browned
+// out, crashed (PANIC / *_WDT) or was reset by the USB host (raw 0x15, USB_UART_CHIP_RESET: this IDF
+// has no USB enum, so the raw ROM code carries it).
+static const char* g_resetReason = "UNKNOWN";
+static unsigned g_resetRaw = 0;
+static uint8_t g_resetEnum = 0;   // esp_reset_reason(), for the mesh status
+static uint32_t g_boots = 0;
+
+static const char* resetReasonName(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        default:                return "UNKNOWN";
+    }
+}
+
+static void noteResetReason() {
+    g_resetEnum = (uint8_t)esp_reset_reason();
+    g_resetReason = resetReasonName((esp_reset_reason_t)g_resetEnum);
+    g_resetRaw = (unsigned)rtc_get_reset_reason(0);
+    // The USB host reset the chip (DTR/RTS, as esptool does): this IDF calls it UNKNOWN.
+    if (g_resetRaw == 0x15) g_resetReason = "USB_HOST";
+    else if (g_resetRaw == 0x16) g_resetReason = "USB_JTAG";
+    preferences.begin("ouispy", false);
+    g_boots = preferences.getUInt("boots", 0) + 1;
+    preferences.putUInt("boots", g_boots);
+    preferences.end();
+}
+
 #define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
 #define STATUS_LEN 56        // + u8 keyFingerprint[4]
 // + u8 count, up to 8 neighbors x 5 bytes, then u8 alias length + alias
-#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX)
+#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX + 5)
 static String nodeAlias();
 static const char FW_BUILD[] = __DATE__ " " __TIME__;
 
@@ -1977,6 +2015,12 @@ static uint8_t buildStatus(uint8_t* d) {
     d[n++] = al;
     memcpy(d + n, a.c_str(), al);
     n += al;
+    // Then why it last booted: 'R', esp_reset_reason(), the raw ROM code, u16 boot count
+    // (older homes stop at the alias).
+    d[n++] = 'R';
+    d[n++] = g_resetEnum;
+    d[n++] = (uint8_t)g_resetRaw;
+    put16(d, n, (uint16_t)min<uint32_t>(g_boots, 65535));
     return n;
 }
 
@@ -2028,6 +2072,15 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
             memcpy(tmp, d + at + 1, d[at]);
             tmp[d[at]] = '\0';
             aliasJson = ",\"alias\":\"" + jsonEsc(String(tmp)) + "\"";
+            // Why it last booted, after the alias: "rr":"PANIC","rrc":4,"boots":12
+            uint16_t r = at + 1 + d[at];
+            if (r + 5 <= len && d[r] == 'R') {
+                unsigned raw = d[r + 2];
+                const char* rr = raw == 0x15 ? "USB_HOST" : raw == 0x16 ? "USB_JTAG" : resetReasonName((esp_reset_reason_t)d[r + 1]);
+                char t[64];
+                snprintf(t, sizeof t, ",\"rr\":\"%s\",\"rrc\":%u,\"boots\":%u", rr, raw, get16(d + r + 3));
+                aliasJson += t;
+            }
         }
     }
     Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
@@ -7315,42 +7368,6 @@ void startScanningMode() {
 
 // ================================
 // Setup Function
-// ================================
-// Why this boot happened, for the phone app and dashboard: a home that keeps
-// restarting on a phone's USB says whether it lost power (POWERON), browned
-// out, crashed (PANIC / *_WDT) or was reset by the USB host (raw 0x15, USB_UART_CHIP_RESET: this IDF
-// has no USB enum, so the raw ROM code carries it).
-static const char* g_resetReason = "UNKNOWN";
-static unsigned g_resetRaw = 0;
-static uint32_t g_boots = 0;
-
-static const char* resetReasonName(esp_reset_reason_t r) {
-    switch (r) {
-        case ESP_RST_POWERON:   return "POWERON";
-        case ESP_RST_EXT:       return "EXT";
-        case ESP_RST_SW:        return "SW";
-        case ESP_RST_PANIC:     return "PANIC";
-        case ESP_RST_INT_WDT:   return "INT_WDT";
-        case ESP_RST_TASK_WDT:  return "TASK_WDT";
-        case ESP_RST_WDT:       return "WDT";
-        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-        case ESP_RST_BROWNOUT:  return "BROWNOUT";
-        default:                return "UNKNOWN";
-    }
-}
-
-static void noteResetReason() {
-    g_resetReason = resetReasonName(esp_reset_reason());
-    g_resetRaw = (unsigned)rtc_get_reset_reason(0);
-    // The USB host reset the chip (DTR/RTS, as esptool does): this IDF calls it UNKNOWN.
-    if (g_resetRaw == 0x15) g_resetReason = "USB_HOST";
-    else if (g_resetRaw == 0x16) g_resetReason = "USB_JTAG";
-    preferences.begin("ouispy", false);
-    g_boots = preferences.getUInt("boots", 0) + 1;
-    preferences.putUInt("boots", g_boots);
-    preferences.end();
-}
-
 void setup() {
     // First sound within ~50 ms of power-on: the fanfare plays while the
     // rest of the board wakes up. The Mario "ready" pair still plays at the
