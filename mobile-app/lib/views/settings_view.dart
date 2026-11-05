@@ -2,6 +2,7 @@
 // alerts reach you, the offline map cache and app updates.
 import 'package:flutter/material.dart';
 
+import '../data/ble_link.dart';
 import '../data/dashboard.dart';
 import '../data/local_mesh.dart';
 import '../data/model.dart';
@@ -54,6 +55,61 @@ class _SettingsViewState extends State<SettingsView> {
     }
   }
 
+  /// Scan for OUI-SPY boards over Bluetooth and pick one; false if none was picked.
+  Future<bool> _pickBle() async {
+    final st = await bleStatus();
+    if (st != BleStatus.ready) {
+      App.I.m.toast(switch (st) {
+        BleStatus.poweredOff => 'turn Bluetooth on first',
+        BleStatus.unauthorized => 'allow Bluetooth for the app (Android asks once)',
+        BleStatus.locationServicesDisabled => 'Android needs location on to scan for Bluetooth boards',
+        _ => 'Bluetooth is not available here',
+      });
+      if (st != BleStatus.unauthorized) return false;
+    }
+    if (!mounted) return false;
+    final pick = await showModalBottomSheet<BleBoard>(
+      context: context,
+      builder: (c) => SafeArea(
+        child: FutureBuilder<List<BleBoard>>(
+          future: scanBoards(),
+          builder: (c, snap) => ListView(
+            shrinkWrap: true,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text('BOARDS NEARBY', style: T.label),
+              ),
+              if (!snap.hasData)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (snap.data!.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 20),
+                  child: Text('No OUI-SPY board is advertising the Bluetooth console. It needs firmware with the BLE link (OUI-SPY or OUI SPY Recon).', style: T.meta),
+                )
+              else
+                for (final b in snap.data!)
+                  ListTile(
+                    leading: const IconTile(Ph.bluetooth, C.violet),
+                    title: Text(b.name),
+                    subtitle: Text(b.id, style: T.code),
+                    trailing: Text('${b.rssi} dBm', style: T.code.copyWith(color: C.rssi(b.rssi))),
+                    onTap: () => Navigator.pop(c, b),
+                  ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (pick == null) return false;
+    s.bleId = pick.id;
+    s.bleName = pick.name;
+    return true;
+  }
+
   Future<void> _apply() async {
     s.host = host.text.trim();
     s.port = int.tryParse(port.text.trim()) ?? 5077;
@@ -103,9 +159,10 @@ class _SettingsViewState extends State<SettingsView> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
               child: Seg<String>(
-                items: const [('auto', 'Auto'), ('usb', 'Node on USB'), ('dashboard', 'Dashboard')],
+                items: const [('auto', 'Auto'), ('usb', 'USB'), ('ble', 'Bluetooth'), ('dashboard', 'Dashboard')],
                 value: s.source,
                 onChanged: (v) async {
+                  if (v == 'ble' && !await _pickBle()) return;
                   setState(() => s.source = v);
                   await s.save();
                   await App.I.pick();
@@ -117,7 +174,9 @@ class _SettingsViewState extends State<SettingsView> {
               child: Text(
                 App.I.link is LocalMesh
                     ? 'This phone is the dashboard: it reads the node on USB itself. Names, groups, notes and marks are kept on the phone.'
-                    : (s.source == 'dashboard'
+                    : (s.source == 'ble'
+                          ? 'Over Bluetooth to ${s.bleName.isEmpty ? 'the paired board' : s.bleName}. The board needs the Bluetooth console in its firmware.'
+                          : s.source == 'dashboard'
                           ? 'Data comes from the home dashboard.'
                           : 'Plug a node into the phone (USB OTG) and the app becomes the dashboard. With none plugged in it uses the home dashboard.'),
                 style: T.meta.copyWith(height: 1.4),

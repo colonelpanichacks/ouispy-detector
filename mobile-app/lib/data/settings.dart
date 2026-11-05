@@ -19,7 +19,8 @@ class Settings extends ChangeNotifier {
   int volume = 80; // 20..100, steps of 20
   Set<String> muted = {};
   int droneHours = 24;
-  String source = 'auto'; // auto: a node on USB when one is plugged in, else the dashboard; usb; dashboard
+  String source = 'auto';
+  String bleId = '', bleName = ''; // the board paired over Bluetooth (source 'ble') // auto: a node on USB when one is plugged in, else the dashboard; usb; dashboard
 
   Future<void> load() async {
     _p = await SharedPreferences.getInstance();
@@ -41,6 +42,8 @@ class Settings extends ChangeNotifier {
     muted = (_p.getStringList('muted') ?? const []).toSet();
     droneHours = _p.getInt('droneHours') ?? 24;
     source = _p.getString('source') ?? 'auto';
+    bleId = _p.getString('bleId') ?? '';
+    bleName = _p.getString('bleName') ?? '';
   }
 
   Future<void> save() async {
@@ -62,6 +65,8 @@ class Settings extends ChangeNotifier {
     await _p.setStringList('muted', muted.toList());
     await _p.setInt('droneHours', droneHours);
     await _p.setString('source', source);
+    await _p.setString('bleId', bleId);
+    await _p.setString('bleName', bleName);
     notifyListeners();
   }
 }

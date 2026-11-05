@@ -9,6 +9,11 @@
     <!-- phone GPS: placing nodes where you stand, your dot on the map, wardrive tags -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- a board over Bluetooth (ble_link.dart): scanning is only for OUI-SPY boards, never for location -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <!-- in-app updates: the downloaded APK opens the system installer -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />

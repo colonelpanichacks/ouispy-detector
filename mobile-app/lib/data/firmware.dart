@@ -96,16 +96,33 @@ String sha256Hex(List<int> data) {
 
 const chipEsp32s3 = 9;
 const appDescMagic = 0xABCD5432;
-const fwMaxSize = 0x330000; // one app slot of default_8MB.csv
+const fwMaxSize = 0x330000; // one app slot of default_8MB.csv (OUI-SPY nodes)
+const fwMaxSizeRecon = 0x600000; // one app slot of the Recon's partitions-16MB.csv
 const fwChunk = 512; // bytes per fwdata line
 
 /// The firmwares, as the dashboard's library names them.
-const fwKinds = ['detector', 'skyspy', 'wardrive', 'gps', 'gpswd'];
-const fwNames = {'detector': 'OUI-SPY detector', 'skyspy': 'Sky-Spy', 'wardrive': 'Wardriver', 'gps': 'GPS node', 'gpswd': 'GPS wardriver'};
+const fwKinds = ['detector', 'skyspy', 'wardrive', 'gps', 'gpswd', 'reconblue'];
+const fwNames = {
+  'detector': 'OUI-SPY detector',
+  'skyspy': 'Sky-Spy',
+  'wardrive': 'Wardriver',
+  'gps': 'GPS node',
+  'gpswd': 'GPS wardriver',
+  'reconblue': 'OUI SPY Recon (Unified Blue)',
+};
 const _atom = {'gps', 'gpswd'};
 
 bool isAtomKind(String kind) => _atom.contains(kind);
-String boardOf(String kind) => isAtomKind(kind) ? 'AtomS3 + GPS base' : 'XIAO ESP32-S3';
+bool isReconKind(String kind) => kind == 'reconblue';
+
+/// The three boards: OUI-SPY's XIAO ESP32-S3, the AtomS3 + GPS base, and the OUI SPY
+/// Recon's display S3 (Unified Blue, build stamp ending 'R', its own 16 MB partitions).
+String boardFamily(String kind) => isReconKind(kind) ? 'recon' : (isAtomKind(kind) ? 'atom' : 'xiao');
+String boardOf(String kind) => switch (boardFamily(kind)) {
+  'recon' => 'OUI SPY Recon display (XIAO S3 Plus)',
+  'atom' => 'AtomS3 + GPS base',
+  _ => 'XIAO ESP32-S3',
+};
 
 /// A node's firmware from the build stamp it reports ("Oct28 20:37:51S" = Sky-Spy).
 String nodeKindOf(String fw) {
@@ -116,6 +133,7 @@ String nodeKindOf(String fw) {
     'W' => 'wardrive',
     'G' => 'gps',
     'Y' => 'gpswd',
+    'R' => 'reconblue',
     _ => 'detector',
   };
 }
@@ -137,8 +155,8 @@ class FwImage {
   /// Checks the image as the dashboard does; throws [FwError] when it is not a node app.
   factory FwImage.parse(List<int> data, {String name = 'firmware.bin', bool hash = true}) {
     final b = data is Uint8List ? data : Uint8List.fromList(data);
-    if (b.length < 64 * 1024 || b.length > fwMaxSize) {
-      throw FwError('size ${b.length} bytes is not a plausible app image (64 KB to ${fwMaxSize ~/ 1024} KB)');
+    if (b.length < 64 * 1024 || b.length > fwMaxSizeRecon) {
+      throw FwError('size ${b.length} bytes is not a plausible app image (64 KB to ${fwMaxSizeRecon ~/ 1024} KB)');
     }
     if (b[0] != 0xE9) throw FwError('not an ESP32 application image (use firmware.bin, not a merged or bootloader file)');
     final bd = ByteData.sublistView(b);
@@ -152,7 +170,10 @@ class FwImage {
     }
 
     final text = latin1.decode(b);
-    return FwImage._(b, name, chip, cs(48, 80), cs(80, 112), cs(128, 144), cs(112, 128), buildStamp(text), kindIn(text), hash ? sha256Hex(b) : '');
+    final kind = kindIn(text);
+    // an OUI-SPY node's app slot is half the Recon's
+    if (!isReconKind(kind) && b.length > fwMaxSize) throw FwError('${b.length} bytes is more than an OUI-SPY node\'s app slot (${fwMaxSize ~/ 1024} KB)');
+    return FwImage._(b, name, chip, cs(48, 80), cs(80, 112), cs(128, 144), cs(112, 128), buildStamp(text), kind, hash ? sha256Hex(b) : '');
   }
 
   String get label => '${fwNames[kind] ?? kind} ${build.isNotEmpty ? build : '$date $time'}';
@@ -202,8 +223,8 @@ bool fwIsCurrent(String nodeFw, String build) {
 String? boardError(String kind, String nodeFw, String id) {
   if (nodeFw.trim().isEmpty) return null; // not reported: the dashboard lets it through too
   final have = nodeKindOf(nodeFw);
-  if (isAtomKind(have) == isAtomKind(kind)) return null;
-  return '$id is ${isAtomKind(have) ? 'an AtomS3 + GPS' : 'a XIAO'} board: the ${fwNames[kind] ?? kind} build is for ${isAtomKind(kind) ? 'an AtomS3 + GPS base' : 'a XIAO ESP32-S3'}';
+  if (boardFamily(have) == boardFamily(kind)) return null;
+  return '$id is ${boardOf(have)}: the ${fwNames[kind] ?? kind} build is for ${boardOf(kind)}';
 }
 
 /// An image checked against a node: the chip, then the board. Null when it may go on.

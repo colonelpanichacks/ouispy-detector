@@ -249,7 +249,8 @@ class LocalMesh implements Backend {
   DateTime _lastPoll = DateTime(0);
 
   @override
-  String get label => 'usb';
+  String get label => link is UsbLink ? 'usb' : 'ble';
+  String get _via => link is UsbLink ? 'USB' : 'BLE';
 
   (double, double)? _pos(String id) {
     final n = store.nodes[id];
@@ -261,21 +262,21 @@ class LocalMesh implements Backend {
   Future<void> start() async {
     await store.load();
     _detId = store.dets.isEmpty ? 0 : (store.dets.last['id'] as num? ?? 0).toInt();
-    m.mode = 'usb';
+    m.mode = label;
     m.link = Link.connecting;
-    m.target = 'USB  ${link.name}';
-    m.lastError = 'waiting for the node on USB';
+    m.target = '$_via  ${link.name}';
+    m.lastError = 'waiting for the node on $_via';
     _sub = link.lines.listen(_line);
     _st = link.state.listen((up) {
       if (!up) {
         m.link = Link.connecting;
-        m.lastError = 'node unplugged or silent';
+        m.lastError = link is UsbLink ? 'node unplugged or silent' : 'node out of range or silent';
         m.changed();
       }
     });
     await fetchState();
     if (!await link.start()) {
-      m.lastError = 'could not open the node on USB (allow it when Android asks)';
+      m.lastError = link is UsbLink ? 'could not open the node on USB (allow it when Android asks)' : 'could not reach the node over Bluetooth (in range? paired?)';
       m.changed();
     }
     _tick = Timer.periodic(const Duration(seconds: 1), (_) => _second());
@@ -398,7 +399,7 @@ class LocalMesh implements Backend {
     if (m.link != Link.up) {
       m.link = Link.up;
       m.lastError = '';
-      m.target = 'USB  ${homeId.isEmpty ? link.name : homeId}';
+      m.target = '$_via  ${homeId.isEmpty ? link.name : homeId}';
     }
     _pushFleet();
   }

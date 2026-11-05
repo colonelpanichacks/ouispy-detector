@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'data/alerts.dart';
 import 'data/backend.dart';
+import 'data/ble_link.dart';
 import 'data/blue_modes.dart';
 import 'data/dashboard.dart';
 import 'data/fpv.dart';
@@ -47,9 +48,14 @@ class App {
     if (_picking) return;
     _picking = true;
     try {
-      final boards = s.source == 'dashboard' ? const [] : await UsbLink.boards();
+      final boards = (s.source == 'dashboard' || s.source == 'ble') ? const [] : await UsbLink.boards();
       final Backend want;
-      if (boards.isNotEmpty) {
+      if (s.source == 'ble' && s.bleId.isNotEmpty) {
+        // a board over Bluetooth: the app is the dashboard, no cable
+        final cur = link;
+        if (cur is LocalMesh && cur.link is BleLink && (cur.link as BleLink).id == s.bleId) return;
+        want = LocalMesh(m, BleLink(s.bleId, s.bleName.isEmpty ? 'OUI-SPY' : s.bleName));
+      } else if (boards.isNotEmpty) {
         final cur = link;
         if (cur is LocalMesh && cur.link.open) return;
         want = LocalMesh(m, UsbLink(boards.first));
@@ -92,7 +98,7 @@ Future<void> main() async {
   AlertOut(m, s).start();
   // a node plugged in or pulled out switches the source (auto / usb)
   UsbLink.events?.listen((_) => Future.delayed(const Duration(milliseconds: 600), App.I.pick));
-  if (s.source == 'dashboard' || (await UsbLink.boards()).isEmpty) {
+  if (s.source == 'dashboard' || (s.source != 'ble' && (await UsbLink.boards()).isEmpty)) {
     Fpv.I.attach(dash);
     Board.I.attach(dash);
     Wardrive.I.attach(dash);

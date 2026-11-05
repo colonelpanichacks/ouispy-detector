@@ -17,8 +17,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'dashboard.dart';
 
-const appVersion = '0.2.3';
-const appBuild = 5;
+const appVersion = '0.2.4';
+const appBuild = 6;
 
 class Release {
   Release(this.version, this.build, this.url, this.sha256, this.from);
