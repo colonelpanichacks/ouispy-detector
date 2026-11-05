@@ -292,8 +292,8 @@ static void printRaw(const WdRaw& r) {
 // bits(1: 0 new, 1 random address, 2 hidden, 3 wps) mfr(u16, 0 none) len(1) text[len].
 // A batch goes when the next sighting won't fit, or WD_MESH_BATCH_MS after its first.
 
-#define WD_MESH_REPEAT_MS 60000
-#define WD_MESH_BATCH_MS  1200
+#define WD_MESH_REPEAT_MS WD_REPEAT_MS   // as often as USB shows it
+#define WD_MESH_BATCH_MS  500
 #define WD_MESH_HOLD_MS   4000   // a batch the TX queue had no room for waits this long, then drops
 #define WD_MESH_BODY_MAX  200
 
@@ -428,7 +428,7 @@ void wdLoop() {
         s->lastMs = now;
         s->lastRssi = o.rssi;
         if (Serial && Serial.availableForWrite() > 200) printObs(o, isNew);
-        // over the mesh: every new device, and each one again at most once a minute
+        // over the mesh, live: what USB prints (new, then every WD_REPEAT_MS or when much stronger)
         if (isNew || now - s->meshMs >= WD_MESH_REPEAT_MS) {
             if (meshWdAdd(o, isNew)) s->meshMs = now;
         }

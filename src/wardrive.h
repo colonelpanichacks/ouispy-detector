@@ -8,7 +8,8 @@
 // WiGLE CSV. A device is printed when first heard and again every WD_REPEAT_MS while it
 // is still around (or sooner when it is a lot stronger), so a moving receiver gets fresh
 // positions to place it by. In a mesh the same sightings also go to the other nodes,
-// batched and rate-limited (each device when new and at most once a minute after), so
+// batched within half a second, as often as USB prints them (held back only when the
+// mesh's TX queue is busy), so
 // the home or any node a phone reads prints them as WD lines with "node" added.
 //
 // Raw mode (console "wd raw on"): every management frame and every BLE advert as hex,
