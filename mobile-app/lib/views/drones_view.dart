@@ -649,44 +649,13 @@ class _Kpis extends StatelessWidget {
     for (final d in live) {
       if (d.hagl != null) hi = math.max(hi, d.hagl!);
     }
-    Widget cell(Widget w, {bool right = true, bool bottom = true}) => Container(
-      decoration: BoxDecoration(
-        border: Border(
-          right: right ? const BorderSide(color: C.silkLine) : BorderSide.none,
-          bottom: bottom ? const BorderSide(color: C.silkLine) : BorderSide.none,
-        ),
-      ),
-      child: w,
-    );
-    return Panel(
-      padding: EdgeInsets.zero,
-      margin: const EdgeInsets.fromLTRB(16, 18, 16, 4),
-      child: Column(
-        children: [
-          IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: cell(Stat('Live', '${live.length}', icon: Ph.drone, color: live.isNotEmpty ? C.hot : C.text)),
-                ),
-                Expanded(child: cell(Stat('Airborne', '$airborne', color: airborne > 0 ? C.hot : C.text))),
-                Expanded(child: cell(Stat('Pilots', '$pilots', color: pilots > 0 ? C.orange : C.text), right: false)),
-              ],
-            ),
-          ),
-          IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(child: cell(Stat('Highest AGL', hi >= 0 ? '${hi.round()} m' : '-'), bottom: false)),
-                Expanded(child: cell(Stat('In window', '${all.length}'), right: false, bottom: false)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+    return ReadoutStrip([
+      ('Live', '${live.length}', live.isNotEmpty ? C.hot : C.text),
+      ('Airborne', '$airborne', airborne > 0 ? C.hot : C.text),
+      ('Pilots', '$pilots', pilots > 0 ? C.orange : C.text),
+      ('Top AGL', hi >= 0 ? '${hi.round()}m' : '-', C.text),
+      ('In window', '${all.length}', C.text),
+    ], margin: const EdgeInsets.fromLTRB(16, 4, 16, 4));
   }
 }
 

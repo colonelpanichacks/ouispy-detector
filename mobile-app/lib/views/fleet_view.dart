@@ -49,19 +49,14 @@ class FleetView extends StatelessWidget {
                 _HomeLink(h),
               ],
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                 child: ActionStrip([
                   ('Control', Ph.slidersHorizontal, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FleetControlView()))),
+                  ('Mesh', Ph.graph, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MeshStatusView()))),
+                  ('Firmware', Ph.lightning, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FirmwareView()))),
                   ('Metrics', Ph.chartBar, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MetricsView()))),
                   ('Board', Ph.cpu, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BoardView()))),
                   ('Console', Ph.terminalWindow, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ConsoleView()))),
-                ]),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                child: ActionStrip([
-                  ('Mesh status', Ph.graph, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const MeshStatusView()))),
-                  ('Firmware', Ph.lightning, C.text, () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const FirmwareView()))),
                 ]),
               ),
               SectionHead('Nodes', trailing: Text('${m.nodesOnline} of ${nodes.length} online', style: T.meta)),
@@ -153,17 +148,29 @@ class _NodeCard extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
+          const SizedBox(height: 6),
+          // the details on one silk line: build, filters, peers, uptime; alarms as tags
+          Row(
             children: [
-              if (n.fw.isNotEmpty) Tag(n.fw, icon: Ph.cpu),
-              if (n.filters != null) Tag('${n.filters} filters', icon: Ph.funnel, color: n.filtersFresh == false ? C.amber : C.muted),
-              if (n.peers != null) Tag('${n.peers} peers', icon: Ph.graph),
-              if (n.up != null) Tag('up ${dur(n.up!)}', icon: Ph.clock),
-              if (ota.isNotEmpty && ota != 'done' && ota != 'failed') Tag('Updating ${n.ota['pct'] ?? ''}%', icon: Ph.arrowsClockwise, color: C.accent),
-              if (n.raw['lost'] == true) const Tag('Lost', icon: Ph.warning, color: C.red),
+              const SizedBox(width: 48),
+              Expanded(
+                child: Text(
+                  [
+                    if (n.fw.isNotEmpty) n.fw,
+                    if (n.filters != null) '${n.filters} filters',
+                    if (n.peers != null) '${n.peers} peers',
+                    if (n.up != null) 'up ${dur(n.up!)}',
+                  ].join('  ·  ').toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: T.silk.copyWith(fontSize: 9.5, color: n.filtersFresh == false ? C.amber : C.silk),
+                ),
+              ),
+              if (ota.isNotEmpty && ota != 'done' && ota != 'failed') ...[
+                const SizedBox(width: 6),
+                Tag('${n.ota['pct'] ?? ''}%', icon: Ph.arrowsClockwise, color: C.accent),
+              ],
+              if (n.raw['lost'] == true) ...[const SizedBox(width: 6), const Tag('Lost', icon: Ph.warning, color: C.red)],
             ],
           ),
         ],

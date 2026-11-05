@@ -100,6 +100,7 @@ Widget linkEmpty(BuildContext context, String title, String body, {IconData icon
   );
 }
 
+/// The overview as one printed strip: six readouts in a row, the last 24 hours under them.
 class _Overview extends StatelessWidget {
   const _Overview(this.m);
   final Model m;
@@ -107,97 +108,33 @@ class _Overview extends StatelessWidget {
   Widget build(BuildContext context) {
     final live = m.targets.values.where((t) => m.now - t.last < targetLiveS).length;
     final allUp = m.nodesOnline == m.nodes.length && m.nodes.isNotEmpty;
-    Widget cell(Widget w, {bool right = true, bool bottom = true}) => Container(
-      decoration: BoxDecoration(
-        border: Border(
-          right: right ? const BorderSide(color: C.silkLine) : BorderSide.none,
-          bottom: bottom ? const BorderSide(color: C.silkLine) : BorderSide.none,
-        ),
-      ),
-      child: w,
-    );
     final hours = [for (final h in m.hourly) (h['c'] as num?)?.toInt() ?? 0];
-    return Column(
-      children: [
-        Panel(
-          padding: EdgeInsets.zero,
-          margin: const EdgeInsets.fromLTRB(16, 18, 16, 0),
-          child: Column(
-            children: [
-              IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child: cell(Stat('Nodes', '${m.nodesOnline}/${m.nodes.length}', icon: Ph.graph, color: m.nodes.isEmpty ? C.text : (allUp ? C.green : C.amber))),
-                    ),
-                    Expanded(
-                      child: cell(Stat('Devices now', '$live', icon: Ph.broadcast, sub: '${m.targets.length} in 10 min')),
-                    ),
-                    Expanded(
-                      child: cell(Stat('Drones', '${m.liveDrones}', icon: Ph.drone, color: m.liveDrones > 0 ? C.hot : C.text), right: false),
-                    ),
-                  ],
-                ),
-              ),
-              IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child: cell(Stat('Today', '${m.stats['day'] ?? 0}', icon: Ph.clock, sub: '${m.stats['total'] ?? 0} total'), bottom: false),
-                    ),
-                    Expanded(
-                      child: cell(
-                        Stat(
-                          m.muteAll ? 'Silenced' : 'Alerts',
-                          '${m.alertsUnacked}',
-                          icon: m.muteAll ? Ph.speakerSlash : Ph.bell,
-                          color: m.alertsUnacked > 0 ? C.hot : C.text,
-                        ),
-                        bottom: false,
-                      ),
-                    ),
-                    Expanded(child: cell(Stat('Known MACs', '${m.stats['macs'] ?? 0}', icon: Ph.fingerprint), right: false, bottom: false)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-        Panel(
-          margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-          padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Text('DETECTIONS · LAST 24 H', style: T.silk),
-                  const Spacer(),
-                  Text(
-                    '${hours.fold(0, (a, b) => a + b)}',
-                    style: T.code.copyWith(color: C.text, fontWeight: FontWeight.w600),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                height: 46,
+    return ReadoutStrip(
+      [
+        ('Nodes', '${m.nodesOnline}/${m.nodes.length}', m.nodes.isEmpty ? C.text : (allUp ? C.green : C.amber)),
+        ('Now', '$live', C.text),
+        ('Drones', '${m.liveDrones}', m.liveDrones > 0 ? C.hot : C.text),
+        ('Today', '${m.stats['day'] ?? 0}', C.text),
+        (m.muteAll ? 'Silent' : 'Alerts', '${m.alertsUnacked}', m.alertsUnacked > 0 ? C.hot : C.text),
+        ('MACs', '${m.stats['macs'] ?? 0}', C.text),
+      ],
+      footer: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+        child: Row(
+          children: [
+            Text('24H', style: T.silk.copyWith(fontSize: 9)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: SizedBox(
+                height: 18,
                 child: CustomPaint(painter: _Bars(hours), size: Size.infinite),
               ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Text('-24H', style: T.silk),
-                  const Spacer(),
-                  Text('NOW', style: T.silk),
-                ],
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 8),
+            Text('${hours.fold(0, (a, b) => a + b)}', style: T.code.copyWith(fontSize: 11, color: C.soft)),
+          ],
         ),
-      ],
+      ),
     );
   }
 }

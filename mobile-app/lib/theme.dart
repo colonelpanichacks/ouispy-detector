@@ -668,3 +668,44 @@ class ActionStrip extends StatelessWidget {
     ),
   );
 }
+
+/// Readouts in one printed row: number over a silk label, cells split by rules. The compact
+/// way to show a handful of counts (the feed's overview, the drones' KPIs).
+class ReadoutStrip extends StatelessWidget {
+  const ReadoutStrip(this.items, {super.key, this.footer, this.margin = const EdgeInsets.fromLTRB(16, 4, 16, 0)});
+  final List<(String, String, Color)> items;
+  final Widget? footer;
+  final EdgeInsets margin;
+  @override
+  Widget build(BuildContext context) => Panel(
+    margin: margin,
+    padding: EdgeInsets.zero,
+    child: Column(
+      children: [
+        Row(
+          children: [
+            for (final (i, (k, v, c)) in items.indexed) ...[
+              if (i > 0) Container(width: 1, height: 30, color: C.silkLine),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    children: [
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(v, maxLines: 1, style: T.num.copyWith(fontSize: 18, color: c)),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(k.toUpperCase(), maxLines: 1, overflow: TextOverflow.fade, softWrap: false, style: T.silk.copyWith(fontSize: 8.5, letterSpacing: 0.8)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (footer != null) ...[Container(height: 1, color: C.silkLine), footer!],
+      ],
+    ),
+  );
+}
