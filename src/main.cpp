@@ -25,6 +25,7 @@
 #include "devinfo.h"
 #include "rid.h"
 #include "wardrive.h"
+#include "crashlog.h"
 #include "gpsnode.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
@@ -1885,7 +1886,7 @@ static void noteResetReason() {
 #define STATUS_LEN_BASE 52   // first build; still accepted from older nodes
 #define STATUS_LEN 56        // + u8 keyFingerprint[4]
 // + u8 count, up to 8 neighbors x 5 bytes, then u8 alias length + alias
-#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX + 5)
+#define STATUS_MAX (STATUS_LEN + 1 + 8 * 5 + 1 + ALIAS_MAX + 5 + 14 + 4 * CRASH_BT)
 static String nodeAlias();
 static const char FW_BUILD[] = __DATE__ " " __TIME__;
 
@@ -2021,6 +2022,19 @@ static uint8_t buildStatus(uint8_t* d) {
     d[n++] = g_resetEnum;
     d[n++] = (uint8_t)g_resetRaw;
     put16(d, n, (uint16_t)min<uint32_t>(g_boots, 65535));
+    // Then the last crash, when it had one: 'C', pc, bad address, exception, core, boot
+    // it happened in (u16), backtrace depth, the backtrace (u32 each).
+    CrashInfo c;
+    if (crashlogLast(c)) {
+        d[n++] = 'C';
+        put32(d, n, c.pc);
+        put32(d, n, c.excvaddr);
+        d[n++] = c.exc;
+        d[n++] = c.core;
+        put16(d, n, (uint16_t)min<uint32_t>(c.boot, 65535));
+        d[n++] = c.n;
+        for (uint8_t i = 0; i < c.n; i++) put32(d, n, c.bt[i]);
+    }
     return n;
 }
 
@@ -2080,6 +2094,17 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
                 char t[64];
                 snprintf(t, sizeof t, ",\"rr\":\"%s\",\"rrc\":%u,\"boots\":%u", rr, raw, get16(d + r + 3));
                 aliasJson += t;
+                // its last crash: "crash":{"pc":"0x..","va":"0x..","exc":4,"core":0,"boot":12,"bt":"0x.. 0x.."}
+                uint16_t c = r + 5;
+                if (c + 14 <= len && d[c] == 'C' && d[c + 13] <= CRASH_BT && c + 14 + d[c + 13] * 4 <= len) {
+                    char cj[200];
+                    int w = snprintf(cj, sizeof cj, ",\"crash\":{\"pc\":\"0x%08lX\",\"va\":\"0x%08lX\",\"exc\":%u,\"core\":%u,\"boot\":%u,\"bt\":\"",
+                                     (unsigned long)get32(d + c + 1), (unsigned long)get32(d + c + 5), d[c + 9], d[c + 10], get16(d + c + 11));
+                    for (uint8_t i = 0; i < d[c + 13] && w < (int)sizeof cj - 14; i++)
+                        w += snprintf(cj + w, sizeof cj - w, "%s0x%08lX", i ? " " : "", (unsigned long)get32(d + c + 14 + i * 4));
+                    snprintf(cj + w, sizeof cj - w, "\"}");
+                    aliasJson += cj;
+                }
             }
         }
     }
@@ -2374,6 +2399,18 @@ static bool remoteConsoleCommand(const String& line) {
         return true;
     }
     if (verb == "reboot") { localReboot("reboot"); return true; }
+    if (verb == "crashtest") {   // a deliberate fault: checks the crash recorder end to end
+        Serial.println("OK crashtest: faulting now");
+        Serial.flush();
+        delay(50);
+        *(volatile uint32_t*)0 = 0;
+        return true;
+    }
+    if (verb == "crash") {
+        CrashInfo c;
+        Serial.println(crashlogLast(c) ? "OK crash " + crashlogText(c) : String("OK crash none"));
+        return true;
+    }
     if (verb == "wipe") {           // wipe NOW: this node, over USB
         if (arg[0] != "NOW") { Serial.println("ERR usage: wipe NOW  (erases everything; reflash over USB after)"); return true; }
         wipeNode("asked over USB");
@@ -7386,6 +7423,11 @@ void setup() {
     delay(250);
     noteResetReason();
     Serial.printf("[BOOT] reset reason %s (raw 0x%02X), boot %lu\n", g_resetReason, g_resetRaw, (unsigned long)g_boots);
+    crashlogBegin(g_boots);
+    {
+        CrashInfo c;
+        if (crashlogLast(c) && c.boot + 1 == g_boots) Serial.printf("[CRASH] %s\n", crashlogText(c).c_str());
+    }
 
     // Never let the WiFi driver persist radio settings to flash: the mesh's
     // LR protocol bit was surviving reboots there and leaking onto the AP.
