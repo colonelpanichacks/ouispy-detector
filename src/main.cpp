@@ -3005,15 +3005,14 @@ const PresetEntry PRESET_META[] = {
 const size_t PRESET_META_COUNT = sizeof(PRESET_META) / sizeof(PRESET_META[0]);
 
 // Axon body cameras (Body 3/4, Fleet dash, Taser 7/10).
-// Uses all five signal types: dedicated IEEE OUI 00:25:DF ("Axon
-// Enterprise, Inc."), Bluetooth SIG company ID 0x034D ("TASER
-// International, Inc." — Axon's earlier registered name), service
-// UUID 0xFC81 ("Axon Enterprise, Inc."), WiFi probe requests, and
-// WiFi beacons. All uniquely attributable.
+// Detection is the dedicated IEEE OUI 00:25:DF ("Axon Enterprise, Inc."), on
+// BLE, WiFi probes and WiFi beacons. The Bluetooth SIG company ID 0x034D
+// ("TASER International, Inc.") and service UUIDs 0xFC81 / 0xFE6B / 0xFE6C
+// are only supplementary: any advert can carry those bytes, and a CID alone
+// alerted on non-Axon devices. They ride along in a hit's info (cid, uuids),
+// where the app shows them as corroboration of an OUI match.
 const PresetEntry PRESET_AXON[] = {
     { FT_MAC_PREFIX,      "0025DF", "Axon Enterprise OUI (IEEE)" },
-    { FT_COMPANY_ID,      "034D",   "TASER International CID (Axon body cams)" },
-    { FT_SERVICE_UUID_16, "FC81",   "Axon Enterprise service UUID" },
     { FT_WIFI_PROBE,      "0025DF", "Axon body cam (WiFi probe)" },
     { FT_WIFI_BEACON,     "0025DF", "Axon AP beacon (WiFi)" },
 };
@@ -3082,12 +3081,10 @@ const PresetEntry PRESET_FLIPPER[] = {
 };
 const size_t PRESET_FLIPPER_COUNT = sizeof(PRESET_FLIPPER) / sizeof(PRESET_FLIPPER[0]);
 
-// Police and public-safety gear beyond the Axon / I-PRO presets: Axon's other
-// UUIDs, Motorola Solutions (radios, WatchGuard / V300 body cams), Vuzix HUDs,
+// Police and public-safety gear beyond the Axon / I-PRO presets (Axon's own
+// UUIDs are supplementary to its OUI, see PRESET_AXON): Motorola Solutions (radios, WatchGuard / V300 body cams), Vuzix HUDs,
 // and the body-cam, plate-reader and gunshot-sensor makers' own OUIs.
 const PresetEntry PRESET_POLICE[] = {
-    { FT_SERVICE_UUID_16, "FE6B", "Axon / TASER svc UUID" },
-    { FT_SERVICE_UUID_16, "FE6C", "Axon / TASER svc UUID" },
     { FT_COMPANY_ID,      "04EC", "Motorola Solutions CID (radios, body cams)" },
     { FT_SERVICE_UUID_16, "FD8E", "Motorola Solutions svc UUID" },
     { FT_SERVICE_UUID_16, "FE04", "Motorola Solutions svc UUID" },
