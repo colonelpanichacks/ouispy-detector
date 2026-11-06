@@ -44,6 +44,15 @@ struct Drone {
     double lat, lon, plat, plon;
     float altGeo, altBaro, height, speed, vspeed, dir, palt;
     uint8_t status, opLocType;
+    // the rest of Remote ID (wire extension)
+    uint8_t heightRef, hAcc, vAcc, bAcc, sAcc, tsAcc;
+    float fixTs;                       // seconds after the UTC hour, <0 unknown
+    uint8_t cls, catEU, classEU, opIdType;
+    uint16_t areaCount, areaRadius;
+    float areaCeil, areaFloor;
+    uint32_t sysTs;                    // seconds since 2019-01-01 UTC, 0 unknown
+    char id2[ODID_ID_SIZE + 1];        // a second Basic ID (another ID type), when sent
+    uint8_t idType2, authType;         // authType 0xFF: no authentication message seen
 };
 
 static Drone drones[RID_MAX];
@@ -72,16 +81,34 @@ static void merge(const uint8_t mac[6], int8_t rssi, uint8_t src, const ODID_UAS
         drones[slot].used = true;
         drones[slot].fresh = true;
         memcpy(drones[slot].mac, mac, 6);
+        drones[slot].fixTs = -1;
+        drones[slot].authType = 0xFF;
+        drones[slot].areaCeil = drones[slot].areaFloor = -1000;
     }
     Drone& d = drones[slot];
     d.rssi = rssi;
     d.src = src;
     d.seen = now;
     d.has |= has;
-    if (u.BasicIDValid[0]) {
-        strlcpy(d.id, u.BasicID[0].UASID, sizeof(d.id));
-        d.idType = u.BasicID[0].IDType;
-        d.uaType = u.BasicID[0].UAType;
+    // Basic ID: up to two (say a serial and a CAA registration), possibly one per advert.
+    // The serial is the main one; another ID type is kept beside it.
+    for (int b = 0; b < ODID_BASIC_ID_MAX_MESSAGES; b++) {
+        if (!u.BasicIDValid[b] || !u.BasicID[b].UASID[0]) continue;
+        const ODID_BasicID_data& bi = u.BasicID[b];
+        bool main = !(d.has & H_BASIC) || bi.IDType == d.idType || bi.IDType == ODID_IDTYPE_SERIAL_NUMBER;
+        if (main && (d.has & H_BASIC) && bi.IDType != d.idType && d.idType != ODID_IDTYPE_NONE) {
+            // a serial arriving after another ID type: the old one becomes the second
+            strlcpy(d.id2, d.id, sizeof(d.id2));
+            d.idType2 = d.idType;
+        }
+        if (main) {
+            strlcpy(d.id, bi.UASID, sizeof(d.id));
+            d.idType = bi.IDType;
+            d.uaType = bi.UAType;
+        } else {
+            strlcpy(d.id2, bi.UASID, sizeof(d.id2));
+            d.idType2 = bi.IDType;
+        }
     }
     if (u.LocationValid) {
         d.lat = u.Location.Latitude; d.lon = u.Location.Longitude;
@@ -89,12 +116,25 @@ static void merge(const uint8_t mac[6], int8_t rssi, uint8_t src, const ODID_UAS
         d.height = u.Location.Height; d.speed = u.Location.SpeedHorizontal;
         d.vspeed = u.Location.SpeedVertical; d.dir = u.Location.Direction;
         d.status = u.Location.Status;
+        d.heightRef = u.Location.HeightType;
+        d.hAcc = u.Location.HorizAccuracy; d.vAcc = u.Location.VertAccuracy;
+        d.bAcc = u.Location.BaroAccuracy; d.sAcc = u.Location.SpeedAccuracy;
+        d.tsAcc = u.Location.TSAccuracy;
+        d.fixTs = (u.Location.TimeStamp >= 0 && u.Location.TimeStamp <= 3600) ? u.Location.TimeStamp : -1;
     }
     if (u.SystemValid) {
         d.plat = u.System.OperatorLatitude; d.plon = u.System.OperatorLongitude;
         d.palt = u.System.OperatorAltitudeGeo; d.opLocType = u.System.OperatorLocationType;
+        d.cls = u.System.ClassificationType; d.catEU = u.System.CategoryEU; d.classEU = u.System.ClassEU;
+        d.areaCount = u.System.AreaCount; d.areaRadius = u.System.AreaRadius;
+        d.areaCeil = u.System.AreaCeiling; d.areaFloor = u.System.AreaFloor;
+        d.sysTs = u.System.Timestamp;
     }
-    if (u.OperatorIDValid) strlcpy(d.opId, u.OperatorID.OperatorId, sizeof(d.opId));
+    if (u.AuthValid[0]) d.authType = u.Auth[0].AuthType;
+    if (u.OperatorIDValid) {
+        strlcpy(d.opId, u.OperatorID.OperatorId, sizeof(d.opId));
+        d.opIdType = u.OperatorID.OperatorIdType;
+    }
     if (u.SelfIDValid) strlcpy(d.desc, u.SelfID.Desc, sizeof(d.desc));
     d.dirty = true;
     d.udirty = true;
@@ -155,6 +195,10 @@ void ridBleAdvert(const uint8_t* adv, int len, const uint8_t mac[6], int8_t rssi
 // id3 rssi1 src1 has1 mac6 lat4 lon4 (1e-7 deg) altGeo2 altBaro2 height2 (m)
 // speed2 (cm/s) vspeed2 (cm/s) dir2 (0.1 deg) status1 uaType1 idType1 opLoc1
 // plat4 plon4 palt2 id20 opId20 desc23                                  = 109
+// extension (RID_EXT_LEN): ver1 (=1) heightRef1 hAcc|vAcc<<4 1 bAcc|sAcc<<4 1
+// fixTs2 (0.1 s after the UTC hour, 0xFFFF unknown) tsAcc1 cls1 catEU|classEU<<4 1
+// areaCount2 areaRadius2 areaCeil2 areaFloor2 (m) sysTs4 opIdType1 idType2 1
+// authType1 (0xFF none) id2 20                                          = 44
 static void put16(uint8_t*& p, int32_t v) { *p++ = v & 0xFF; *p++ = (v >> 8) & 0xFF; }
 static void put32(uint8_t*& p, int32_t v) { put16(p, v & 0xFFFF); put16(p, (v >> 16) & 0xFFFF); }
 static int16_t get16(const uint8_t*& p) { int16_t v = (int16_t)(p[0] | (p[1] << 8)); p += 2; return v; }
@@ -176,6 +220,23 @@ static void encode(const Drone& d, const uint8_t selfId[3], uint8_t* b) {
     memcpy(p, d.id, strnlen(d.id, 20)); p += 20;
     memcpy(p, d.opId, strnlen(d.opId, 20)); p += 20;
     memcpy(p, d.desc, strnlen(d.desc, 23)); p += 23;
+    // extension
+    memset(p, 0, RID_EXT_LEN);
+    *p++ = 1;
+    *p++ = d.heightRef;
+    *p++ = (d.hAcc & 0x0F) | (d.vAcc << 4);
+    *p++ = (d.bAcc & 0x0F) | (d.sAcc << 4);
+    put16(p, d.fixTs < 0 ? 0xFFFF : (uint16_t)lroundf(d.fixTs * 10));
+    *p++ = d.tsAcc;
+    *p++ = d.cls;
+    *p++ = (d.catEU & 0x0F) | (d.classEU << 4);
+    put16(p, d.areaCount); put16(p, d.areaRadius);
+    put16(p, clamp16(d.areaCeil)); put16(p, clamp16(d.areaFloor));
+    put32(p, (int32_t)d.sysTs);
+    *p++ = d.opIdType;
+    *p++ = d.idType2;
+    *p++ = d.authType;
+    memcpy(p, d.id2, strnlen(d.id2, 20)); p += 20;
 }
 
 static void jsonStr(String& o, const char* s, int max) {
@@ -189,8 +250,9 @@ static void jsonStr(String& o, const char* s, int max) {
     o += '"';
 }
 
-// Decode a wire body and print it as one "RID {...}" line.
-static void printBody(const uint8_t* b) {
+// Decode a wire body ([len] bytes: 109, or with the extension) and print it as one
+// "RID {...}" line. Only what the drone actually said: unknown values are left out.
+static void printBody(const uint8_t* b, int len) {
     if (!isSerialConnected()) return;
     const uint8_t* p = b;
     char node[7]; snprintf(node, sizeof(node), "%02X%02X%02X", p[0], p[1], p[2]); p += 3;
@@ -222,13 +284,45 @@ static void printBody(const uint8_t* b) {
     }
     if (has & H_OP) { o += ",\"op\":"; jsonStr(o, opId, 20); }
     if (has & H_SELF) { o += ",\"desc\":"; jsonStr(o, desc, 23); }
+    const uint8_t* x = b + RID_BODY_LEN;
+    if (len >= RID_WIRE_LEN && x[0] == 1) {
+        x++;
+        uint8_t href = *x++, a1 = *x++, a2 = *x++;
+        uint16_t fts = (uint16_t)get16(x);
+        uint8_t tsAcc = *x++, cls = *x++, eu = *x++;
+        uint16_t acnt = (uint16_t)get16(x), arad = (uint16_t)get16(x);
+        int aceil = get16(x), aflr = get16(x);
+        uint32_t sts = (uint32_t)get32(x);
+        uint8_t opt = *x++, idt2 = *x++, auth = *x++;
+        const char* id2 = (const char*)x;
+        if (has & H_LOC) {
+            o += ",\"href\":"; o += href;
+            if (a1 & 0x0F) { o += ",\"hacc\":"; o += (a1 & 0x0F); }
+            if (a1 >> 4) { o += ",\"vacc\":"; o += (a1 >> 4); }
+            if (a2 & 0x0F) { o += ",\"bacc\":"; o += (a2 & 0x0F); }
+            if (a2 >> 4) { o += ",\"sacc\":"; o += (a2 >> 4); }
+            if (fts != 0xFFFF) { o += ",\"fts\":"; o += String(fts / 10.0f, 1); }
+            if (tsAcc) { o += ",\"tsacc\":"; o += tsAcc; }
+        }
+        if (has & H_SYS) {
+            o += ",\"cls\":"; o += cls;
+            if (cls == 1) { o += ",\"cat\":"; o += (eu & 0x0F); o += ",\"ecls\":"; o += (eu >> 4); }
+            if (acnt > 1 || arad) { o += ",\"acnt\":"; o += acnt; o += ",\"arad\":"; o += arad; }
+            if (aceil > -1000) { o += ",\"aceil\":"; o += aceil; }
+            if (aflr > -1000) { o += ",\"aflr\":"; o += aflr; }
+            if (sts) { o += ",\"sts\":"; o += (unsigned long)(sts + 1546300800UL); }
+        }
+        if (has & H_OP) { o += ",\"opt\":"; o += opt; }
+        if (id2[0]) { o += ",\"id2\":"; jsonStr(o, id2, 20); o += ",\"idt2\":"; o += idt2; }
+        if (auth != 0xFF) { o += ",\"auth\":"; o += auth; }
+    }
     o += '}';
     Serial.println(o);
 }
 
 void ridFromMesh(const uint8_t* body, int len) {
     if (len < RID_BODY_LEN) return;
-    printBody(body);
+    printBody(body, len);
     // another node's report of a drone we hear too: note it for the hold-back
     uint8_t self[3];
     meshSelfId(self);
@@ -251,13 +345,13 @@ void ridFromMesh(const uint8_t* body, int len) {
 // enough (the dashboard keeps the newest position).
 #define RID_COPIES 1              // the next report is only 400 ms behind
 #define RID_COPY_MS 150UL
-static uint8_t copyBody[RID_MAX][RID_BODY_LEN];
+static uint8_t copyBody[RID_MAX][RID_WIRE_LEN];
 static uint8_t copyLeft[RID_MAX];
 static uint32_t copyAt[RID_MAX];
 uint32_t ridLastSendMs = 0;   // a drone report went into the mesh queue (Sky-Spy hop logic)
 
 static void sendDrone(const uint8_t *body) {
-    meshSendDrone(body, RID_BODY_LEN);
+    meshSendDrone(body, RID_WIRE_LEN);
     ridLastSendMs = millis();
 }
 
@@ -299,20 +393,20 @@ void ridLoop() {
         portEXIT_CRITICAL(&ridMux);
         uint8_t selfId[3];
         meshSelfId(selfId);
-        if (usb && Serial.availableForWrite() >= 320) {   // a busy host: skip this one, never stall
-            uint8_t ub[RID_BODY_LEN];
+        if (usb && Serial.availableForWrite() >= 600) {   // a busy host: skip this one, never stall
+            uint8_t ub[RID_WIRE_LEN];
             encode(usnap, selfId, ub);
-            printBody(ub);
+            printBody(ub, RID_WIRE_LEN);
         }
         if (!go) continue;
         if (fresh) ridOnNewDrone();
-        uint8_t body[RID_BODY_LEN];
+        uint8_t body[RID_WIRE_LEN];
         encode(snap, selfId, body);
         sendDrone(body);
         portENTER_CRITICAL(&ridMux);
         drones[i].meshAt = now;
         portEXIT_CRITICAL(&ridMux);
-        memcpy(copyBody[i], body, RID_BODY_LEN);
+        memcpy(copyBody[i], body, RID_WIRE_LEN);
         copyLeft[i] = RID_COPIES;
         copyAt[i] = now + RID_COPY_MS;
     }

@@ -6,6 +6,12 @@
 #include <Arduino.h>
 
 #define RID_BODY_LEN 109   // mesh body after the 3-byte node id is included
+// The rest of what Remote ID says (height reference, accuracies, fix time, EU class,
+// operating area, a second ID, authentication), after the 109 bytes. It fills the same
+// sealed frame size (192), so it costs no airtime; a node with older firmware reads the
+// first 109 bytes and never sees it.
+#define RID_EXT_LEN  44
+#define RID_WIRE_LEN (RID_BODY_LEN + RID_EXT_LEN)
 
 // Producers (radio callbacks; heap-free).
 void ridWifiFrame(const uint8_t* frame, int len, int8_t rssi);
