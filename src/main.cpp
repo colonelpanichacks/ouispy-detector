@@ -27,6 +27,7 @@
 #include "wardrive.h"
 #include "crashlog.h"
 #include "gpsnode.h"
+#include "link.h"
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #if CONFIG_IDF_TARGET_ESP32
@@ -247,6 +248,9 @@ bool ridEnabled = true;   // drones are part of what's in the air
 #elif defined(GPS_NODE)
 #define FW_KIND_NAME "gps"
 bool ridEnabled = true;
+#elif defined(MESHLINK_NODE)
+#define FW_KIND_NAME "meshlink"   // the phone's node: Bluetooth + mesh, no scanning (link.h)
+bool ridEnabled = false;
 #else
 #define FW_KIND_NAME "detector"
 bool ridEnabled = false;
@@ -583,7 +587,7 @@ static void serialConsoleTick() {
 
     // A wardriver never sits in config mode, so it takes its mesh settings while scanning
     // (provisiondone then saves them and restarts).
-    bool wdSetup = wdOn() && (line.startsWith("mesh ") || line == "provisiondone");
+    bool wdSetup = (wdOn() || linkOn()) && (line.startsWith("mesh ") || line == "provisiondone");
     if (currentMode != CONFIG_MODE && !wdSetup) return;
 
     if (line.startsWith("mesh ")) {
@@ -1262,7 +1266,7 @@ void loadConfiguration() {
     preferences.begin("ouispy", true);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
-#if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE) && !defined(GPS_NODE)
+#if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE) && !defined(GPS_NODE) && !defined(MESHLINK_NODE)
     ridEnabled = preferences.getBool("rid", false);
 #endif
     targetFilters.clear();
@@ -1547,6 +1551,7 @@ static int filtersEditLive(LiveFilterOp op, const uint8_t* buf, uint16_t len, in
 static bool g_startedEmpty = false;
 
 static bool liveEditNeedsRestart() {
+    if (linkOn()) return false;   // never scans, so a filter list changes nothing
     if (currentMode == SCANNING_MODE && g_startedEmpty && !targetFilters.empty()) return true;
     if (currentMode != SCANNING_MODE || pBLEScan) return false;
     for (const TargetFilter& f : targetFilters) {
@@ -2002,6 +2007,8 @@ static uint8_t buildStatus(uint8_t* d) {
         o[14] = 'W';    // a wardriver
 #elif defined(GPS_NODE)
         o[14] = 'G';    // a GPS node
+#elif defined(MESHLINK_NODE)
+        o[14] = 'L';    // a mesh link (the phone's node)
 #endif
     }
     n += 16;
@@ -2168,7 +2175,7 @@ static void remoteMgmtTick() {
     static uint32_t topoAt = 15000;
     if (meshCfg.enabled && currentMode == SCANNING_MODE && !meshOtaBusy() && (int32_t)(now - topoAt) >= 0) {
         topoAt = now + 20000 + random(0, 5000);
-        if (meshCfg.home && isSerialConnected()) {
+        if ((meshCfg.home || linkOn()) && isSerialConnected()) {   // the phone sees its own node too
             uint8_t d[STATUS_MAX];
             char id[7];
             meshSelfIdHex(id);
@@ -2369,7 +2376,8 @@ static bool remoteConsoleCommand(const String& line) {
         Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
         return true;
     }
-    if (wdConsole(verb, rest)) return true;   // wd, wd on|off, wd raw on|off, wd ch ...
+    if (wdConsole(verb, rest)) return true;
+    if (linkConsole(verb, rest)) return true;   // blepin, blebonds, link (mesh link only)   // wd, wd on|off, wd raw on|off, wd ch ...
     if (verb == "rid") {            // rid on|off: drone Remote ID (keeps WiFi + BLE scanning)
 #ifdef SKYSPY_NODE
         Serial.println("OK rid on (always on in a Sky-Spy node)");
@@ -3565,6 +3573,9 @@ static void scanDomains(bool& wifi, bool& ble) {
     wifi = false;
     ble = true;
 #endif
+    // A mesh link scans nothing, whatever filters it is sent: its radio is the mesh's
+    // and the phone's.
+    if (linkOn()) wifi = ble = false;
 }
 
 #ifdef SKYSPY_NODE
@@ -3627,6 +3638,7 @@ static bool scan_init() {
     scanDomains(hasWifiFilters, hasBleFilters);
 
     // (c) BLE init — MUST happen before WiFi mode is set to STA/promiscuous
+    if (linkOn()) linkBegin();   // the phone's Bluetooth link (no scanner)
     if (hasBleFilters) {
         NimBLEDevice::init("");
         delay(1000);
@@ -7597,6 +7609,10 @@ void setup() {
         }
     }
     
+#ifdef MESHLINK_NODE
+    meshCfg.enabled = true;   // a mesh link is always a remote on the mesh (see below)
+    meshCfg.home = false;
+#endif
     if (configLocked) {
         Serial.println("======================================");
         Serial.println("CONFIGURATION LOCKED (BURNED IN)");
@@ -7606,6 +7622,14 @@ void setup() {
         
         // Start scanning immediately
         startScanningMode();
+#ifdef MESHLINK_NODE
+    } else if (true) {
+        // A mesh link needs no setup either: always on the mesh, as a remote (it moves
+        // with the phone; a home would pull the fleet onto its channel), heals onto the
+        // fleet's channel by itself. Channel and fleet key still come over serial.
+        Serial.println("MESH LINK: Bluetooth + mesh, no scanning");
+        startScanningMode();
+#endif
     } else if (wdOn()) {
         // A wardriver needs no setup: it scans as soon as it is plugged in. (Its mesh
         // settings and fleet key, when given over serial, still apply.)
