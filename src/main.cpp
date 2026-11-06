@@ -7847,6 +7847,15 @@ void loop() {
                 meshTick();
                 remoteMgmtTick();
                 serialConsoleTick();
+                meshLinkLedTick();
+                // telemetry like any scanning node: a host (the dashboard, or the phone
+                // on a mesh link) counts a node as up only while its TLM keeps coming
+                static unsigned long reliefTlm = 0;
+                if (currentMillis - reliefTlm >= 5000) {
+                    reliefTlm = currentMillis;
+                    emitTelemetry();
+                }
+                delay(1);
             } else {
                 scan_exit();
                 delay(100);

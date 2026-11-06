@@ -34,6 +34,37 @@ static volatile bool secured = false, subscribed = false;
 static volatile uint16_t mtu = 23;
 static uint32_t pin = 0;
 
+// Every step of a phone's connection on USB, for when one won't come up.
+static int gapLog(struct ble_gap_event* e, void*) {
+    switch (e->type) {
+        case BLE_GAP_EVENT_CONNECT:
+            Serial.printf("[LINK] connect status=%d\n", e->connect.status);
+            break;
+        case BLE_GAP_EVENT_DISCONNECT:
+            Serial.printf("[LINK] disconnect reason=0x%03X\n", e->disconnect.reason);
+            break;
+        case BLE_GAP_EVENT_ENC_CHANGE:
+            Serial.printf("[LINK] encryption status=%d\n", e->enc_change.status);
+            break;
+        case BLE_GAP_EVENT_PASSKEY_ACTION:
+            Serial.printf("[LINK] passkey action=%d\n", e->passkey.params.action);
+            break;
+        case BLE_GAP_EVENT_REPEAT_PAIRING:
+            Serial.println("[LINK] phone paired again (old bond replaced)");
+            break;
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            Serial.printf("[LINK] conn params status=%d\n", e->conn_update.status);
+            break;
+        case BLE_GAP_EVENT_SUBSCRIBE:
+            Serial.printf("[LINK] subscribe notify=%d\n", e->subscribe.cur_notify);
+            break;
+        case BLE_GAP_EVENT_MTU:
+            Serial.printf("[LINK] mtu %d\n", e->mtu.value);
+            break;
+    }
+    return 0;
+}
+
 static bool phoneReady() { return connHandle != BLE_HS_CONN_HANDLE_NONE && secured && subscribed; }
 bool linkPhone() { return phoneReady(); }
 
@@ -115,6 +146,8 @@ class ServerCB : public NimBLEServerCallbacks {
     void onMTUChange(uint16_t m, ble_gap_conn_desc*) override { mtu = m; }
     void onAuthenticationComplete(ble_gap_conn_desc* d) override {
         secured = d->sec_state.encrypted && d->sec_state.authenticated;
+        Serial.printf("[LINK] paired: encrypted=%d authenticated=%d bonded=%d\n", d->sec_state.encrypted,
+                      d->sec_state.authenticated, d->sec_state.bonded);
         if (!secured) NimBLEDevice::getServer()->disconnect(d->conn_handle);
     }
     uint32_t onPassKeyRequest() override { return pin; }
@@ -168,6 +201,7 @@ void linkBegin() {
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);   // the phone types our PIN
     NimBLEDevice::setSecurityPasskey(pin);
 
+    NimBLEDevice::setCustomGapHandler(gapLog);
     NimBLEServer* s = NimBLEDevice::createServer();
     s->setCallbacks(new ServerCB());
     s->advertiseOnDisconnect(true);
