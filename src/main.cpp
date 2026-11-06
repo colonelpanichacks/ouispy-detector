@@ -204,6 +204,8 @@ static volatile uint8_t detQueueCount = 0;  // entries currently queued
 // Persistent settings
 bool buzzerEnabled = true;
 bool ledEnabled = true;
+// The power-on fanfare and the ready jingle (the buzzer stays on for alerts): "audio b l boot"
+bool bootSound = true;
 // Device tracking
 struct DeviceInfo {
     String macAddress;
@@ -1117,7 +1119,7 @@ void playBoot() {
     const uint16_t freq[] = {523, 659, 784, 1047};
     const uint16_t dur[]  = {80, 80, 110, 230};
     for (int i = 0; i < 4; i++) {
-        if (buzzerEnabled) {
+        if (buzzerEnabled && bootSound) {
             ledcSetup(0, freq[i], 8);
             ledcWrite(0, BUZZER_DUTY);
         }
@@ -1232,6 +1234,7 @@ void saveConfiguration() {
     preferences.begin("ouispy", false);
     preferences.putBool("buzzerEnabled", buzzerEnabled);
     preferences.putBool("ledEnabled", ledEnabled);
+    preferences.putBool("bootSound", bootSound);
 
     const uint16_t cap = FILTER_MAX * (4 + 16 + 48);
     uint8_t* buf = (uint8_t*)malloc(cap);
@@ -1266,6 +1269,7 @@ void loadConfiguration() {
     preferences.begin("ouispy", true);
     buzzerEnabled = preferences.getBool("buzzerEnabled", true);
     ledEnabled = preferences.getBool("ledEnabled", true);
+    bootSound = preferences.getBool("bootSound", true);
 #if !defined(SKYSPY_NODE) && !defined(WARDRIVE_NODE) && !defined(GPS_NODE) && !defined(MESHLINK_NODE)
     ridEnabled = preferences.getBool("rid", false);
 #endif
@@ -1644,14 +1648,17 @@ void meshApplyCommand(uint8_t cmd, uint16_t cmdId, const uint8_t* payload, uint1
         if (len < 2) { meshSendAck(cmd, cmdId, 1, 0); return; }
         bool b = payload[0] != 0;
         bool l = payload[1] != 0;
-        bool changed = (buzzerEnabled != b) || (ledEnabled != l);
+        // a third byte: the boot sound (0 off, 1 on); older homes send two, which keeps it
+        bool bs = len >= 3 ? payload[2] != 0 : bootSound;
+        bool changed = (buzzerEnabled != b) || (ledEnabled != l) || (bootSound != bs);
         buzzerEnabled = b;
         ledEnabled = l;
+        bootSound = bs;
         saveConfiguration();   // mute survives reboots
         if (isSerialConnected()) {
-            Serial.printf("[MESH] audio %s by home (buzzer %s, LED %s)\n",
+            Serial.printf("[MESH] audio %s by home (buzzer %s, LED %s, boot sound %s)\n",
                           changed ? "changed" : "confirmed",
-                          buzzerEnabled ? "on" : "MUTED", ledEnabled ? "on" : "off");
+                          buzzerEnabled ? "on" : "MUTED", ledEnabled ? "on" : "off", bootSound ? "on" : "off");
         }
         meshSendAck(cmd, cmdId, 0, 0);
         break;
@@ -1974,7 +1981,8 @@ static uint8_t buildStatus(uint8_t* d) {
     d[n++] = meshCfg.channel;
     d[n++] = (buzzerEnabled ? 1 : 0) | (ledEnabled ? 2 : 0) | (meshKeySet() ? 4 : 0) |
              (locked ? 8 : 0) | (mqttCfg.enabled ? 16 : 0) |
-             ((meshCfg.enabled && meshHealing()) ? 32 : 0);
+             ((meshCfg.enabled && meshHealing()) ? 32 : 0) |
+             (bootSound ? 0 : 64);   // set = boot sound off (older nodes, always on, send 0)
     d[n++] = meshCfg.enabled ? meshNodeCount() : 0;
     d[n++] = (uint8_t)(meshCfg.enabled ? meshLinkRssi() : 0);
     d[n++] = 0;
@@ -2118,11 +2126,11 @@ static void printStatusLine(const char* id, const uint8_t* d, uint8_t len) {
         }
     }
     Serial.printf("RST {\"node\":\"%s\",\"role\":\"%s\",\"mode\":\"%s\",\"ch\":%u,"
-                  "\"buzzer\":%d,\"led\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
+                  "\"buzzer\":%d,\"led\":%d,\"boot\":%d,\"key\":%d,\"locked\":%d,\"mqtt\":%d,\"heal\":%d,"
                   "\"peers\":%u,\"lrssi\":%d,\"filters\":%u,\"fcrc\":\"%08lX\",\"up\":%lu,"
                   "\"heap\":%lu,\"dev\":%u,\"dsent\":%lu,\"dacked\":%lu,\"dexp\":%lu,\"fw\":\"%s\"%s%s%s}\n",
                   id, d[1] ? "home" : "remote", d[2] ? "scan" : "config", d[3],
-                  (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
+                  (f & 1) ? 1 : 0, (f & 2) ? 1 : 0, (f & 64) ? 0 : 1, (f & 4) ? 1 : 0, (f & 8) ? 1 : 0,
                   (f & 16) ? 1 : 0, (f & 32) ? 1 : 0, d[5], (int)(int8_t)d[6],
                   get16(d + 8), (unsigned long)get32(d + 10), (unsigned long)get32(d + 14),
                   (unsigned long)get32(d + 18), get16(d + 22), (unsigned long)get32(d + 24),
@@ -2368,12 +2376,13 @@ static bool remoteConsoleCommand(const String& line) {
         free(buf);
         return true;
     }
-    if (verb == "audio") {          // local: audio <buzzer 0|1> <led 0|1>
-        if (arg[0].length() == 0 || arg[1].length() == 0) { Serial.println("ERR usage: audio <0|1> <0|1>"); return true; }
+    if (verb == "audio") {          // local: audio <buzzer 0|1> <led 0|1> [boot sound 0|1]
+        if (arg[0].length() == 0 || arg[1].length() == 0) { Serial.println("ERR usage: audio <0|1> <0|1> [boot 0|1]"); return true; }
         buzzerEnabled = arg[0].toInt() != 0;
         ledEnabled = arg[1].toInt() != 0;
+        if (arg[2].length()) bootSound = arg[2].toInt() != 0;
         saveConfiguration();
-        Serial.printf("OK audio buzzer=%d led=%d\n", buzzerEnabled, ledEnabled);
+        Serial.printf("OK audio buzzer=%d led=%d boot=%d\n", buzzerEnabled, ledEnabled, bootSound);
         return true;
     }
     if (wdConsole(verb, rest)) return true;
@@ -2455,9 +2464,10 @@ static bool remoteConsoleCommand(const String& line) {
         } else if (verb == "rreboot") {
             sendMgmt("rreboot", t, all, MESH_CMD_REBOOT, nullptr, 0);
         } else if (verb == "raudio") {
-            if (arg[1].length() == 0 || arg[2].length() == 0) { Serial.println("ERR usage: raudio <target> <0|1> <0|1>"); return true; }
-            uint8_t p[2] = { (uint8_t)(arg[1].toInt() != 0), (uint8_t)(arg[2].toInt() != 0) };
-            sendMgmt("raudio", t, all, MESH_CMD_AUDIO, p, 2);
+            if (arg[1].length() == 0 || arg[2].length() == 0) { Serial.println("ERR usage: raudio <target> <0|1> <0|1> [boot 0|1]"); return true; }
+            // the boot sound byte only when given: without it a node keeps its own
+            uint8_t p[3] = { (uint8_t)(arg[1].toInt() != 0), (uint8_t)(arg[2].toInt() != 0), (uint8_t)(arg[3].toInt() != 0) };
+            sendMgmt("raudio", t, all, MESH_CMD_AUDIO, p, arg[3].length() ? 3 : 2);
         } else if (verb == "rident") {
             int secs = arg[1].length() ? arg[1].toInt() : 10;
             uint8_t p[2] = { (uint8_t)constrain(secs, 1, 120), (uint8_t)(arg[2].length() ? arg[2].toInt() : 3) };
@@ -7407,7 +7417,7 @@ void startScanningMode() {
     // up: the moment the final power-up note ends, the first sweep starts.
     // The fanfare already played once at power-on — it does not repeat here.
     delay(200);
-    ascendingBeeps();
+    if (bootSound) ascendingBeeps();
 
     // Transition to the appropriate initial phase
     g_phaseStartTime = millis();
@@ -7436,6 +7446,13 @@ void setup() {
     // rest of the board wakes up. The Mario "ready" pair still plays at the
     // END of startScanningMode — after all checks — as the truthful signal.
     initializeBuzzer();
+    {
+        Preferences p;   // playBoot runs before the config loads: just the two flags it needs
+        p.begin("ouispy", true);
+        buzzerEnabled = p.getBool("buzzerEnabled", true);
+        bootSound = p.getBool("bootSound", true);
+        p.end();
+    }
     playBoot();
     gpsNodeBegin();   // GPS node only: screen, GPS, card (a no-op otherwise)
 
