@@ -703,7 +703,14 @@ static bool encReady = false;
 static uint32_t encDropPlain = 0, encDropAuth = 0, encDropReplay = 0;
 // Replay window per sender: highest (boot, ctr) seen + a 32-frame bitmap
 // for frames that arrive slightly out of order (relays, repeat copies).
-struct MeshReplay { uint8_t id[3]; uint16_t boot; uint32_t top; uint32_t bits; uint32_t ts; };
+struct MeshReplay { uint8_t id[3]; uint16_t boot; uint32_t top; uint32_t bits; uint32_t ts; uint32_t ok; };
+// A sender with nothing accepted for this long starts a fresh window: it was
+// reflashed or reset and its boot counter may have gone back (a wiped NVS
+// draws a random one, older half the time). Rejected frames kept its slot
+// warm, so it was refused until this node rebooted (the home dropped a Recon
+// for 16 h, 72k "replays"). A live sender keeps its window: its old frames
+// are still refused.
+#define REPLAY_RESET_MS 120000UL
 static MeshReplay replayWin[12];
 
 static void encSetup() {
@@ -766,21 +773,28 @@ static bool replayFresh(const uint8_t* id, uint16_t boot, uint32_t ctr, uint32_t
         replayWin[slot].top = ctr;
         replayWin[slot].bits = 1;
         replayWin[slot].ts = now ? now : 1;
+        replayWin[slot].ok = now;
         return true;
     }
     MeshReplay& w = replayWin[slot];
     w.ts = now ? now : 1;
+    if (now - w.ok > REPLAY_RESET_MS) {                       // silent that long: start over
+        w.boot = boot; w.top = ctr; w.bits = 1; w.ok = now;
+        return true;
+    }
     if ((int16_t)(boot - w.boot) < 0) return false;          // an older boot session
-    if (boot != w.boot) { w.boot = boot; w.top = ctr; w.bits = 1; return true; }   // it rebooted
+    if (boot != w.boot) { w.boot = boot; w.top = ctr; w.bits = 1; w.ok = now; return true; }   // it rebooted
     if (ctr > w.top) {
         uint32_t shift = ctr - w.top;
         w.bits = (shift >= 32) ? 1 : ((w.bits << shift) | 1);
         w.top = ctr;
+        w.ok = now;
         return true;
     }
     uint32_t back = w.top - ctr;
     if (back >= 32 || (w.bits & (1UL << back))) return false;
     w.bits |= (1UL << back);
+    w.ok = now;
     return true;
 }
 
