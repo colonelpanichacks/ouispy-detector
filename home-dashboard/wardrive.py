@@ -168,12 +168,13 @@ class Wardrive:
                 if lat is not None:
                     db.execute("INSERT INTO wd_obs(ts, mac, kind, rssi, lat, lon, acc, session) VALUES(?,?,?,?,?,?,?,?)",
                                (ts, mac, kind, rssi, lat, lon, acc, sess))
-                out[(mac, kind)] = None
+                out[(mac, kind)] = rssi   # this sighting's signal: "rnow" below (a hunt follows it)
             db.commit()
             rows = [db.execute("SELECT * FROM wd_devices WHERE mac=? AND kind=?", k).fetchone() for k in out]
         # Small events: a Tab5 takes each WebSocket message whole into internal RAM, and
         # one batch of a busy drive can be hundreds of devices.
-        pub = [self._public(r, sess) for r in rows if r]
+        # rssi is the strongest heard (where it sits on the map); rnow this sighting's
+        pub = [{**self._public(r, sess), "rnow": out.get((r["mac"], r["kind"]))} for r in rows if r]
         for i in range(0, len(pub), 20):
             self.emit("wd", {"session": sess, "devices": pub[i:i + 20]})
 
